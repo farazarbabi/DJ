@@ -50,7 +50,7 @@ pip install -e ".[dev]"
 Optional:
 ```bash
 pip install -e ".[essentia]"   # better key detection
-pip install -e ".[clap]"       # CLAP embeddings for grouping (requires PyTorch)
+pip install -e ".[clap]"       # CLAP embeddings for grouping (requires PyTorch, ON by default when installed)
 ```
 
 Requires Python 3.10+. Windows (primary), macOS/Linux supported.
@@ -129,7 +129,7 @@ MP3, FLAC, AIFF, WAV, M4A
 |----------|--------|--------|
 | Energy | E1--E5 + confidence | Weighted composite: RMS, spectral centroid, flux, onset density, low-freq ratio |
 | Key | Camelot (e.g., 9A) + confidence | Chroma + Krumhansl-Schmuckler profiles. Optional Essentia EDMA backend |
-| BPM | Integer | Librosa beat tracking |
+| BPM | Integer | Native metadata (TBPM from Rekordbox/DJ software), fallback to librosa beat tracking |
 | Structure | e.g., 64H + confidence | Intro bars from onset energy envelope + flow type from energy variance |
 | Vibe | Label + continuous scores + confidence | Heuristic scoring from spectral features; all 8 scores preserved |
 | Vocals | V/NV + confidence | Multi-stage spectral analysis of harmonic component in 300--3000 Hz band |
@@ -369,7 +369,7 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 | Field | Default | Tunes |
 |-------|---------|-------|
 | `w_tags` / `w_dsp` / `w_embed` | 0.25 / 0.30 / 0.45 | Layer weights (with CLAP) |
-| `w_tags_no_embed` / `w_dsp_no_embed` | 0.60 / 0.40 | Layer weights (without CLAP) |
+| `w_tags_no_embed` / `w_dsp_no_embed` | 0.45 / 0.55 | Layer weights (without CLAP) |
 | `key_weight_by_vibe` | MEL:0.8 ... RAW:0.1 | Key importance per vibe |
 | `key_weight_vocal_boost` | 0.20 | Extra key weight when vocals present |
 | `bpm_soft_penalty_pct` | 0.04 | BPM penalty starts at 4% difference |
@@ -377,8 +377,9 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 | `bpm_penalty_weight` | 0.15 | Max BPM penalty contribution |
 | `linkage` | "average" | Clustering linkage method |
 | `vocal_confidence_threshold` | 0.5 | Only hard-split vocals above this confidence |
-| `target_group_size` | (1, 6) | Ideal group size range |
+| `target_group_size` | (2, 8) | Ideal group size range |
 | `min_group_size` / `max_group_size` | 1 / 20 | Hard group size limits (singletons allowed) |
+| `energy_group_max_spread` | 3 | Post-clustering energy validation: groups with >3 energy levels spread are force-split |
 | `bpm_group_max_spread_pct` | 0.06 | Post-clustering BPM validation: groups with >6% BPM spread are force-split |
 | `clap_pca_dims` | 64 | PCA dimensions for CLAP embeddings |
 | `new_group_distance_threshold` | 0.80 | Distance beyond which a new group is created |
@@ -394,7 +395,7 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 - **Structure**: assumes 4/4 time.
 - **Vibe**: heuristic, consistent but not always matching subjective judgment.
 - **Section detection**: energy-envelope based; abrupt style changes within a track may confuse boundaries.
-- **Grouping without CLAP**: tags + DSP only gives approximate perceptual similarity. CLAP significantly improves results.
+- **Grouping without CLAP**: tags + DSP only gives approximate perceptual similarity. CLAP significantly improves results. CLAP is on by default when installed; use `--no-clap` to disable.
 - **Hard links**: require same NTFS volume. Falls back to copy otherwise.
 
 ---
@@ -433,7 +434,7 @@ src/
     +-- review.py                 # Interactive group review
     +-- evaluation.py             # Evaluation framework for known pairs
     +-- features/
-    |   +-- dsp.py                # 10 curated DSP features + section-aware extraction
+    |   +-- dsp.py                # 21 DSP features + section-aware extraction
     |   +-- embeddings.py         # CLAP extraction + PCA (optional)
     |   +-- builder.py            # Tag encoding (continuous vibe, confidence-weighted) + cache
     |   +-- role.py               # Track role inference (TOOL/DRIVER/PEAK/RESET/BREAKDOWN/BRIDGE)

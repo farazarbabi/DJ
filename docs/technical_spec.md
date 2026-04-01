@@ -33,7 +33,7 @@ dj-tagger  (per-track audio analysis)  ->  dj-grouper (library grouping + recomm
 audio file
   -> librosa.load(sr=22050)
   -> HPSS separation (y_harmonic, y_percussive)
-  -> beat tracking (tempo, beat_frames)
+  -> BPM: native metadata (TBPM) if available, else beat tracking
   -> TrackAudio dataclass
        |
        |-> analyze_energy()     -> EnergyResult(level=1-5, confidence=0.85)
@@ -193,9 +193,9 @@ Key difference from v1: vibe encoding uses the continuous scores (8 floats) from
 
 **Confidence weighting**: when an analyzer reports low confidence, the corresponding tag dimensions are pushed toward neutral values (0.5 for ordinal, uniform for one-hot/continuous). This prevents low-confidence tags from creating misleading distances.
 
-#### Layer 2: DSP (10 curated features + section-aware extraction)
+#### Layer 2: DSP (21 features + section-aware extraction)
 
-Instead of the original 45-dim PCA-reduced approach, DSP now uses 10 curated features chosen to be orthogonal and interpretable:
+DSP uses 21 curated features chosen to be orthogonal and interpretable:
 
 | Feature | Source | Captures |
 |---------|--------|----------|
@@ -209,16 +209,18 @@ Instead of the original 45-dim PCA-reduced approach, DSP now uses 10 curated fea
 | rms_mean | mean RMS energy | Loudness |
 | chroma_strength | max chroma correlation | Tonal content |
 | tonal_stability | std of chroma over time | Harmonic consistency |
+| mfcc_1_mean -- mfcc_5_mean | mean of MFCCs 1--5 | Timbral fingerprint (5 dims) |
+| tonnetz_0_mean -- tonnetz_5_mean | mean of tonnetz features 0--5 | Harmonic network (6 dims) |
 
-All features are z-score normalized before distance computation.
+All features are percentile-rank normalized to [0, 1] across the library. Rank-transform guarantees full range usage for mastered electronic music where features cluster in tight bands.
 
 **Section-aware DSP**: features are extracted separately for each detected section (intro, groove, peak). This lets dj-grouper compare how two tracks' grooves sound, independent of their intros or breakdowns. Section-level features feed into the groove compatibility score in recommendations.
 
-**Distance metric**: cosine distance on the 10-dimensional feature vector.
+**Distance metric**: Euclidean distance on L2-normalized 21-dimensional feature vector. L2-normalized Euclidean preserves energy/intensity differences that cosine distance ignores.
 
-#### Layer 3: CLAP (optional, 64 dims after PCA)
+#### Layer 3: CLAP (default when installed, 64 dims after PCA)
 
-512-dim CLAP embeddings from `laion-clap`, PCA-reduced to 64 dims (fitted on the library). Captures perceptual "sounds like" similarity that spectral features miss.
+512-dim CLAP embeddings from `laion-clap`, PCA-reduced to 64 dims (fitted on the library). Captures perceptual "sounds like" similarity that spectral features miss. CLAP runs automatically when the `clap` extra is installed; use `--no-clap` to disable.
 
 ### Distance Computation
 
@@ -228,10 +230,12 @@ Each layer produces a distance in [0, 1], then blended:
 d = w_tags * d_tags + w_dsp * d_dsp [+ w_embed * d_embed]
 ```
 
+After computing raw blended distances, **contrast stretching** maps the observed 2nd--98th percentile range to [0, 1]. This amplifies meaningful differences between similar electronic tracks.
+
 | Layer | Metric | Weight (with CLAP) | Weight (no CLAP) |
 |-------|--------|--------------------|--------------------|
-| Tags | Custom (see sub-weights below) | 0.25 | 0.60 |
-| DSP | Cosine distance | 0.30 | 0.40 |
+| Tags | Custom (see sub-weights below) | 0.25 | 0.45 |
+| DSP | L2-normalized Euclidean | 0.30 | 0.55 |
 | CLAP | Cosine distance | 0.45 | -- |
 
 #### Tag Distance Sub-Weights
@@ -240,7 +244,7 @@ All sub-distances are normalized to [0, 1] before weighting:
 
 | Sub-distance | Weight | Metric | Notes |
 |---|---|---|---|
-| Energy | 0.25 | Absolute difference / 4 | |
+| Energy | 0.25 | `(abs_diff / 4) ^ 1.5` | Power 1.5 amplifies large energy gaps |
 | BPM | 0.30 | Non-linear: `d_bpm_raw^2.0` | Strongest differentiator; amplifies genre-boundary gaps |
 | Vibe | 0.20 | Euclidean on continuous scores | Smooth gradient across vibe space |
 | Key | 0.10 * vibe_conditional_weight | Circular (Camelot wheel) | Weight varies: MEL 0.8, RAW 0.1; +0.2 for vocals |
@@ -263,10 +267,11 @@ This prevents borderline tracks (faint vocal samples, vocal-like synths) from be
 2. Pairwise distance matrix per partition
 3. Apply feedback (multiplicative adjustments to distance matrix)
 4. Agglomerative clustering with **average linkage** (balances cohesion; less aggressive than complete, less permissive than single)
-5. Auto-threshold: sweep 30 candidate thresholds, minimize deviation from target group size (1, 6)
+5. Auto-threshold: sweep 30 candidate thresholds, minimize deviation from target group size (2, 8)
 6. Post-process: bisect groups larger than 20, re-number labels (singletons allowed, min_group_size = 1)
 7. Post-clustering BPM validation: groups with >6% BPM spread (`bpm_group_max_spread_pct = 0.06`) are force-split
-8. Assign stable group IDs (G001, G002, ...)
+8. Post-clustering energy validation: groups with >3 energy levels spread (`energy_group_max_spread = 3`) are force-split
+9. Assign stable group IDs (G001, G002, ...)
 
 ### Medoid
 
@@ -420,8 +425,8 @@ Stored in `outputs/feedback.csv`. Applied to the distance matrix before clusteri
 | `w_tags` | 0.25 | Tag layer weight (with CLAP) |
 | `w_dsp` | 0.30 | DSP layer weight (with CLAP) |
 | `w_embed` | 0.45 | CLAP layer weight |
-| `w_tags_no_embed` | 0.60 | Tag layer weight (no CLAP) |
-| `w_dsp_no_embed` | 0.40 | DSP layer weight (no CLAP) |
+| `w_tags_no_embed` | 0.45 | Tag layer weight (no CLAP) |
+| `w_dsp_no_embed` | 0.55 | DSP layer weight (no CLAP) |
 | `key_weight_by_vibe` | MEL:0.8, ACID:0.6, DEEP:0.4, ATM:0.3, HYPN:0.2, TRIB:0.2, DRK:0.15, RAW:0.1 | Key penalty weight per vibe |
 | `key_weight_vocal_boost` | 0.20 | Added to key weight when vocals present |
 | `bpm_hard_cutoff_pct` | 0.08 | 8% BPM difference = excluded |
@@ -430,7 +435,8 @@ Stored in `outputs/feedback.csv`. Applied to the distance matrix before clusteri
 | `linkage` | "average" | Agglomerative linkage method |
 | `min_group_size` | 1 | Minimum tracks per group (singletons allowed) |
 | `max_group_size` | 20 | Maximum tracks per group |
-| `target_group_size` | (1, 6) | Ideal group size for threshold tuning |
+| `target_group_size` | (2, 8) | Ideal group size for threshold tuning |
+| `energy_group_max_spread` | 3 | Post-clustering energy validation: force-split groups with >3 energy levels spread |
 | `bpm_group_max_spread_pct` | 0.06 | Post-clustering BPM validation: force-split groups with >6% spread |
 | `vocal_confidence_threshold` | 0.5 | Hard vocal partition above this |
 | `clap_pca_dims` | 64 | PCA dims for CLAP embeddings |

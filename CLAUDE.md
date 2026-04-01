@@ -41,9 +41,12 @@ dj-grouper depends on dj-tagger. Both are CLI entry points from one pyproject.to
 - **Tag format**: `E# | KEY | BPM | STRUCT | VIBE | VOC [| GID]` — backward-compatible parser handles v1 (no BPM) and v2
 - **Metadata**: written to COMMENT field via mutagen — both generic (for DJ software) and tagged (desc="DJTAGGER" for self-detection)
 - **Group folders**: hard-linked files on NTFS (zero extra space), fall back to copy
-- **Clustering**: agglomerative with average linkage, soft vocal partitioning (only split when vocal confidence > 0.5), post-clustering BPM validation (force-split groups with >6% BPM spread)
+- **BPM detection**: reads native TBPM from file metadata (Rekordbox/DJ software) before falling back to librosa beat tracking
+- **Clustering**: agglomerative with average linkage, soft vocal partitioning (only split when vocal confidence > 0.5), post-clustering BPM validation (force-split groups with >6% BPM spread), post-clustering energy validation (force-split groups with >3 energy levels spread), target group size (2, 8)
 - **Recommendations**: directional scoring (A→B ≠ B→A), DJ usability features, soft BPM penalty (4-8%), no recommendation modes — single similarity ranking
 - **Vibe**: internally continuous scores (8 floats), exported as argmax label. Used as continuous in distance computation.
+- **CLAP**: on by default when installed (opt-out with `--no-clap`). The old `--use-clap` flag is removed.
+- **DSP scaling**: percentile-rank normalized to [0,1] across the library (not z-score). Distance: L2-normalized Euclidean (not cosine). Contrast stretching maps 2nd-98th percentile to [0,1] after blending.
 - **Confidence**: every analyzer reports confidence (0-1). Low-confidence tags are softened toward neutral in feature encoding.
 
 ## Calibration-sensitive code
@@ -52,8 +55,8 @@ These files contain tunable thresholds that directly affect output quality. Chan
 
 - `src/dj_tagger/constants.py` — energy normalization ranges, structure detection, vocal detection thresholds
 - `src/dj_tagger/analyzers/vibe.py` — vibe scoring formulas (inline weights, not in constants)
-- `src/dj_grouper/config.py` — layer weights, tag sub-weights, BPM filtering, clustering params, group size targets
-- `src/dj_grouper/grouping/distance.py` — tag distance sub-weights (inline)
+- `src/dj_grouper/config.py` — layer weights (0.45/0.55 without CLAP, 0.25/0.30/0.45 with CLAP), tag sub-weights (energy d^1.5), BPM filtering, clustering params, group size targets
+- `src/dj_grouper/grouping/distance.py` — tag distance sub-weights (inline), contrast stretching (2nd-98th percentile), DSP L2-normalized Euclidean
 
 ## Common calibration issues
 
@@ -70,7 +73,7 @@ These files contain tunable thresholds that directly affect output quality. Chan
 - `conftest.py` provides fixtures: sine waves, noise, silence, chords, etc.
 - Tag format tests cover v1 legacy and v2 with BPM/GID
 - Distance/scoring tests use `_make_track()` helper that builds TrackFeatures from parameters
-- TrackFeatures DSP vector is 10 dimensions (curated features, not raw 45)
+- TrackFeatures DSP vector is 21 dimensions (10 curated spectral/rhythmic + 5 MFCCs + 6 tonnetz)
 
 ## File conventions
 
