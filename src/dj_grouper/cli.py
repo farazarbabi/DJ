@@ -43,7 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--write-tags", action="store_true", help="Write tags to file metadata")
     p_run.add_argument("--dry-run", action="store_true", help="Preview without writing anything")
     p_run.add_argument("--copy", action="store_true", help="Copy files instead of hard-linking")
-    p_run.add_argument("--use-clap", action="store_true", help="Use CLAP embeddings")
+    p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings")
     p_run.add_argument("--playlists", default=_DEFAULTS.playlists_dir, help="Playlists dir")
     p_run.add_argument("--csv", default=_DEFAULTS.groups_file)
     p_run.add_argument("--recommendations-csv", default=_DEFAULTS.recommendations_file)
@@ -55,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_extract = sub.add_parser("extract", help="Extract features for all tracks")
     p_extract.add_argument("--input", nargs="+", default=[_DEFAULTS.input_dir], help="Library paths (default: ./files)")
     p_extract.add_argument("-r", "--recursive", action="store_true")
-    p_extract.add_argument("--use-clap", action="store_true")
+    # CLAP runs during 'run' command, not 'extract' (extract only does DSP)
     p_extract.add_argument("--cache", default=_DEFAULTS.cache_file)
     p_extract.add_argument("--features-csv", default=None)
     p_extract.add_argument("--force", action="store_true", help="Regenerate features even if cache exists")
@@ -272,7 +272,7 @@ def _cmd_run(args) -> int:
     track_order = [t.path for t in tracks]
 
     clap_embeddings = None
-    if args.use_clap and is_clap_available():
+    if not args.no_clap and is_clap_available():
         print("  Extracting CLAP embeddings...")
         try:
             raw = extract_clap_embeddings(track_order)
