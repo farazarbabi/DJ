@@ -48,14 +48,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--csv", default=_DEFAULTS.groups_file)
     p_run.add_argument("--recommendations-csv", default=_DEFAULTS.recommendations_file)
     p_run.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_run.add_argument("--clap-cache", default=_DEFAULTS.clap_cache_file)
     p_run.add_argument("--feedback", default=_DEFAULTS.feedback_file)
-    p_run.add_argument("--force-extract", action="store_true", help="Regenerate features even if cache exists")
+    p_run.add_argument("--force-extract", action="store_true", help="Clear DSP cache + outputs, re-extract")
+    p_run.add_argument("--force-clap", action="store_true", help="Clear CLAP cache, re-extract embeddings")
+    p_run.add_argument("--clean", action="store_true", help="Delete all outputs and caches, then exit")
 
     # --- extract ---
     p_extract = sub.add_parser("extract", help="Extract features for all tracks")
     p_extract.add_argument("--input", nargs="+", default=[_DEFAULTS.input_dir], help="Library paths (default: ./files)")
     p_extract.add_argument("-r", "--recursive", action="store_true")
-    # CLAP runs during 'run' command, not 'extract' (extract only does DSP)
     p_extract.add_argument("--cache", default=_DEFAULTS.cache_file)
     p_extract.add_argument("--features-csv", default=None)
     p_extract.add_argument("--force", action="store_true", help="Regenerate features even if cache exists")
@@ -181,14 +183,18 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
 
 def _cmd_run(args) -> int:
     import numpy as np
+    import shutil
+    import tempfile
     from pathlib import Path
     from .scanner import scan_library
     from .features.builder import (
         RawCacheEntry, load_raw_cache, save_raw_cache,
-        build_features_from_raw, save_cache,
+        build_features_from_raw,
     )
     from .features.dsp import extract_dsp_features, extract_section_dsp
-    from .features.embeddings import is_clap_available, extract_clap_embeddings, fit_pca
+    from .features.embeddings import (
+        is_clap_available, extract_clap_incremental, fit_pca,
+    )
     from .grouping.distance import compute_distance_matrix
     from .grouping.clustering import cluster_tracks
     from .grouping.assignment import assign_group_ids, save_assignment
@@ -204,19 +210,49 @@ def _cmd_run(args) -> int:
     from .config import GrouperConfig
     from dj_tagger.audio import load_audio_features
     from dj_tagger.formats import format_tag
-    from dj_tagger.metadata import write_tag
+    from dj_tagger.metadata import read_existing_tag, write_tag
+    from dj_tagger.formats import parse_tag
     import os
 
     config = GrouperConfig()
-    Path(_DEFAULTS.output_dir).mkdir(parents=True, exist_ok=True)
+    out_dir = Path(_DEFAULTS.output_dir)
 
-    # ── Step 1: Incremental feature extraction ──
+    # ── Handle --clean ──
+    if args.clean:
+        if out_dir.exists():
+            shutil.rmtree(str(out_dir))
+            print(f"Cleaned {out_dir}/")
+        return 0
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Handle --force-extract: clear DSP cache + outputs (NOT clap cache) ──
+    if args.force_extract:
+        for f in [args.cache, args.cache.replace(".pkl", "_assignment.pkl")]:
+            if Path(f).exists():
+                Path(f).unlink()
+        for d in [args.output, args.playlists]:
+            if Path(d).exists():
+                shutil.rmtree(d)
+        for f in [args.csv, args.recommendations_csv]:
+            if Path(f).exists():
+                Path(f).unlink()
+        print("Cleared DSP cache and outputs (CLAP cache preserved)")
+
+    # ── Handle --force-clap: clear CLAP cache only ──
+    if args.force_clap:
+        clap_path = Path(args.clap_cache)
+        if clap_path.exists():
+            clap_path.unlink()
+        print("Cleared CLAP cache")
+
+    # ── Step 1: Incremental DSP extraction ──
     tracks = scan_library(args.input, args.recursive)
     if not tracks:
         print("No tracks found.")
         return 0
 
-    raw_cache = {} if args.force_extract else load_raw_cache(args.cache)
+    raw_cache = load_raw_cache(args.cache)
 
     n_cached = 0
     n_extracted = 0
@@ -227,7 +263,6 @@ def _cmd_run(args) -> int:
         mtime = os.path.getmtime(t.path)
         cached = raw_cache.get(t.path)
         if cached and cached.mtime == mtime:
-            # Reuse cached — but update TrackInfo from current tags
             cached.info = t
             n_cached += 1
             print(f"  [{i+1}/{len(tracks)}] {Path(t.path).name} [cached]")
@@ -238,17 +273,13 @@ def _cmd_run(args) -> int:
                 feats = extract_dsp_features(audio)
                 if t.bpm is None and audio.tempo > 0:
                     t.bpm = round(audio.tempo)
-                # Section analysis
                 section_map = analyze_sections(audio)
                 sec_dsp = extract_section_dsp(audio, section_map)
-                # Vibe scores + confidence
                 vibe_result = analyze_vibe(audio)
                 t.vibe_scores = vibe_result.scores
                 t.confidences["vibe"] = vibe_result.confidence
-                # Vocal confidence
                 vocal_result = analyze_vocal(audio)
                 t.confidences["vocal"] = vocal_result.confidence
-
                 raw_cache[t.path] = RawCacheEntry(
                     mtime=mtime, info=t, dsp=feats, section_dsp=sec_dsp,
                 )
@@ -259,7 +290,11 @@ def _cmd_run(args) -> int:
                 n_failed += 1
                 print(f" FAILED: {e}")
 
-    # Remove deleted files from cache
+        # Save cache periodically (every 20 tracks) for crash resilience
+        if (i + 1) % 20 == 0:
+            save_raw_cache(raw_cache, args.cache)
+
+    # Remove deleted files
     current_paths = {t.path for t in tracks}
     removed = [p for p in raw_cache if p not in current_paths]
     for p in removed:
@@ -268,22 +303,24 @@ def _cmd_run(args) -> int:
     save_raw_cache(raw_cache, args.cache)
     print(f"  {n_cached} cached, {n_extracted} extracted, {n_failed} failed, {len(removed)} removed")
 
-    # Rebuild PCA-reduced features from raw cache
+    # ── Step 1b: Incremental CLAP extraction (separate cache) ──
     track_order = [t.path for t in tracks]
-
     clap_embeddings = None
+
     if not args.no_clap and is_clap_available():
-        print("  Extracting CLAP embeddings...")
+        print("  CLAP embeddings (incremental)...")
         try:
-            raw = extract_clap_embeddings(track_order)
-            clap_embeddings, _ = fit_pca(raw, config.clap_pca_dims)
+            raw_clap = extract_clap_incremental(
+                track_order, args.clap_cache, force=args.force_clap,
+            )
+            clap_embeddings, _ = fit_pca(raw_clap, config.clap_pca_dims)
         except Exception as e:
             print(f"  CLAP failed: {e}")
 
     cache = build_features_from_raw(raw_cache, track_order, clap_embeddings, config)
     feature_tracks = cache.tracks
 
-    # ── Step 3: Cluster ──
+    # ── Step 2: Cluster ──
     print(f"\n[2/5] Clustering {len(feature_tracks)} tracks...")
     distance_matrix = compute_distance_matrix(feature_tracks, config)
 
@@ -296,52 +333,93 @@ def _cmd_run(args) -> int:
     assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
     save_assignment(assignment, args.cache.replace(".pkl", "_assignment.pkl"))
 
-    # ── Step 4: Groups ──
+    # ── Step 3: Groups ──
     print(f"\n[3/5] Groups:")
     for group in assignment.groups:
         print(f"  {group.folder_name}: {len(group.member_indices)} tracks")
 
-    # ── Step 5: Recommendations ──
+    # ── Step 4: Recommendations ──
     print(f"\n[4/5] Computing recommendations...")
     recommendations = compute_recommendations(feature_tracks, config)
 
-    # ── Step 6: Output ──
+    # ── Step 5: Output (atomic CSVs, clean folder recreation, incremental tags) ──
     print(f"\n[5/5] Writing output...")
-    export_groups_csv(feature_tracks, assignment, args.csv)
+
+    # Atomic CSV: write to temp, then rename
+    _atomic_write_csv(export_groups_csv, feature_tracks, assignment, args.csv)
     print(f"  {args.csv}")
 
-    export_recommendations_csv(recommendations, args.recommendations_csv)
+    _atomic_write_csv(export_recommendations_csv, recommendations, args.recommendations_csv)
     print(f"  {args.recommendations_csv}")
 
     if not args.dry_run:
+        # Clean and recreate group folders (hard links are instant)
+        if Path(args.output).exists():
+            shutil.rmtree(args.output)
         create_group_folders(
             feature_tracks, assignment, args.output,
             dry_run=False, use_copy=args.copy,
         )
         print(f"  {args.output}/")
 
+        # Incremental tag writing: skip files that already have the correct tag
         if args.write_tags:
+            n_written = 0
+            n_skipped = 0
             for group in assignment.groups:
                 for idx in group.member_indices:
                     tf = feature_tracks[idx]
                     info = tf.info
-                    tag = format_tag(
+                    new_tag = format_tag(
                         energy=info.energy, camelot=info.key, bpm=info.bpm,
                         structure=info.structure, vibe=info.vibe,
                         has_vocals=info.vocal == "V", group_id=group.group_id,
                     )
-                    write_tag(tf.path, tag, dry_run=False)
-            print(f"  Tags written to {len(feature_tracks)} files")
+                    existing = read_existing_tag(tf.path)
+                    if existing == new_tag:
+                        n_skipped += 1
+                    else:
+                        write_tag(tf.path, new_tag, dry_run=False)
+                        n_written += 1
+            print(f"  Tags: {n_written} written, {n_skipped} unchanged")
     else:
         print("  (dry run — no files modified)")
 
     if args.playlists:
+        # Clean and recreate playlists
+        if Path(args.playlists).exists():
+            shutil.rmtree(args.playlists)
         generate_group_playlists(feature_tracks, assignment, args.playlists)
         generate_recommendation_playlists(recommendations, args.playlists)
         print(f"  Playlists in {args.playlists}/")
 
     print("\nDone.")
     return 0
+
+
+def _atomic_write_csv(write_fn, *write_args):
+    """Write a CSV via temp file + rename for crash safety."""
+    import tempfile
+    from pathlib import Path
+
+    # The last positional arg is the output path
+    out_path = write_args[-1]
+    tmp_dir = str(Path(out_path).parent)
+    Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".csv.tmp")
+    import os
+    os.close(tmp_fd)
+    try:
+        write_fn(*write_args[:-1], tmp_path)
+        # Atomic rename (same filesystem)
+        if Path(out_path).exists():
+            Path(out_path).unlink()
+        Path(tmp_path).rename(out_path)
+    except Exception:
+        if Path(tmp_path).exists():
+            Path(tmp_path).unlink()
+        raise
 
 
 # ─── Individual subcommands ─────────────────────────────────────────────────
