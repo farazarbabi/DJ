@@ -30,8 +30,8 @@ def tag_distance(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> f
     """
     va, vb = a.tag_vector, b.tag_vector
 
-    # Energy distance: ordinal [0, 1]
-    d_energy = abs(float(va[0] - vb[0]))
+    # Energy distance: power 1.5 to amplify level differences
+    d_energy = abs(float(va[0] - vb[0])) ** 1.5
 
     # BPM distance: quadratic to amplify genre boundaries
     d_bpm_raw = abs(float(va[1] - vb[1]))
@@ -132,7 +132,12 @@ def compute_distance_matrix(
     tracks: list[TrackFeatures],
     config: GrouperConfig,
 ) -> NDArray[np.floating]:
-    """Compute the full pairwise distance matrix."""
+    """Compute the full pairwise distance matrix with contrast stretching.
+
+    After computing raw blended distances, applies contrast stretching so
+    the observed distance range maps to [0, 1]. This is critical for
+    electronic music where CLAP cosine similarities cluster in a narrow band.
+    """
     n = len(tracks)
     matrix = np.zeros((n, n), dtype=np.float32)
     for i in range(n):
@@ -140,5 +145,19 @@ def compute_distance_matrix(
             d = blended_distance(tracks[i], tracks[j], config)
             matrix[i, j] = d
             matrix[j, i] = d
+
+    # Contrast stretch: map observed range to [0, 1]
+    upper = matrix[np.triu_indices(n, k=1)]
+    if len(upper) > 0 and np.max(upper) > np.min(upper):
+        d_min = float(np.percentile(upper, 2))   # 2nd percentile (robust floor)
+        d_max = float(np.percentile(upper, 98))   # 98th percentile (robust ceiling)
+        if d_max > d_min:
+            matrix = np.clip((matrix - d_min) / (d_max - d_min), 0.0, 1.0)
+            np.fill_diagonal(matrix, 0.0)
+            logger.info(
+                "Distance matrix contrast stretched: raw [%.3f, %.3f] -> [0, 1]",
+                d_min, d_max,
+            )
+
     logger.info("Distance matrix computed: %dx%d", n, n)
     return matrix

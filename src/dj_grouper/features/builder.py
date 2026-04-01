@@ -94,6 +94,26 @@ class FeatureCache:
     version: str = "5.0"
 
 
+# ─── Scaling ─────────────────────────────────────────────────────────────────
+
+def _percentile_rank(matrix: NDArray) -> NDArray:
+    """Convert each column to percentile ranks in [0, 1].
+
+    For each feature, the track with the lowest value gets 0.0, highest gets 1.0,
+    and everything in between is linearly ranked. This guarantees the full [0, 1]
+    range is used regardless of how narrow the raw distribution is.
+    """
+    from scipy.stats import rankdata
+    n = matrix.shape[0]
+    if n <= 1:
+        return np.zeros_like(matrix)
+    ranked = np.zeros_like(matrix)
+    for col in range(matrix.shape[1]):
+        ranks = rankdata(matrix[:, col], method="average")
+        ranked[:, col] = (ranks - 1) / (n - 1)  # scale to [0, 1]
+    return ranked.astype(np.float32)
+
+
 # ─── Tag encoding ───────────────────────────────────────────────────────────
 
 def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
@@ -176,14 +196,17 @@ def build_features_from_raw(
     # Encode tags (with continuous vibe + confidence weighting)
     tag_vectors = np.array([encode_tags(info) for info in infos], dtype=np.float32)
 
-    # Build DSP matrix from curated features, z-score normalize
+    # Build DSP matrix from curated features, percentile rank scaling
+    # Percentile rank guarantees full [0, 1] spread regardless of how narrow
+    # the raw distribution is — critical for mastered electronic music where
+    # features cluster in a tight band.
     dsp_matrix = np.array(
         [[d.get(name, 0.0) for name in DSP_CURATED_NAMES] for d in dsp_dicts],
         dtype=np.float32,
     )
-    dsp_mean = np.mean(dsp_matrix, axis=0)
+    dsp_mean = np.mean(dsp_matrix, axis=0)  # kept for diagnostics
     dsp_std = np.std(dsp_matrix, axis=0) + 1e-8
-    dsp_normalized = (dsp_matrix - dsp_mean) / dsp_std
+    dsp_normalized = _percentile_rank(dsp_matrix)
 
     # Infer roles
     roles = [infer_role(info, dsp) for info, dsp in zip(infos, dsp_dicts)]
