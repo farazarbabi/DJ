@@ -92,35 +92,113 @@ def assign_group_ids(
     return assignment
 
 
-def assign_new_track(
-    new_track: TrackFeatures,
-    existing_tracks: list[TrackFeatures],
-    assignment: GroupAssignment,
+def assign_new_tracks(
+    all_tracks: list[TrackFeatures],
+    existing_assignment: GroupAssignment,
     config: GrouperConfig,
-) -> str:
-    """Assign a new track to the nearest existing group via nearest-medoid.
+) -> GroupAssignment:
+    """Assign new tracks to existing groups via nearest-medoid.
 
-    Returns the group_id, or creates a new group if too distant.
+    Tracks already in the assignment keep their group.
+    New tracks are assigned to the nearest medoid, or a new group is created.
+    Deleted tracks are removed.
+
+    Returns updated assignment.
     """
-    best_group = None
-    best_dist = float("inf")
+    known_paths = set(existing_assignment.track_to_group.keys())
+    current_paths = {t.path for t in all_tracks}
+    path_to_idx = {t.path: i for i, t in enumerate(all_tracks)}
 
+    new_paths = current_paths - known_paths
+    deleted_paths = known_paths - current_paths
+
+    if not new_paths and not deleted_paths:
+        logger.info("No changes — all %d tracks already assigned", len(all_tracks))
+        return existing_assignment
+
+    # Start from existing assignment
+    assignment = GroupAssignment(
+        groups=[g for g in existing_assignment.groups],
+        track_to_group=dict(existing_assignment.track_to_group),
+    )
+
+    # Remove deleted tracks
+    for path in deleted_paths:
+        gid = assignment.track_to_group.pop(path, None)
+        if gid:
+            for group in assignment.groups:
+                if group.group_id == gid:
+                    # We can't easily remove by old index, so we'll rebuild indices later
+                    break
+
+    # Assign new tracks
+    n_assigned = 0
+    n_new_groups = 0
+    for path in sorted(new_paths):
+        idx = path_to_idx[path]
+        new_track = all_tracks[idx]
+
+        best_group = None
+        best_dist = float("inf")
+
+        for group in assignment.groups:
+            if group.medoid_index < len(all_tracks):
+                medoid_track = all_tracks[group.medoid_index]
+                d = blended_distance(new_track, medoid_track, config)
+                if d < best_dist:
+                    best_dist = d
+                    best_group = group
+
+        if best_dist > config.new_group_distance_threshold or best_group is None:
+            next_id = max((int(g.group_id[1:]) for g in assignment.groups), default=0) + 1
+            new_gid = f"G{next_id:03d}"
+            info = new_track.info
+            vibe_abbr = (info.vibe or "UNK")[:3]
+            new_group = GroupInfo(
+                group_id=new_gid,
+                member_indices=[idx],
+                medoid_index=idx,
+                energy=info.energy or 3,
+                vibe=info.vibe or "HYPN",
+                bpm=info.bpm or 128,
+                structure=info.structure or "32H",
+                vocal=info.vocal or "NV",
+                folder_name=f"{new_gid}_E{info.energy or 3}{vibe_abbr}_{info.bpm or 128}_{info.structure or '32H'}",
+            )
+            assignment.groups.append(new_group)
+            assignment.track_to_group[path] = new_gid
+            n_new_groups += 1
+            logger.info("New group %s for %s (dist=%.3f)", new_gid, path, best_dist)
+        else:
+            assignment.track_to_group[path] = best_group.group_id
+            n_assigned += 1
+            logger.info("Assigned %s to %s (dist=%.3f)", path, best_group.group_id, best_dist)
+
+    # Rebuild member_indices for all groups based on current track list
+    gid_to_members: dict[str, list[int]] = {}
+    for path, gid in assignment.track_to_group.items():
+        if path in path_to_idx:
+            gid_to_members.setdefault(gid, []).append(path_to_idx[path])
+
+    # Update groups, remove empty ones
+    updated_groups = []
     for group in assignment.groups:
-        medoid_track = existing_tracks[group.medoid_index]
-        d = blended_distance(new_track, medoid_track, config)
-        if d < best_dist:
-            best_dist = d
-            best_group = group
+        members = gid_to_members.get(group.group_id, [])
+        if not members:
+            continue
+        group.member_indices = members
+        # Medoid: pick the first member if old medoid is invalid
+        if group.medoid_index not in members:
+            group.medoid_index = members[0]
+        updated_groups.append(group)
 
-    if best_dist > config.new_group_distance_threshold or best_group is None:
-        # Create new group
-        next_id = max(int(g.group_id[1:]) for g in assignment.groups) + 1 if assignment.groups else 1
-        new_gid = f"G{next_id:03d}"
-        logger.info("New track too distant (%.3f), creating group %s", best_dist, new_gid)
-        return new_gid
+    assignment.groups = updated_groups
 
-    logger.debug("Assigned new track to %s (distance=%.3f)", best_group.group_id, best_dist)
-    return best_group.group_id
+    logger.info(
+        "Incremental update: %d assigned to existing, %d new groups, %d deleted",
+        n_assigned, n_new_groups, len(deleted_paths),
+    )
+    return assignment
 
 
 def save_assignment(assignment: GroupAssignment, path: str) -> None:

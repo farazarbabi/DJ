@@ -52,6 +52,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--feedback", default=_DEFAULTS.feedback_file)
     p_run.add_argument("--force-extract", action="store_true", help="Clear DSP cache + outputs, re-extract")
     p_run.add_argument("--force-clap", action="store_true", help="Clear CLAP cache, re-extract embeddings")
+    p_run.add_argument("--rebuild", action="store_true", help="Force full re-clustering (ignore existing groups)")
     p_run.add_argument("--clean", action="store_true", help="Delete all outputs and caches, then exit")
 
     # --- extract ---
@@ -197,7 +198,9 @@ def _cmd_run(args) -> int:
     )
     from .grouping.distance import compute_distance_matrix
     from .grouping.clustering import cluster_tracks
-    from .grouping.assignment import assign_group_ids, save_assignment
+    from .grouping.assignment import (
+        assign_group_ids, save_assignment, load_assignment, assign_new_tracks,
+    )
     from dj_tagger.analyzers.sections import analyze_sections
     from dj_tagger.analyzers.vibe import analyze_vibe
     from dj_tagger.analyzers.vocal import analyze_vocal
@@ -320,18 +323,42 @@ def _cmd_run(args) -> int:
     cache = build_features_from_raw(raw_cache, track_order, clap_embeddings, config)
     feature_tracks = cache.tracks
 
-    # ── Step 2: Cluster ──
-    print(f"\n[2/5] Clustering {len(feature_tracks)} tracks...")
-    distance_matrix = compute_distance_matrix(feature_tracks, config)
+    # ── Step 2: Cluster or incrementally assign ──
+    assignment_path = args.cache.replace(".pkl", "_assignment.pkl")
+    existing_assignment = None
 
-    feedback = load_feedback(args.feedback)
-    if feedback:
-        distance_matrix = apply_feedback_to_distances(distance_matrix, feature_tracks, feedback, config)
+    if not args.rebuild and not args.force_extract and Path(assignment_path).exists():
+        try:
+            existing_assignment = load_assignment(assignment_path)
+        except Exception:
+            existing_assignment = None
 
-    labels = _cluster_with_soft_vocal(feature_tracks, distance_matrix, config)
+    if existing_assignment is not None:
+        # Incremental: assign new tracks to existing groups
+        known = set(existing_assignment.track_to_group.keys())
+        current = {t.path for t in feature_tracks}
+        n_new = len(current - known)
+        n_del = len(known - current)
 
-    assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
-    save_assignment(assignment, args.cache.replace(".pkl", "_assignment.pkl"))
+        if n_new == 0 and n_del == 0:
+            print(f"\n[2/5] All {len(feature_tracks)} tracks already grouped")
+            assignment = existing_assignment
+        else:
+            print(f"\n[2/5] Incremental grouping: {n_new} new, {n_del} removed...")
+            assignment = assign_new_tracks(feature_tracks, existing_assignment, config)
+    else:
+        # Full re-clustering
+        print(f"\n[2/5] Clustering {len(feature_tracks)} tracks...")
+        distance_matrix = compute_distance_matrix(feature_tracks, config)
+
+        feedback = load_feedback(args.feedback)
+        if feedback:
+            distance_matrix = apply_feedback_to_distances(distance_matrix, feature_tracks, feedback, config)
+
+        labels = _cluster_with_soft_vocal(feature_tracks, distance_matrix, config)
+        assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
+
+    save_assignment(assignment, assignment_path)
 
     # ── Step 3: Groups ──
     print(f"\n[3/5] Groups:")
