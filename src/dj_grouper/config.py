@@ -30,14 +30,14 @@ class GrouperConfig:
     bpm_soft_penalty_pct: float = 0.04  # penalty starts at 4%
     bpm_penalty_weight: float = 0.15    # max penalty contribution
     bpm_norm_range: tuple[float, float] = (100.0, 40.0)  # (min, range) -> 100-140 BPM
-    bpm_group_max_spread_pct: float = 0.06  # max BPM spread within a group (6%)
+    bpm_group_max_spread_pct: float = 0.07  # max BPM spread within a group (7%)
     energy_group_max_spread: int = 3        # max energy level spread within a group
 
     # --- Clustering ---
     linkage: str = "average"
-    min_group_size: int = 1      # allow singletons
+    min_group_size: int = 2      # merge singletons into nearest group
     max_group_size: int = 20
-    target_group_size: tuple[int, int] = (2, 8)
+    target_group_size: tuple[int, int] = (3, 10)
     vocal_confidence_threshold: float = 0.5
 
     # --- CLAP ---
