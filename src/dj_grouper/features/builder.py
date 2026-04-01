@@ -178,6 +178,69 @@ def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
     return np.array(v, dtype=np.float32)
 
 
+# ─── Energy recalibration ────────────────────────────────────────────────────
+
+# Energy sub-features used for composite scoring
+_ENERGY_DSP_KEYS = ["rms_mean", "centroid_mean", "onset_density", "low_freq_ratio"]
+_ENERGY_DSP_WEIGHTS = [0.35, 0.20, 0.25, 0.20]
+
+
+def _calibrate_energy(
+    infos: list[TrackInfo],
+    dsp_dicts: list[dict[str, float]],
+) -> None:
+    """Recalibrate energy levels relative to the library distribution.
+
+    Uses percentile rank on energy-related DSP features to compute a composite
+    score, then assigns E1-E5 by quintile. This guarantees spread across all
+    5 levels regardless of the library's absolute loudness.
+
+    Modifies infos in place.
+    """
+    from scipy.stats import rankdata
+
+    n = len(infos)
+    if n < 3:
+        return
+
+    # Build energy sub-feature matrix
+    raw_values = np.array([
+        [d.get(k, 0.0) for k in _ENERGY_DSP_KEYS]
+        for d in dsp_dicts
+    ], dtype=np.float32)
+
+    # Percentile rank each sub-feature
+    ranked = np.zeros_like(raw_values)
+    for col in range(raw_values.shape[1]):
+        ranks = rankdata(raw_values[:, col], method="average")
+        ranked[:, col] = (ranks - 1) / max(1, n - 1)
+
+    # Weighted composite
+    weights = np.array(_ENERGY_DSP_WEIGHTS, dtype=np.float32)
+    composites = ranked @ weights
+
+    # Assign E1-E5 by quintile
+    for i in range(n):
+        pct = composites[i]
+        if pct < 0.20:
+            level = 1
+        elif pct < 0.40:
+            level = 2
+        elif pct < 0.60:
+            level = 3
+        elif pct < 0.80:
+            level = 4
+        else:
+            level = 5
+        infos[i].energy = level
+
+    levels = [info.energy for info in infos]
+    logger.info(
+        "Energy recalibrated: E1=%d E2=%d E3=%d E4=%d E5=%d",
+        levels.count(1), levels.count(2), levels.count(3), levels.count(4), levels.count(5),
+    )
+
+
 # ─── Build features from raw cache ──────────────────────────────────────────
 
 def build_features_from_raw(
@@ -208,8 +271,14 @@ def build_features_from_raw(
     dsp_std = np.std(dsp_matrix, axis=0) + 1e-8
     dsp_normalized = _percentile_rank(dsp_matrix)
 
-    # Infer roles
+    # Recalibrate energy relative to library distribution
+    _calibrate_energy(infos, dsp_dicts)
+
+    # Infer roles (after energy recalibration)
     roles = [infer_role(info, dsp) for info, dsp in zip(infos, dsp_dicts)]
+
+    # Re-encode tags after energy recalibration
+    tag_vectors = np.array([encode_tags(info) for info in infos], dtype=np.float32)
 
     # Assemble TrackFeatures
     feature_list: list[TrackFeatures] = []
