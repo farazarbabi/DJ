@@ -94,6 +94,16 @@ def extract_dsp_features(track_audio: TrackAudio) -> dict[str, float]:
     else:
         features["tonal_stability"] = 0.0
 
+    # --- MFCCs 1-5 (timbral similarity — the single best feature for "sounds like") ---
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=6)
+    for i in range(1, 6):  # skip MFCC 0 (overall energy, redundant with RMS)
+        features[f"mfcc_{i}_mean"] = float(np.mean(mfcc[i]))
+
+    # --- Tonnetz (harmonic network — captures harmonic quality) ---
+    tonnetz = librosa.feature.tonnetz(y=y_h, sr=sr)
+    for i in range(6):
+        features[f"tonnetz_{i}_mean"] = float(np.mean(tonnetz[i]))
+
     return features
 
 
@@ -107,18 +117,35 @@ DSP_FEATURE_NAMES: list[str] = [
     "chroma_strength", "chroma_var", "tonal_stability",
 ]
 
-# Curated subset: 10 DJ-relevant features (no MFCCs, no noise dims)
+# Curated subset: 21 DJ-relevant features
 DSP_CURATED_NAMES: list[str] = [
+    # Rhythm / groove (3)
     "onset_density",        # groove density
     "beat_strength",        # kick presence
     "perc_harmonic_ratio",  # percussive vs melodic balance
+    # Timbre / texture (3)
     "centroid_mean",        # brightness / darkness
     "flatness_mean",        # noisiness / rawness
     "bandwidth_mean",       # spectral width
+    # Energy / bass (2)
     "low_freq_ratio",       # bass weight
     "rms_mean",             # loudness / energy
+    # Harmonic (2)
     "chroma_strength",      # tonality
     "tonal_stability",      # harmonic consistency
+    # MFCCs 1-5: timbral fingerprint (5)
+    "mfcc_1_mean",          # broad timbral shape
+    "mfcc_2_mean",          # timbral detail
+    "mfcc_3_mean",
+    "mfcc_4_mean",
+    "mfcc_5_mean",
+    # Tonnetz: harmonic network (6)
+    "tonnetz_0_mean",       # fifth relationship
+    "tonnetz_1_mean",       # minor third
+    "tonnetz_2_mean",       # major third
+    "tonnetz_3_mean",
+    "tonnetz_4_mean",
+    "tonnetz_5_mean",
 ]
 
 

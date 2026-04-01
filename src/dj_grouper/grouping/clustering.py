@@ -18,6 +18,7 @@ def cluster_tracks(
     distance_matrix: NDArray,
     config: GrouperConfig,
     bpms: list[int | None] | None = None,
+    energies: list[int | None] | None = None,
 ) -> NDArray[np.intp]:
     """Run agglomerative clustering and return labels.
 
@@ -25,6 +26,7 @@ def cluster_tracks(
         distance_matrix: pairwise distance matrix
         config: GrouperConfig
         bpms: optional list of BPM values per track (for BPM validation)
+        energies: optional list of energy levels per track (for energy validation)
     """
     n = distance_matrix.shape[0]
     if n <= 1:
@@ -39,6 +41,10 @@ def cluster_tracks(
     # BPM validation: split groups with too-wide BPM spread
     if bpms is not None:
         labels = _split_bpm_spread(labels, bpms, distance_matrix, config)
+
+    # Energy validation: split groups with too-wide energy spread
+    if energies is not None:
+        labels = _split_energy_spread(labels, energies, distance_matrix, config)
 
     n_groups = len(np.unique(labels))
     sizes = [int(np.sum(labels == l)) for l in np.unique(labels)]
@@ -178,6 +184,49 @@ def _split_bpm_spread(
                     logger.info(
                         "Split group (BPM spread %.1f%%): %d-%d BPM",
                         spread * 100, min_bpm, max_bpm,
+                    )
+
+    labels = _renumber(labels)
+    return labels
+
+
+def _split_energy_spread(
+    labels: NDArray,
+    energies: list[int | None],
+    distance_matrix: NDArray,
+    config: GrouperConfig,
+) -> NDArray:
+    """Split groups where energy spread exceeds the configured maximum."""
+    labels = labels.copy()
+    max_spread = config.energy_group_max_spread
+    changed = True
+
+    while changed:
+        changed = False
+        next_label = int(np.max(labels)) + 1
+
+        for label in np.unique(labels):
+            members = np.where(labels == label)[0]
+            if len(members) <= 1:
+                continue
+
+            member_energies = [energies[i] or 3 for i in members]
+            min_e = min(member_energies)
+            max_e = max(member_energies)
+
+            if max_e - min_e > max_spread:
+                sub_matrix = distance_matrix[np.ix_(members, members)]
+                if sub_matrix.shape[0] > 2:
+                    condensed = squareform(sub_matrix, checks=False)
+                    Z_sub = linkage(condensed, method=config.linkage)
+                    sub_labels = fcluster(Z_sub, t=2, criterion="maxclust") - 1
+                    for i, m in enumerate(members):
+                        if sub_labels[i] == 1:
+                            labels[m] = next_label
+                    next_label += 1
+                    changed = True
+                    logger.info(
+                        "Split group (energy spread E%d-E%d)", min_e, max_e,
                     )
 
     labels = _renumber(labels)

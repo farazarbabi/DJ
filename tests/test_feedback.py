@@ -36,8 +36,8 @@ def test_apply_good_pair_reduces_distance():
     info_a = TrackInfo(path="a.aiff")
     info_b = TrackInfo(path="b.aiff")
     tracks = [
-        TrackFeatures("a.aiff", info_a, np.zeros(19, dtype=np.float32), np.zeros(10, dtype=np.float32)),
-        TrackFeatures("b.aiff", info_b, np.zeros(19, dtype=np.float32), np.zeros(10, dtype=np.float32)),
+        TrackFeatures("a.aiff", info_a, np.zeros(19, dtype=np.float32), np.zeros(21, dtype=np.float32)),
+        TrackFeatures("b.aiff", info_b, np.zeros(19, dtype=np.float32), np.zeros(21, dtype=np.float32)),
     ]
     dist = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
     feedback = [FeedbackEntry("a.aiff", "b.aiff", "good_pair", "1.0")]
@@ -50,8 +50,8 @@ def test_apply_bad_pair_increases_distance():
     info_a = TrackInfo(path="a.aiff")
     info_b = TrackInfo(path="b.aiff")
     tracks = [
-        TrackFeatures("a.aiff", info_a, np.zeros(19, dtype=np.float32), np.zeros(10, dtype=np.float32)),
-        TrackFeatures("b.aiff", info_b, np.zeros(19, dtype=np.float32), np.zeros(10, dtype=np.float32)),
+        TrackFeatures("a.aiff", info_a, np.zeros(19, dtype=np.float32), np.zeros(21, dtype=np.float32)),
+        TrackFeatures("b.aiff", info_b, np.zeros(19, dtype=np.float32), np.zeros(21, dtype=np.float32)),
     ]
     dist = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
     feedback = [FeedbackEntry("a.aiff", "b.aiff", "bad_pair", "1.0")]

@@ -12,9 +12,9 @@ class GrouperConfig:
     w_dsp: float = 0.30
     w_embed: float = 0.45
 
-    # When CLAP is not available, tags dominate — DSP refines
-    w_tags_no_embed: float = 0.60
-    w_dsp_no_embed: float = 0.40
+    # When CLAP is not available, DSP drives similarity — tags constrain
+    w_tags_no_embed: float = 0.30
+    w_dsp_no_embed: float = 0.70
 
     # --- Key weighting by vibe ---
     key_weight_by_vibe: dict[str, float] = field(default_factory=lambda: {
@@ -31,6 +31,7 @@ class GrouperConfig:
     bpm_penalty_weight: float = 0.15    # max penalty contribution
     bpm_norm_range: tuple[float, float] = (100.0, 40.0)  # (min, range) -> 100-140 BPM
     bpm_group_max_spread_pct: float = 0.06  # max BPM spread within a group (6%)
+    energy_group_max_spread: int = 2        # max energy level spread within a group
 
     # --- Clustering ---
     linkage: str = "average"

@@ -80,15 +80,24 @@ def tag_distance(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> f
 
 
 def dsp_distance(a: TrackFeatures, b: TrackFeatures) -> float:
-    """Cosine distance on curated DSP features. [0, 1]."""
+    """L2-normalized Euclidean distance on DSP features. [0, 1].
+
+    Unlike cosine, this preserves magnitude differences — a loud aggressive
+    track and a quiet atmospheric track are far apart even if their spectral
+    shapes are similar.
+    """
     if np.array_equal(a.dsp_vector, b.dsp_vector):
         return 0.0
+    # L2-normalize each vector, then Euclidean
     norm_a = float(np.linalg.norm(a.dsp_vector))
     norm_b = float(np.linalg.norm(b.dsp_vector))
-    if norm_a < 1e-8 or norm_b < 1e-8:
-        return 1.0
-    dot = float(np.dot(a.dsp_vector, b.dsp_vector))
-    return max(0.0, 1.0 - dot / (norm_a * norm_b))
+    if norm_a < 1e-8 and norm_b < 1e-8:
+        return 0.0
+    va = a.dsp_vector / (norm_a + 1e-8)
+    vb = b.dsp_vector / (norm_b + 1e-8)
+    # Euclidean on unit vectors: max possible = 2.0, normalize to [0, 1]
+    d = float(np.sqrt(np.sum((va - vb) ** 2)))
+    return min(1.0, d / 2.0)
 
 
 def embed_distance(a: TrackFeatures, b: TrackFeatures) -> float:

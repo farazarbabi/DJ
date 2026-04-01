@@ -16,7 +16,7 @@ def _make_track(energy=3, key="9A", bpm=128, structure="64H",
         flow_type=structure[-1], vibe=vibe, vocal=vocal,
     )
     tag_vec = encode_tags(info)
-    dsp_vec = np.zeros(10, dtype=np.float32)
+    dsp_vec = np.zeros(21, dtype=np.float32)
     return TrackFeatures(path=path, info=info, tag_vector=tag_vec, dsp_vector=dsp_vec)
 
 

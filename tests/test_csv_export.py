@@ -15,7 +15,7 @@ from dj_grouper.recommend.neighbors import Recommendation
 def test_groups_csv_export(tmp_path):
     info = TrackInfo(path="/music/a.aiff", energy=3, key="9A", bpm=126,
                      structure="64H", vibe="HYPN", vocal="NV")
-    tracks = [TrackFeatures("/music/a.aiff", info, np.zeros(19), np.zeros(10))]
+    tracks = [TrackFeatures("/music/a.aiff", info, np.zeros(19), np.zeros(21))]
     group = GroupInfo(
         group_id="G001", member_indices=[0], medoid_index=0,
         energy=3, vibe="HYPN", bpm=126, structure="64H",

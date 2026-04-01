@@ -14,7 +14,7 @@ def _make_track(energy=3, vibe="HYPN", bpm=128, path="t.aiff"):
     return TrackFeatures(
         path=path, info=info,
         tag_vector=encode_tags(info),
-        dsp_vector=np.zeros(10, dtype=np.float32),
+        dsp_vector=np.zeros(21, dtype=np.float32),
     )
 
 

@@ -16,8 +16,8 @@ def _make_assignment():
     info_a = TrackInfo(path="/music/a.aiff", energy=3, vibe="HYPN", bpm=126)
     info_b = TrackInfo(path="/music/b.aiff", energy=3, vibe="HYPN", bpm=128)
     tracks = [
-        TrackFeatures("/music/a.aiff", info_a, np.zeros(19), np.zeros(10)),
-        TrackFeatures("/music/b.aiff", info_b, np.zeros(19), np.zeros(10)),
+        TrackFeatures("/music/a.aiff", info_a, np.zeros(19), np.zeros(21)),
+        TrackFeatures("/music/b.aiff", info_b, np.zeros(19), np.zeros(21)),
     ]
     group = GroupInfo(
         group_id="G001", member_indices=[0, 1], medoid_index=0,

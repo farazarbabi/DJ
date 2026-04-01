@@ -144,6 +144,7 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
 
     n = len(feature_tracks)
     all_bpms = [t.info.bpm for t in feature_tracks]
+    all_energies = [t.info.energy for t in feature_tracks]
     conf_threshold = config.vocal_confidence_threshold
 
     confident_v = [i for i in range(n) if feature_tracks[i].info.vocal == "V"
@@ -152,21 +153,23 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
                     or feature_tracks[i].info.confidences.get("vocal", 1.0) < conf_threshold]
 
     if len(confident_v) < 2:
-        return cluster_tracks(distance_matrix, config, bpms=all_bpms)
+        return cluster_tracks(distance_matrix, config, bpms=all_bpms, energies=all_energies)
 
     labels = np.zeros(n, dtype=np.intp)
 
     if confident_nv:
         sub = distance_matrix[np.ix_(confident_nv, confident_nv)]
         sub_bpms = [all_bpms[i] for i in confident_nv]
-        sub_labels = cluster_tracks(sub, config, bpms=sub_bpms)
+        sub_energies = [all_energies[i] for i in confident_nv]
+        sub_labels = cluster_tracks(sub, config, bpms=sub_bpms, energies=sub_energies)
         for i, idx in enumerate(confident_nv):
             labels[idx] = sub_labels[i]
 
     label_offset = int(np.max(labels)) + 1 if confident_nv else 0
     sub_v = distance_matrix[np.ix_(confident_v, confident_v)]
     sub_v_bpms = [all_bpms[i] for i in confident_v]
-    sub_v_labels = cluster_tracks(sub_v, config, bpms=sub_v_bpms)
+    sub_v_energies = [all_energies[i] for i in confident_v]
+    sub_v_labels = cluster_tracks(sub_v, config, bpms=sub_v_bpms, energies=sub_v_energies)
     for i, idx in enumerate(confident_v):
         labels[idx] = sub_v_labels[i] + label_offset
 
