@@ -26,16 +26,18 @@ class GrouperConfig:
     key_weight_vocal_boost: float = 0.2
 
     # --- BPM ---
-    bpm_hard_cutoff_pct: float = 0.08  # 8% absolute hard cutoff
+    bpm_hard_cutoff_pct: float = 0.08  # 8% absolute hard cutoff for recommendations
     bpm_soft_penalty_pct: float = 0.04  # penalty starts at 4%
     bpm_penalty_weight: float = 0.15    # max penalty contribution
+    bpm_norm_range: tuple[float, float] = (100.0, 40.0)  # (min, range) -> 100-140 BPM
+    bpm_group_max_spread_pct: float = 0.06  # max BPM spread within a group (6%)
 
     # --- Clustering ---
     linkage: str = "average"
-    min_group_size: int = 2
+    min_group_size: int = 1      # allow singletons
     max_group_size: int = 20
-    target_group_size: tuple[int, int] = (2, 10)
-    vocal_confidence_threshold: float = 0.5  # only hard-partition vocals above this confidence
+    target_group_size: tuple[int, int] = (1, 6)
+    vocal_confidence_threshold: float = 0.5
 
     # --- CLAP ---
     clap_pca_dims: int = 64

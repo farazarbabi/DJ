@@ -133,40 +133,40 @@ def main(argv: list[str] | None = None) -> int:
 # ─── Soft vocal partitioning helper ──────────────────────────────────────────
 
 def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
-    """Cluster with soft vocal partitioning.
+    """Cluster with soft vocal partitioning and BPM validation.
 
     Only hard-split vocal tracks when confidence is high.
     Uncertain tracks are clustered with everyone.
+    Passes BPM values for post-clustering validation.
     """
     import numpy as np
     from .grouping.clustering import cluster_tracks
 
     n = len(feature_tracks)
+    all_bpms = [t.info.bpm for t in feature_tracks]
     conf_threshold = config.vocal_confidence_threshold
 
-    # Classify tracks: confident-V, confident-NV, uncertain
     confident_v = [i for i in range(n) if feature_tracks[i].info.vocal == "V"
                    and feature_tracks[i].info.confidences.get("vocal", 1.0) >= conf_threshold]
     confident_nv = [i for i in range(n) if feature_tracks[i].info.vocal != "V"
                     or feature_tracks[i].info.confidences.get("vocal", 1.0) < conf_threshold]
 
-    # If few confident vocals, just cluster everything together
     if len(confident_v) < 2:
-        return cluster_tracks(distance_matrix, config)
+        return cluster_tracks(distance_matrix, config, bpms=all_bpms)
 
     labels = np.zeros(n, dtype=np.intp)
 
-    # Cluster NV + uncertain together
     if confident_nv:
         sub = distance_matrix[np.ix_(confident_nv, confident_nv)]
-        sub_labels = cluster_tracks(sub, config)
+        sub_bpms = [all_bpms[i] for i in confident_nv]
+        sub_labels = cluster_tracks(sub, config, bpms=sub_bpms)
         for i, idx in enumerate(confident_nv):
             labels[idx] = sub_labels[i]
 
-    # Cluster confident vocals separately
     label_offset = int(np.max(labels)) + 1 if confident_nv else 0
     sub_v = distance_matrix[np.ix_(confident_v, confident_v)]
-    sub_v_labels = cluster_tracks(sub_v, config)
+    sub_v_bpms = [all_bpms[i] for i in confident_v]
+    sub_v_labels = cluster_tracks(sub_v, config, bpms=sub_v_bpms)
     for i, idx in enumerate(confident_v):
         labels[idx] = sub_v_labels[i] + label_offset
 

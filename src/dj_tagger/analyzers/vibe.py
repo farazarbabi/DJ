@@ -68,33 +68,39 @@ def analyze_vibe(track_audio: TrackAudio) -> VibeResult:
     # --- Score each vibe ---
     scores: dict[str, float] = {}
 
-    # HYPN: repetitive, stable, loop-based
+    # HYPN: repetitive, stable, trance-inducing — works at ANY energy level
+    # Key: spectral stability + low onset variance + groove consistency
+    # No RMS penalty — trance and hypnotic techno are loud
     scores["HYPN"] = (
-        0.5 * spectral_stability
-        + 0.3 * (1.0 - min(1.0, onset_var / 2.0))
-        + 0.2 * (1.0 - min(1.0, rms * 5))
+        0.40 * spectral_stability
+        + 0.30 * (1.0 - min(1.0, onset_var / 2.0))
+        + 0.15 * (1.0 - min(1.0, chroma_strength * 1.2))  # less melodic = more hypnotic
+        + 0.15 * min(1.0, onset_density / 4.0)             # driving rhythm
     )
 
-    # DRK: dark, heavy, low-frequency
+    # DRK: dark, heavy, low-frequency — low brightness, bass-heavy
     scores["DRK"] = (
-        0.35 * (1.0 - min(1.0, centroid_mean / 4000))
-        + 0.35 * min(1.0, low_ratio * 3)
-        + 0.30 * min(1.0, flux / 3.0)
+        0.30 * (1.0 - min(1.0, centroid_mean / 3000))      # dark = low centroid
+        + 0.25 * min(1.0, low_ratio * 3)                    # heavy bass
+        + 0.25 * min(1.0, flux / 3.0)                       # spectral aggression
+        + 0.20 * min(1.0, rms * 8)                          # loud
     )
 
-    # RAW: noisy, aggressive, harsh
+    # RAW: industrial, harsh, aggressive — high energy + noise + brightness
     scores["RAW"] = (
-        0.35 * min(1.0, flatness * 10)
-        + 0.35 * min(1.0, rms * 8)
-        + 0.30 * min(1.0, flux / 3.0)
+        0.25 * min(1.0, flatness * 10)                      # noisy
+        + 0.25 * min(1.0, rms * 10)                         # loud
+        + 0.20 * min(1.0, flux / 2.5)                       # harsh spectral change
+        + 0.15 * min(1.0, centroid_mean / 3000)             # bright/harsh
+        + 0.15 * min(1.0, onset_density / 4.0)              # dense transients
     )
 
-    # DEEP: warm, subby, moderate energy
-    rms_moderate = 1.0 - abs(rms * 8 - 0.5) * 2
+    # DEEP: warm, subby, lower energy — low centroid, bass-heavy, NOT loud
     scores["DEEP"] = (
-        0.40 * min(1.0, low_ratio * 3)
-        + 0.35 * (1.0 - min(1.0, centroid_mean / 3000))
-        + 0.25 * max(0.0, rms_moderate)
+        0.30 * min(1.0, low_ratio * 3)                      # bass-heavy
+        + 0.30 * (1.0 - min(1.0, centroid_mean / 2500))     # warm/dark
+        + 0.20 * (1.0 - min(1.0, rms * 10))                 # not aggressive
+        + 0.20 * (1.0 - min(1.0, onset_density / 4.0))      # sparse
     )
 
     # TRIB: percussive, polyrhythmic
@@ -104,28 +110,30 @@ def analyze_vibe(track_audio: TrackAudio) -> VibeResult:
         + 0.25 * (1.0 - min(1.0, harmonic_energy * 50))
     )
 
-    # MEL: melodic, tonal — requires strong harmonic content AND low percussiveness
-    # Use chroma variance over time as a melodic progression indicator
+    # MEL: melodic — requires genuine melodic MOVEMENT, not just tonal content
+    # High bar: needs chroma variation over time AND harmonic dominance
     chroma_var = float(np.mean(np.var(chroma, axis=1)))
+    melodic_movement = min(1.0, chroma_var * 30)  # stricter threshold
     scores["MEL"] = (
-        0.30 * min(1.0, chroma_var * 20)
-        + 0.30 * chroma_strength
-        + 0.20 * (1.0 - min(1.0, flatness * 10))
-        + 0.20 * (1.0 - perc_ratio)
+        0.35 * melodic_movement                              # actual melodic progression
+        + 0.25 * chroma_strength                             # tonal content
+        + 0.20 * (1.0 - perc_ratio)                          # harmonic-dominant
+        + 0.20 * (1.0 - min(1.0, flatness * 10))            # not noisy
     )
 
-    # ACID: filter sweeps, resonant peaks, needs high centroid variance AND low chroma
+    # ACID: filter sweeps, resonant peaks
     scores["ACID"] = (
         0.40 * min(1.0, centroid_var * 3)
         + 0.35 * min(1.0, peakiness / 10)
         + 0.25 * (1.0 - chroma_strength)
     )
 
-    # ATM: atmospheric, ambient, spatial
+    # ATM: atmospheric, ambient, spatial — quiet, wide, sparse
     scores["ATM"] = (
-        0.35 * (1.0 - min(1.0, onset_density / 3.0))
-        + 0.35 * min(1.0, bandwidth / 3000)
-        + 0.30 * (1.0 - min(1.0, rms * 10))
+        0.30 * (1.0 - min(1.0, onset_density / 3.0))        # sparse
+        + 0.30 * min(1.0, bandwidth / 3000)                  # wide spectrum
+        + 0.25 * (1.0 - min(1.0, rms * 10))                 # quiet
+        + 0.15 * (1.0 - min(1.0, flux / 2.0))               # smooth, not harsh
     )
 
     best_label = max(scores, key=scores.get)  # type: ignore[arg-type]

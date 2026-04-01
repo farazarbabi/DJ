@@ -33,9 +33,9 @@ def tag_distance(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> f
     # Energy distance: ordinal [0, 1]
     d_energy = abs(float(va[0] - vb[0]))
 
-    # BPM distance: non-linear to amplify genre boundaries
+    # BPM distance: quadratic to amplify genre boundaries
     d_bpm_raw = abs(float(va[1] - vb[1]))
-    d_bpm = d_bpm_raw ** 1.5
+    d_bpm = d_bpm_raw ** 2.0
 
     # Key distance: Euclidean on sin/cos, normalized to [0, 1]
     d_key_raw = math.sqrt(float((va[2] - vb[2]) ** 2 + (va[3] - vb[3]) ** 2))
@@ -66,14 +66,14 @@ def tag_distance(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> f
     # Vocal: [0, 1]
     d_vocal = abs(float(va[18] - vb[18]))
 
-    # Weighted combination
+    # Weighted combination — BPM elevated to prevent unmixable groupings
     d = (
-        0.30 * d_energy
-        + 0.20 * d_bpm
+        0.25 * d_energy
+        + 0.30 * d_bpm
         + key_weight * 0.10 * d_key
         + 0.05 * d_bars
         + 0.05 * d_flow
-        + 0.25 * d_vibe
+        + 0.20 * d_vibe
         + 0.05 * d_vocal
     )
     return d

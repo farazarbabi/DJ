@@ -110,9 +110,9 @@ def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
     energy_conf = confs.get("energy", 1.0)
     v.append(energy_val * energy_conf + 0.5 * (1.0 - energy_conf))
 
-    # BPM: normalized
+    # BPM: normalized to tighter electronic music range (100-140)
     bpm = info.bpm or 128
-    v.append((bpm - 80) / 80.0)
+    v.append(max(0.0, min(1.0, (bpm - 100) / 40.0)))
 
     # Key: circular, confidence-weighted toward zero (neutral)
     if info.key and info.key in _CAMELOT_POSITIONS:

@@ -82,12 +82,13 @@ ENERGY_WEIGHTS: dict[str, float] = {
 }
 
 # (min, range) for normalization: normalized = clip((value - min) / range, 0, 1)
+# Tightened for mastered electronic music (techno/house/downtempo)
 ENERGY_NORM: dict[str, tuple[float, float]] = {
-    "rms":      (0.02, 0.18),
-    "centroid": (1000.0, 4000.0),
-    "flux":     (0.5, 4.5),
-    "onset":    (1.0, 7.0),
-    "low_freq": (0.1, 0.5),
+    "rms":      (0.04, 0.08),      # mastered electronic: ~0.04-0.12
+    "centroid": (1500.0, 2500.0),   # electronic: ~1500-4000
+    "flux":     (0.5, 2.5),         # electronic: ~0.5-3.0
+    "onset":    (1.5, 4.0),         # electronic: ~1.5-5.5
+    "low_freq": (0.15, 0.30),       # bass-heavy music: ~0.15-0.45
 }
 
 # Composite score boundaries -> energy level

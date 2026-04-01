@@ -73,11 +73,11 @@ Weighted composite of five spectral/rhythmic features, each normalized to [0, 1]
 
 | Feature | Source | Normalization | Weight |
 |---------|--------|---------------|--------|
-| RMS | `librosa.feature.rms` mean | (x - 0.02) / 0.18 | 0.30 |
-| Spectral centroid | `spectral_centroid` mean | (x - 1000) / 4000 | 0.15 |
-| Spectral flux | RMS of STFT diffs | (x - 0.5) / 4.5 | 0.20 |
-| Onset density | onset count / duration | (x - 1.0) / 7.0 | 0.20 |
-| Low-freq ratio | power <150 Hz / total | (x - 0.1) / 0.5 | 0.15 |
+| RMS | `librosa.feature.rms` mean | (x - 0.04) / 0.08 | 0.30 |
+| Spectral centroid | `spectral_centroid` mean | (x - 1500) / 2500 | 0.15 |
+| Spectral flux | RMS of STFT diffs | (x - 0.5) / 2.5 | 0.20 |
+| Onset density | onset count / duration | (x - 1.5) / 4.0 | 0.20 |
+| Low-freq ratio | power <150 Hz / total | (x - 0.15) / 0.30 | 0.15 |
 
 Thresholds: E1 < 0.20, E2 < 0.40, E3 < 0.60, E4 < 0.80, E5 >= 0.80.
 
@@ -114,14 +114,14 @@ Eight labels scored from spectral features. All scores are computed; the highest
 
 | Label | Formula |
 |-------|---------|
-| HYPN | 0.5 * stability + 0.3 * (1 - onset_var) + 0.2 * (1 - rms) |
-| DRK | 0.35 * (1 - centroid/4k) + 0.35 * low_ratio + 0.30 * flux |
-| RAW | 0.35 * flatness + 0.35 * rms + 0.30 * flux |
-| DEEP | 0.40 * low_ratio + 0.35 * (1 - centroid/3k) + 0.25 * rms_moderate |
+| HYPN | 0.5 * stability + 0.3 * (1 - onset_var) + 0.1 * driving_rhythm + 0.1 * (1 - chroma_var) |
+| DRK | 0.30 * (1 - centroid/4k) + 0.30 * low_ratio + 0.25 * flux + 0.15 * rms |
+| RAW | 0.25 * flatness + 0.25 * rms + 0.20 * flux + 0.15 * centroid + 0.15 * onset_density |
+| DEEP | 0.30 * low_ratio + 0.25 * (1 - centroid/3k) + 0.25 * (1 - rms) + 0.20 * (1 - onset_density) |
 | TRIB | 0.40 * perc_ratio + 0.35 * onset_density + 0.25 * (1 - harmonic_e) |
-| MEL | 0.30 * chroma_var + 0.30 * chroma_strength + 0.20 * (1 - flatness) + 0.20 * (1 - perc_ratio) |
+| MEL | 0.30 * (chroma_var * 30) + 0.30 * chroma_strength + 0.20 * (1 - flatness) + 0.20 * (1 - perc_ratio) |
 | ACID | 0.40 * centroid_var + 0.35 * peakiness + 0.25 * (1 - chroma_strength) |
-| ATM | 0.35 * (1 - onset_density) + 0.35 * bandwidth + 0.30 * (1 - rms) |
+| ATM | 0.30 * (1 - onset_density) + 0.30 * bandwidth + 0.25 * (1 - rms) + 0.15 * smoothness |
 
 **Confidence**: gap between the top score and the second-highest score. A large gap means unambiguous classification.
 
@@ -180,7 +180,7 @@ Parser auto-detects by checking if the third field is a pure integer (v2) or not
 | Feature | Encoding | Dims |
 |---------|----------|------|
 | Energy | Ordinal: (E - 1) / 4 | 1 |
-| BPM | (BPM - 80) / 80 | 1 |
+| BPM | (BPM - 100) / 40 | 1 |
 | Key | sin/cos of Camelot wheel position (24 positions) | 2 |
 | Intro bars | 16 -> 0, 32 -> 0.5, 64 -> 1 | 1 |
 | Flow type | One-hot: G, H, D, B, L | 5 |
@@ -240,12 +240,12 @@ All sub-distances are normalized to [0, 1] before weighting:
 
 | Sub-distance | Weight | Metric | Notes |
 |---|---|---|---|
-| Energy | 0.30 | Absolute difference / 4 | Strongest differentiator |
-| Vibe | 0.25 | Euclidean on continuous scores | Smooth gradient across vibe space |
-| BPM | 0.20 | Non-linear: `d_bpm_raw^1.5` | Amplifies genre-boundary gaps |
+| Energy | 0.25 | Absolute difference / 4 | |
+| BPM | 0.30 | Non-linear: `d_bpm_raw^2.0` | Strongest differentiator; amplifies genre-boundary gaps |
+| Vibe | 0.20 | Euclidean on continuous scores | Smooth gradient across vibe space |
 | Key | 0.10 * vibe_conditional_weight | Circular (Camelot wheel) | Weight varies: MEL 0.8, RAW 0.1; +0.2 for vocals |
-| Flow type | 0.05 | Binary match/mismatch | |
 | Intro bars | 0.05 | Ordinal distance | |
+| Flow type | 0.05 | Binary match/mismatch | |
 | Vocal | 0.05 | Binary match/mismatch | Reduced weight here; vocals handled more in clustering |
 
 ### Soft Vocal Partitioning
@@ -263,9 +263,10 @@ This prevents borderline tracks (faint vocal samples, vocal-like synths) from be
 2. Pairwise distance matrix per partition
 3. Apply feedback (multiplicative adjustments to distance matrix)
 4. Agglomerative clustering with **average linkage** (balances cohesion; less aggressive than complete, less permissive than single)
-5. Auto-threshold: sweep 30 candidate thresholds, minimize deviation from target group size (2, 10)
-6. Post-process: merge groups smaller than 2, bisect groups larger than 20, re-number labels
-7. Assign stable group IDs (G001, G002, ...)
+5. Auto-threshold: sweep 30 candidate thresholds, minimize deviation from target group size (1, 6)
+6. Post-process: bisect groups larger than 20, re-number labels (singletons allowed, min_group_size = 1)
+7. Post-clustering BPM validation: groups with >6% BPM spread (`bpm_group_max_spread_pct = 0.06`) are force-split
+8. Assign stable group IDs (G001, G002, ...)
 
 ### Medoid
 
@@ -427,9 +428,10 @@ Stored in `outputs/feedback.csv`. Applied to the distance matrix before clusteri
 | `bpm_soft_penalty_pct` | 0.04 | BPM penalty starts at 4% |
 | `bpm_penalty_weight` | 0.15 | Max BPM penalty contribution |
 | `linkage` | "average" | Agglomerative linkage method |
-| `min_group_size` | 2 | Minimum tracks per group |
+| `min_group_size` | 1 | Minimum tracks per group (singletons allowed) |
 | `max_group_size` | 20 | Maximum tracks per group |
-| `target_group_size` | (2, 10) | Ideal group size for threshold tuning |
+| `target_group_size` | (1, 6) | Ideal group size for threshold tuning |
+| `bpm_group_max_spread_pct` | 0.06 | Post-clustering BPM validation: force-split groups with >6% spread |
 | `vocal_confidence_threshold` | 0.5 | Hard vocal partition above this |
 | `clap_pca_dims` | 64 | PCA dims for CLAP embeddings |
 | `new_group_distance_threshold` | 0.80 | Distance for creating new group in stable mode |

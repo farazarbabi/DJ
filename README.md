@@ -161,14 +161,14 @@ Every analyzer now reports a confidence value (0.0--1.0). Vibe produces continuo
 
 | Code | Key audio drivers |
 |------|-------------------|
-| HYPN | Spectral stability, low onset variance, repetitive |
-| DRK | Low centroid, high low-freq ratio, high flux |
-| RAW | High spectral flatness, high RMS |
-| DEEP | High low-freq, low centroid, moderate RMS |
+| HYPN | Spectral stability, low onset variance, driving rhythm, low-melodic indicator |
+| DRK | Low centroid, high low-freq ratio, high flux, RMS bonus |
+| RAW | High spectral flatness, high RMS, centroid (brightness), onset density |
+| DEEP | High low-freq, low centroid, not loud, sparse |
 | TRIB | High percussive ratio, high onset density |
-| MEL | Chroma variance, tonal content |
+| MEL | Chroma variance (chroma_var * 30), tonal content |
 | ACID | High centroid variance (filter sweeps), spectral peakiness |
-| ATM | Low onset density, high bandwidth, low RMS |
+| ATM | Low onset density, high bandwidth, low RMS, smoothness |
 
 ---
 
@@ -377,8 +377,9 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 | `bpm_penalty_weight` | 0.15 | Max BPM penalty contribution |
 | `linkage` | "average" | Clustering linkage method |
 | `vocal_confidence_threshold` | 0.5 | Only hard-split vocals above this confidence |
-| `target_group_size` | (2, 10) | Ideal group size range |
-| `min_group_size` / `max_group_size` | 2 / 20 | Hard group size limits |
+| `target_group_size` | (1, 6) | Ideal group size range |
+| `min_group_size` / `max_group_size` | 1 / 20 | Hard group size limits (singletons allowed) |
+| `bpm_group_max_spread_pct` | 0.06 | Post-clustering BPM validation: groups with >6% BPM spread are force-split |
 | `clap_pca_dims` | 64 | PCA dimensions for CLAP embeddings |
 | `new_group_distance_threshold` | 0.80 | Distance beyond which a new group is created |
 | `n_recommendations` | 10 | Recommendations per track |
