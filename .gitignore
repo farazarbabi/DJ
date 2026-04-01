@@ -201,6 +201,15 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# DJ Tools — runtime data
+outputs/
+files/
+grouped/
+playlists/
+*.pkl
+*.csv
+*.m3u8
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
