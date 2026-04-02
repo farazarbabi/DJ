@@ -40,7 +40,7 @@ class TrackInfo:
 
 def scan_library(paths: list[str], recursive: bool = True) -> list[TrackInfo]:
     """Scan paths for audio files and read existing dj_tagger tags."""
-    files = find_audio_files(paths, recursive)
+    files = find_audio_files(paths, recursive, exclude_dirs={"outputs"})
     tracks: list[TrackInfo] = []
 
     for fpath in files:

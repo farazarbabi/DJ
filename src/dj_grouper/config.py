@@ -37,7 +37,7 @@ class GrouperConfig:
     linkage: str = "average"
     min_group_size: int = 2      # merge singletons into nearest group
     max_group_size: int = 20
-    target_group_size: tuple[int, int] = (3, 10)
+    target_group_size: tuple[int, int] = (4, 12)
     vocal_confidence_threshold: float = 0.5
 
     # --- CLAP ---

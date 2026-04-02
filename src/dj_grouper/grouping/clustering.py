@@ -46,6 +46,9 @@ def cluster_tracks(
     if energies is not None:
         labels = _split_energy_spread(labels, energies, distance_matrix, config)
 
+    # Re-merge singletons created by BPM/energy splitting
+    labels = _merge_small_groups(labels, distance_matrix, config, bpms, energies)
+
     n_groups = len(np.unique(labels))
     sizes = [int(np.sum(labels == l)) for l in np.unique(labels)]
     logger.info(
@@ -75,6 +78,8 @@ def _auto_threshold(Z: NDArray, n: int, config: GrouperConfig) -> NDArray:
         score = abs(median_size - target_mid)
         n_outside = sum(1 for c in counts if c > config.max_group_size)
         score += n_outside * 2
+        n_small = sum(1 for c in counts if c < config.min_group_size)
+        score += n_small * 1.5
 
         if score < best_score:
             best_score = score
@@ -150,6 +155,7 @@ def _split_bpm_spread(
     labels = labels.copy()
     max_spread = config.bpm_group_max_spread_pct
     changed = True
+    n_splits = 0
 
     while changed:
         changed = False
@@ -181,11 +187,10 @@ def _split_bpm_spread(
                             labels[m] = next_label
                     next_label += 1
                     changed = True
-                    logger.info(
-                        "Split group (BPM spread %.1f%%): %d-%d BPM",
-                        spread * 100, min_bpm, max_bpm,
-                    )
+                    n_splits += 1
 
+    if n_splits:
+        logger.info("BPM validation: %d splits (max spread %.0f%%)", n_splits, max_spread * 100)
     labels = _renumber(labels)
     return labels
 
@@ -200,6 +205,7 @@ def _split_energy_spread(
     labels = labels.copy()
     max_spread = config.energy_group_max_spread
     changed = True
+    n_splits = 0
 
     while changed:
         changed = False
@@ -225,12 +231,78 @@ def _split_energy_spread(
                             labels[m] = next_label
                     next_label += 1
                     changed = True
-                    logger.info(
-                        "Split group (energy spread E%d-E%d)", min_e, max_e,
-                    )
+                    n_splits += 1
 
+    if n_splits:
+        logger.info("Energy validation: %d splits (max spread %d levels)", n_splits, max_spread)
     labels = _renumber(labels)
     return labels
+
+
+def _merge_small_groups(
+    labels: NDArray,
+    distance_matrix: NDArray,
+    config: GrouperConfig,
+    bpms: list[int | None] | None = None,
+    energies: list[int | None] | None = None,
+) -> NDArray:
+    """Re-merge groups below min_group_size after BPM/energy splitting.
+
+    Unlike the initial merge in _post_process, this checks BPM and energy
+    constraints before merging so we don't undo validation splits.
+    """
+    if config.min_group_size <= 1:
+        return labels
+
+    labels = labels.copy()
+    unique_labels = np.unique(labels)
+
+    for label in unique_labels:
+        members = np.where(labels == label)[0]
+        if len(members) >= config.min_group_size:
+            continue
+
+        # Find candidate groups that already meet min_group_size
+        other_labels = [
+            l for l in np.unique(labels)
+            if l != label and np.sum(labels == l) >= config.min_group_size
+        ]
+        if not other_labels:
+            continue
+
+        # Rank candidates by average distance
+        candidates = []
+        for target_label in other_labels:
+            target_members = np.where(labels == target_label)[0]
+            avg_dist = float(np.mean(distance_matrix[np.ix_(members, target_members)]))
+            candidates.append((avg_dist, target_label, target_members))
+        candidates.sort()
+
+        for avg_dist, target_label, target_members in candidates:
+            # Check BPM constraint
+            if bpms is not None:
+                merged_bpms = [bpms[i] or 128 for i in list(members) + list(target_members)]
+                median_bpm = float(np.median(merged_bpms))
+                if median_bpm > 0:
+                    spread = (max(merged_bpms) - min(merged_bpms)) / median_bpm
+                    if spread > config.bpm_group_max_spread_pct:
+                        continue
+
+            # Check energy constraint
+            if energies is not None:
+                merged_energies = [energies[i] or 3 for i in list(members) + list(target_members)]
+                if max(merged_energies) - min(merged_energies) > config.energy_group_max_spread:
+                    continue
+
+            # Merge
+            labels[members] = target_label
+            logger.info(
+                "Re-merged %d singleton(s) into group (avg dist %.3f)",
+                len(members), avg_dist,
+            )
+            break
+
+    return _renumber(labels)
 
 
 def _renumber(labels: NDArray) -> NDArray:

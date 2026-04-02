@@ -18,8 +18,11 @@ from .constants import SUPPORTED_EXTENSIONS
 logger = logging.getLogger(__name__)
 
 
-def find_audio_files(paths: list[str], recursive: bool) -> list[Path]:
+def find_audio_files(
+    paths: list[str], recursive: bool, exclude_dirs: set[str] | None = None,
+) -> list[Path]:
     """Discover audio files from the given paths."""
+    exclude = {d.lower() for d in exclude_dirs} if exclude_dirs else set()
     results: list[Path] = []
     for p_str in paths:
         p = Path(p_str)
@@ -29,6 +32,8 @@ def find_audio_files(paths: list[str], recursive: bool) -> list[Path]:
             pattern = "**/*" if recursive else "*"
             for child in sorted(p.glob(pattern)):
                 if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    if exclude and any(part.lower() in exclude for part in child.relative_to(p).parts):
+                        continue
                     results.append(child)
         else:
             logger.warning("Skipping %s (not a file or directory)", p)
