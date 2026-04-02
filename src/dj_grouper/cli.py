@@ -218,7 +218,31 @@ def _cmd_run(args) -> int:
     import os
 
     config = GrouperConfig()
-    out_dir = Path(_DEFAULTS.output_dir)
+
+    # ── Resolve output directory ──
+    # If input is outside the project directory, write outputs next to the input
+    input_path = Path(args.input[0]).resolve()
+    project_dir = Path.cwd().resolve()
+
+    try:
+        input_path.relative_to(project_dir)
+        is_external = False
+    except ValueError:
+        is_external = True
+
+    if is_external:
+        ext_out = str(input_path / "outputs")
+        args.cache = str(input_path / "outputs" / "features_cache.pkl")
+        args.clap_cache = str(input_path / "outputs" / "clap_cache.pkl")
+        args.csv = str(input_path / "outputs" / "groups.csv")
+        args.recommendations_csv = str(input_path / "outputs" / "recommendations.csv")
+        args.output = str(input_path / "outputs" / "Grouped")
+        args.playlists = str(input_path / "outputs" / "playlists")
+        args.feedback = str(input_path / "outputs" / "feedback.csv")
+        out_dir = Path(ext_out)
+        print(f"External input detected — outputs will be in {ext_out}/")
+    else:
+        out_dir = Path(_DEFAULTS.output_dir)
 
     # ── Handle --clean ──
     if args.clean:
