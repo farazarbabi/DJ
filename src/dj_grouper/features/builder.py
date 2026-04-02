@@ -219,16 +219,17 @@ def _calibrate_energy(
     weights = np.array(_ENERGY_DSP_WEIGHTS, dtype=np.float32)
     composites = ranked @ weights
 
-    # Assign E1-E5 by quintile
+    # Assign E1-E5 by custom percentile bands
+    # Skewed toward lower energy — most electronic tracks are mid-to-high
     for i in range(n):
         pct = composites[i]
-        if pct < 0.20:
+        if pct < 0.35:
             level = 1
-        elif pct < 0.40:
+        elif pct < 0.55:
             level = 2
-        elif pct < 0.60:
+        elif pct < 0.70:
             level = 3
-        elif pct < 0.80:
+        elif pct < 0.85:
             level = 4
         else:
             level = 5
