@@ -178,69 +178,57 @@ def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
     return np.array(v, dtype=np.float32)
 
 
-# ─── Energy recalibration ────────────────────────────────────────────────────
+# ─── Energy classification (per-track, absolute thresholds) ─────────────────
 
-# Energy sub-features used for composite scoring
-# Beat strength and onset density are the best energy indicators for electronic
-# music — a driving kick pattern = high energy, regardless of mastering loudness.
-# RMS is de-emphasized because mastered tracks have similar loudness.
-_ENERGY_DSP_KEYS = ["beat_strength", "onset_density", "rms_mean", "centroid_mean"]
-_ENERGY_DSP_WEIGHTS = [0.35, 0.30, 0.15, 0.20]
+# Absolute normalization ranges for electronic music (techno/house/downtempo).
+# Derived from real electronic music analysis. Stable across library sizes.
+_ENERGY_FEATURES = {
+    #                 (min,  range,  weight)
+    "beat_strength":  (1.5,  2.5,    0.35),   # 1.5-4.0: kick strength
+    "onset_density":  (1.0,  2.0,    0.30),   # 1.0-3.0: rhythmic density
+    "centroid_mean":  (1000, 2000,   0.20),   # 1000-3000: brightness/aggression
+    "rms_mean":       (0.15, 0.20,   0.15),   # 0.15-0.35: loudness (de-emphasized)
+}
+
+# Composite thresholds — asymmetric, calibrated for electronic music
+# E1 is wide (ambient/sparse is rare), E5 is narrow (truly aggressive is rare)
+_ENERGY_THRESHOLDS = [0.25, 0.42, 0.58, 0.75]  # E1<0.25, E2<0.42, E3<0.58, E4<0.75, E5>=0.75
+
+
+def _compute_track_energy(dsp: dict[str, float]) -> int:
+    """Compute energy level for a single track from its DSP features.
+
+    Returns 1-5. Deterministic per-track — does not depend on library context.
+    """
+    composite = 0.0
+    for key, (lo, rng, weight) in _ENERGY_FEATURES.items():
+        raw = dsp.get(key, 0.0)
+        normalized = max(0.0, min(1.0, (raw - lo) / rng))
+        composite += weight * normalized
+
+    level = 1
+    for threshold in _ENERGY_THRESHOLDS:
+        if composite >= threshold:
+            level += 1
+    return min(level, 5)
 
 
 def _calibrate_energy(
     infos: list[TrackInfo],
     dsp_dicts: list[dict[str, float]],
 ) -> None:
-    """Recalibrate energy levels relative to the library distribution.
+    """Assign energy levels using absolute per-track scoring.
 
-    Uses percentile rank on energy-related DSP features to compute a composite
-    score, then assigns E1-E5 by quintile. This guarantees spread across all
-    5 levels regardless of the library's absolute loudness.
-
-    Modifies infos in place.
+    Each track is scored independently against fixed thresholds calibrated
+    for electronic music. Stable regardless of library size — adding or
+    removing tracks does not change other tracks' energy levels.
     """
-    from scipy.stats import rankdata
-
-    n = len(infos)
-    if n < 3:
-        return
-
-    # Build energy sub-feature matrix
-    raw_values = np.array([
-        [d.get(k, 0.0) for k in _ENERGY_DSP_KEYS]
-        for d in dsp_dicts
-    ], dtype=np.float32)
-
-    # Percentile rank each sub-feature
-    ranked = np.zeros_like(raw_values)
-    for col in range(raw_values.shape[1]):
-        ranks = rankdata(raw_values[:, col], method="average")
-        ranked[:, col] = (ranks - 1) / max(1, n - 1)
-
-    # Weighted composite
-    weights = np.array(_ENERGY_DSP_WEIGHTS, dtype=np.float32)
-    composites = ranked @ weights
-
-    # Assign E1-E5 by custom percentile bands
-    # Skewed toward lower energy — most electronic tracks are mid-to-high
-    for i in range(n):
-        pct = composites[i]
-        if pct < 0.35:
-            level = 1
-        elif pct < 0.55:
-            level = 2
-        elif pct < 0.70:
-            level = 3
-        elif pct < 0.85:
-            level = 4
-        else:
-            level = 5
-        infos[i].energy = level
+    for i, dsp in enumerate(dsp_dicts):
+        infos[i].energy = _compute_track_energy(dsp)
 
     levels = [info.energy for info in infos]
     logger.info(
-        "Energy recalibrated: E1=%d E2=%d E3=%d E4=%d E5=%d",
+        "Energy assigned: E1=%d E2=%d E3=%d E4=%d E5=%d",
         levels.count(1), levels.count(2), levels.count(3), levels.count(4), levels.count(5),
     )
 
