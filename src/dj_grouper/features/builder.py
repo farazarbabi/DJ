@@ -181,8 +181,11 @@ def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
 # ─── Energy recalibration ────────────────────────────────────────────────────
 
 # Energy sub-features used for composite scoring
-_ENERGY_DSP_KEYS = ["rms_mean", "centroid_mean", "onset_density", "low_freq_ratio"]
-_ENERGY_DSP_WEIGHTS = [0.35, 0.20, 0.25, 0.20]
+# Beat strength and onset density are the best energy indicators for electronic
+# music — a driving kick pattern = high energy, regardless of mastering loudness.
+# RMS is de-emphasized because mastered tracks have similar loudness.
+_ENERGY_DSP_KEYS = ["beat_strength", "onset_density", "rms_mean", "centroid_mean"]
+_ENERGY_DSP_WEIGHTS = [0.35, 0.30, 0.15, 0.20]
 
 
 def _calibrate_energy(
