@@ -204,7 +204,10 @@ def _cmd_run(args) -> int:
     from .grouping.assignment import (
         assign_group_ids, save_assignment, load_assignment, assign_new_tracks,
     )
+    from dj_tagger.analyzers.energy import analyze_energy
+    from dj_tagger.analyzers.key import analyze_key
     from dj_tagger.analyzers.sections import analyze_sections
+    from dj_tagger.analyzers.structure import analyze_structure
     from dj_tagger.analyzers.vibe import analyze_vibe
     from dj_tagger.analyzers.vocal import analyze_vocal
     from .feedback.store import load_feedback
@@ -276,22 +279,27 @@ def _cmd_run(args) -> int:
             clap_path.unlink()
         print("Cleared CLAP cache")
 
-    # ── Step 1: Incremental DSP extraction ──
+    import time as _time
+
+    # ── Step 1: Scan + analyze + extract ──
+    print("\n[1/5] Scanning library...", end="", flush=True)
+    t_step = _time.perf_counter()
     tracks = scan_library(args.input, args.recursive)
     if not tracks:
-        print("No tracks found.")
+        print(" no tracks found.")
         return 0
+
+    n_tagged = sum(1 for t in tracks if t.energy is not None)
+    print(f" {len(tracks)} tracks found ({n_tagged} tagged, {len(tracks) - n_tagged} untagged) ({_time.perf_counter() - t_step:.1f}s)")
 
     raw_cache = load_raw_cache(args.cache)
 
-    import time as _time
-
     n_cached = 0
     n_extracted = 0
+    n_analyzed = 0
     n_failed = 0
     total_tracks = len(tracks)
-    print(f"\n[1/5] Extracting DSP features ({total_tracks} tracks)...")
-    t_step = _time.perf_counter()
+    print(f"  Analyzing and extracting features...")
 
     for i, t in enumerate(tracks):
         done = i + 1
@@ -306,21 +314,54 @@ def _cmd_run(args) -> int:
             print(f"  [{done:>{len(str(total_tracks))}}/{total_tracks}] {pct:>3}%  {Path(t.path).name}", end="", flush=True)
             try:
                 audio = load_audio_features(t.path)
+
+                # Run full tagger analysis if track is untagged
+                needs_analysis = t.energy is None or t.key is None
+                if needs_analysis:
+                    energy_result = analyze_energy(audio)
+                    t.energy = energy_result.level
+                    t.confidences["energy"] = energy_result.confidence
+
+                    key_result = analyze_key(audio)
+                    t.key = key_result.camelot
+                    t.confidences["key"] = key_result.confidence
+
+                    structure_result = analyze_structure(audio)
+                    t.structure = structure_result.formatted
+                    t.intro_bars = structure_result.intro_bars
+                    t.flow_type = structure_result.flow_type
+                    t.confidences["structure"] = structure_result.confidence
+
+                    n_analyzed += 1
+
+                # DSP extraction (always)
                 feats = extract_dsp_features(audio)
                 if t.bpm is None and audio.tempo > 0:
                     t.bpm = round(audio.tempo)
                 section_map = analyze_sections(audio)
                 sec_dsp = extract_section_dsp(audio, section_map)
                 vibe_result = analyze_vibe(audio)
+                t.vibe = vibe_result.label
                 t.vibe_scores = vibe_result.scores
                 t.confidences["vibe"] = vibe_result.confidence
                 vocal_result = analyze_vocal(audio)
+                t.vocal = "V" if vocal_result.has_vocals else "NV"
                 t.confidences["vocal"] = vocal_result.confidence
+
+                # Write complete base tag for freshly analyzed tracks
+                if needs_analysis and args.write_tags:
+                    base_tag = format_tag(
+                        energy=t.energy, camelot=t.key, bpm=t.bpm,
+                        structure=t.structure, vibe=t.vibe,
+                        has_vocals=vocal_result.has_vocals,
+                    )
+                    write_tag(t.path, base_tag, dry_run=False)
                 raw_cache[t.path] = RawCacheEntry(
                     mtime=mtime, info=t, dsp=feats, section_dsp=sec_dsp,
                 )
                 n_extracted += 1
-                print("  [extracted]")
+                status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
+                print(f"  {status}")
             except Exception as e:
                 raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
                 n_failed += 1
@@ -341,13 +382,15 @@ def _cmd_run(args) -> int:
     summary_parts = []
     if n_cached:
         summary_parts.append(f"{n_cached} cached")
+    if n_analyzed:
+        summary_parts.append(f"{n_analyzed} analyzed")
     if n_extracted:
         summary_parts.append(f"{n_extracted} extracted")
     if n_failed:
         summary_parts.append(f"{n_failed} failed")
     if removed:
         summary_parts.append(f"{len(removed)} removed")
-    print(f"  DSP features done: {', '.join(summary_parts)} ({elapsed_step:.1f}s)")
+    print(f"  Done: {', '.join(summary_parts)} ({elapsed_step:.1f}s)")
 
     # ── Step 1b: CLAP audio embeddings ──
     track_order = [t.path for t in tracks]
@@ -460,6 +503,7 @@ def _cmd_run(args) -> int:
                         energy=info.energy, camelot=info.key, bpm=info.bpm,
                         structure=info.structure, vibe=info.vibe,
                         has_vocals=info.vocal == "V",
+                        group_id=group.group_id,
                     )
                     existing = read_existing_tag(tf.path)
                     if existing == new_tag:
@@ -696,7 +740,7 @@ def _cmd_apply(args) -> int:
     )
 
     if args.write_tags and not args.dry_run:
-        print("Writing group IDs to file metadata...")
+        print("Writing tags with group IDs to file metadata...")
         for group in assignment.groups:
             for idx in group.member_indices:
                 tf = tracks[idx]
@@ -705,6 +749,7 @@ def _cmd_apply(args) -> int:
                     energy=info.energy, camelot=info.key, bpm=info.bpm,
                     structure=info.structure, vibe=info.vibe,
                     has_vocals=info.vocal == "V",
+                    group_id=group.group_id,
                 )
                 write_tag(tf.path, tag, dry_run=False)
         print(f"  Tags written to {len(tracks)} files")

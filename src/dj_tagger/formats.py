@@ -12,11 +12,12 @@ def format_tag(
     structure: str | None = None,
     vibe: str | None = None,
     has_vocals: bool | None = None,
+    group_id: str | None = None,
 ) -> str:
     """Build the final comment tag string.
 
-    Returns e.g. ``"9A_E3_HYPN_64H_NV_126"``
-    Order: KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM
+    Returns e.g. ``"9A_E3_HYPN_64H_NV_126"`` or ``"9A_E3_HYPN_64H_NV_126_G001"``
+    Order: KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM[_GID]
     """
     parts = [
         camelot or "??",
@@ -26,10 +27,12 @@ def format_tag(
         "V" if has_vocals else "NV" if has_vocals is not None else "??",
         str(bpm) if bpm is not None else "???",
     ]
+    if group_id:
+        parts.append(group_id)
     return "_".join(parts)
 
 
-# Current format: KEY_ENERGY_VIBE_STRUCT_VOC_BPM
+# Current format: KEY_ENERGY_VIBE_STRUCT_VOC_BPM[_GID]
 _TAG_PATTERN_V3 = re.compile(
     r"^(\d{1,2}[AB]|\?\?)"
     r"_"
@@ -41,7 +44,8 @@ _TAG_PATTERN_V3 = re.compile(
     r"_"
     r"(V|NV|\?\?)"
     r"_"
-    r"(\d{2,3}|\?\?\?)$"
+    r"(\d{2,3}|\?\?\?)"
+    r"(?:_(G\d{3}))?$"
 )
 
 # Legacy v2: E# | KEY | BPM | STRUCT | VIBE | VOC [| GID]
@@ -81,10 +85,10 @@ def parse_tag(tag_string: str) -> dict[str, str] | None:
     """
     s = tag_string.strip()
 
-    # Try v3 first (current: KEY | ENERGY | VIBE | STRUCT | VOC | BPM)
+    # Try v3 first (current: KEY_ENERGY_VIBE_STRUCT_VOC_BPM[_GID])
     m = _TAG_PATTERN_V3.match(s)
     if m:
-        return {
+        result = {
             "key": m.group(1),
             "energy": m.group(2),
             "vibe": m.group(3),
@@ -92,6 +96,9 @@ def parse_tag(tag_string: str) -> dict[str, str] | None:
             "vocal": m.group(5),
             "bpm": m.group(6),
         }
+        if m.group(7):
+            result["group_id"] = m.group(7)
+        return result
 
     # Try v2 (legacy: E# | KEY | BPM | STRUCT | VIBE | VOC [| GID])
     m = _TAG_PATTERN_V2.match(s)

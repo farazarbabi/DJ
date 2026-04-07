@@ -25,7 +25,7 @@ def test_key_returns_valid_camelot(sine_440hz):
     track = load_audio_features(sine_440hz)
     result = analyze_key(track)
     assert result.camelot in KEY_TO_CAMELOT.values()
-    assert 0 <= result.confidence <= 1.0
+    assert 0.0 <= result.confidence <= 1.0
 
 
 def test_key_c_major(c_major_chord):

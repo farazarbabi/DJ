@@ -79,3 +79,27 @@ def test_parse_all_flow_types_v3():
         result = parse_tag(tag)
         assert result is not None
         assert result["structure"] == f"32{flow}"
+
+
+def test_format_with_group_id():
+    assert format_tag(3, "9A", 126, "64H", "HYPN", False, "G001") == "9A_E3_HYPN_64H_NV_126_G001"
+
+
+def test_format_without_group_id():
+    """Without group_id, tag should not have trailing underscore."""
+    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "9A_E3_HYPN_64H_NV_126"
+
+
+def test_parse_v3_with_group():
+    result = parse_tag("9A_E3_HYPN_64H_NV_126_G017")
+    assert result is not None
+    assert result["group_id"] == "G017"
+    assert result["key"] == "9A"
+    assert result["bpm"] == "126"
+
+
+def test_parse_v3_without_group():
+    """Tags without group_id should still parse and not have group_id key."""
+    result = parse_tag("9A_E3_HYPN_64H_NV_126")
+    assert result is not None
+    assert "group_id" not in result

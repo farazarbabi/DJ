@@ -41,20 +41,32 @@ class GroupAssignment:
     track_to_group: dict[str, str] = field(default_factory=dict)  # path -> group_id
 
 
+def _camelot_sort_key(key: str) -> tuple[int, int]:
+    """Sort key for Camelot codes. Descending: 12B, 12A, 11B, 11A, ..., 1B, 1A."""
+    if not key or key == "??":
+        return (0, 0)
+    num = int(key[:-1])
+    letter = 1 if key[-1] == "B" else 0  # B before A at same number
+    return (num, letter)
+
+
 def assign_group_ids(
     tracks: list[TrackFeatures],
     labels: NDArray,
     distance_matrix: NDArray,
 ) -> GroupAssignment:
-    """Create stable group IDs and descriptors from clustering labels."""
-    medoids = compute_all_medoids(distance_matrix, labels)
-    assignment = GroupAssignment()
+    """Create stable group IDs and descriptors from clustering labels.
 
+    Groups are numbered by Camelot key descending (12B first, 1A last)
+    so that sorting by group ID in DJ software orders tracks by key.
+    """
+    medoids = compute_all_medoids(distance_matrix, labels)
+
+    # First pass: build groups with temporary IDs
+    temp_groups: list[GroupInfo] = []
     for label in sorted(np.unique(labels)):
         members = list(np.where(labels == label)[0])
-        group_id = f"G{label + 1:03d}"
 
-        # Compute representative descriptors
         infos = [tracks[i].info for i in members]
         keys = [i.key for i in infos if i.key]
         energies = [i.energy for i in infos if i.energy is not None]
@@ -70,10 +82,8 @@ def assign_group_ids(
         rep_structure = _safe_mode(structures, "32H")
         rep_vocal = _safe_mode(vocals, "NV")
 
-        folder_name = f"{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}"
-
-        group = GroupInfo(
-            group_id=group_id,
+        temp_groups.append(GroupInfo(
+            group_id="",  # assigned after sorting
             member_indices=members,
             medoid_index=medoids[int(label)],
             key=rep_key,
@@ -82,14 +92,25 @@ def assign_group_ids(
             bpm=rep_bpm,
             structure=rep_structure,
             vocal=rep_vocal,
-            folder_name=folder_name,
+            folder_name="",
+        ))
+
+    # Sort by Camelot key ascending (1A, 1B, 2A, 2B, ..., 12A, 12B)
+    temp_groups.sort(key=lambda g: _camelot_sort_key(g.key))
+
+    # Second pass: assign sequential IDs in sorted order
+    assignment = GroupAssignment()
+    for i, group in enumerate(temp_groups):
+        group.group_id = f"G{i + 1:03d}"
+        group.folder_name = (
+            f"{group.group_id}_{group.key}_E{group.energy}_{group.vibe}"
+            f"_{group.structure}_{group.vocal}_{group.bpm}"
         )
         assignment.groups.append(group)
+        for idx in group.member_indices:
+            assignment.track_to_group[tracks[idx].path] = group.group_id
 
-        for idx in members:
-            assignment.track_to_group[tracks[idx].path] = group_id
-
-    logger.info("Assigned %d groups", len(assignment.groups))
+    logger.info("Assigned %d groups (sorted by key desc)", len(assignment.groups))
     return assignment
 
 
@@ -170,7 +191,7 @@ def assign_new_tracks(
                 bpm=rep_bpm,
                 structure=rep_structure,
                 vocal=rep_vocal,
-                folder_name=f"{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}",
+                folder_name=f"{new_gid}_{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}",
             )
             assignment.groups.append(new_group)
             assignment.track_to_group[path] = new_gid
