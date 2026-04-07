@@ -83,8 +83,12 @@ def _detect_key_librosa(track_audio: TrackAudio) -> KeyResult:
     Splits the track into segments, detects key per segment, and
     votes weighted by each segment's confidence. This handles intros,
     breakdowns, and key changes much better than whole-track averaging.
+
+    Uses the full signal (not harmonic-only) so bass content contributes
+    to key detection — critical for electronic music where bass defines
+    the root note.
     """
-    y = track_audio.y_harmonic
+    y = track_audio.y
     sr = track_audio.sr
     n_samples = len(y)
     min_segment_samples = int(MIN_SEGMENT_SECONDS * sr)
@@ -97,7 +101,6 @@ def _detect_key_librosa(track_audio: TrackAudio) -> KeyResult:
         segment_len = n_samples // n_seg
 
     if n_seg <= 1:
-        # Track too short for segmentation, use whole-track analysis
         return _detect_key_whole_track(y, sr)
 
     # Detect key per segment
