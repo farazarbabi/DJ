@@ -25,11 +25,12 @@ class GroupInfo:
     group_id: str
     member_indices: list[int]
     medoid_index: int
+    key: str
     energy: int
     vibe: str
-    bpm: int
     structure: str
     vocal: str
+    bpm: int
     folder_name: str
 
 
@@ -55,27 +56,27 @@ def assign_group_ids(
 
         # Compute representative descriptors
         infos = [tracks[i].info for i in members]
+        keys = [i.key for i in infos if i.key]
         energies = [i.energy for i in infos if i.energy is not None]
         vibes = [i.vibe for i in infos if i.vibe]
         bpms = [i.bpm for i in infos if i.bpm is not None]
         structures = [i.structure for i in infos if i.structure]
         vocals = [i.vocal for i in infos if i.vocal]
 
+        rep_key = _safe_mode(keys, "??")
         rep_energy = _safe_mode(energies, 3)
         rep_vibe = _safe_mode(vibes, "HYPN")
         rep_bpm = round(np.median(bpms)) if bpms else 128
         rep_structure = _safe_mode(structures, "32H")
         rep_vocal = _safe_mode(vocals, "NV")
 
-        # Abbreviate vibe for folder name
-        vibe_abbr = rep_vibe[:3] if len(rep_vibe) >= 3 else rep_vibe
-
-        folder_name = f"{group_id}_E{rep_energy}{vibe_abbr}_{rep_bpm}_{rep_structure}"
+        folder_name = f"{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}"
 
         group = GroupInfo(
             group_id=group_id,
             member_indices=members,
             medoid_index=medoids[int(label)],
+            key=rep_key,
             energy=rep_energy,
             vibe=rep_vibe,
             bpm=rep_bpm,
@@ -153,17 +154,23 @@ def assign_new_tracks(
             next_id = max((int(g.group_id[1:]) for g in assignment.groups), default=0) + 1
             new_gid = f"G{next_id:03d}"
             info = new_track.info
-            vibe_abbr = (info.vibe or "UNK")[:3]
+            rep_key = info.key or "??"
+            rep_energy = info.energy or 3
+            rep_vibe = info.vibe or "HYPN"
+            rep_bpm = info.bpm or 128
+            rep_structure = info.structure or "32H"
+            rep_vocal = info.vocal or "NV"
             new_group = GroupInfo(
                 group_id=new_gid,
                 member_indices=[idx],
                 medoid_index=idx,
-                energy=info.energy or 3,
-                vibe=info.vibe or "HYPN",
-                bpm=info.bpm or 128,
-                structure=info.structure or "32H",
-                vocal=info.vocal or "NV",
-                folder_name=f"{new_gid}_E{info.energy or 3}{vibe_abbr}_{info.bpm or 128}_{info.structure or '32H'}",
+                key=rep_key,
+                energy=rep_energy,
+                vibe=rep_vibe,
+                bpm=rep_bpm,
+                structure=rep_structure,
+                vocal=rep_vocal,
+                folder_name=f"{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}",
             )
             assignment.groups.append(new_group)
             assignment.track_to_group[path] = new_gid

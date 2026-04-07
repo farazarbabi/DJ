@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(dj-grouper run:*)",
+      "Bash(python3)",
+      "Bash(find:*)",
+      "Bash(python3:*)",
+      "Bash(python -c \"from dj_grouper.features.clap_embed import is_clap_available; print\\(is_clap_available\\(\\)\\)\")",
+      "Bash(python -c \"from dj_grouper.features.embeddings import is_clap_available; print\\(is_clap_available\\(\\)\\)\")",
+      "Bash(python -c \"import tqdm; print\\(tqdm.__version__\\)\")",
+      "Bash(pip show:*)",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

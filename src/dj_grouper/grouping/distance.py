@@ -159,5 +159,10 @@ def compute_distance_matrix(
                 d_min, d_max,
             )
 
+    n_nan = int(np.sum(np.isnan(matrix)))
+    if n_nan > 0:
+        logger.warning("Distance matrix has %d NaN entries! Replacing with 1.0", n_nan)
+        matrix = np.nan_to_num(matrix, nan=1.0)
+
     logger.info("Distance matrix computed: %dx%d", n, n)
     return matrix

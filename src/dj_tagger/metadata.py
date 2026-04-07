@@ -98,10 +98,10 @@ def _write_mp3(path: str, tag_string: str) -> None:
     # Write both a tagged comment (for our detection) and a generic comment
     # (for DJ software like Rekordbox/Traktor/Serato)
     audio.tags.add(
-        COMM(encoding=3, lang="eng", desc=TAG_IDENTIFIER, text=tag_string)
+        COMM(encoding=0, lang="eng", desc=TAG_IDENTIFIER, text=tag_string)
     )
     audio.tags.add(
-        COMM(encoding=3, lang="eng", desc="", text=tag_string)
+        COMM(encoding=0, lang="eng", desc="", text=tag_string)
     )
     audio.save()
 
@@ -163,10 +163,10 @@ def _write_aiff(path: str, tag_string: str) -> None:
     if audio.tags is None:
         audio.add_tags()
     audio.tags.add(
-        COMM(encoding=3, lang="eng", desc=TAG_IDENTIFIER, text=tag_string)
+        COMM(encoding=0, lang="eng", desc=TAG_IDENTIFIER, text=tag_string)
     )
     audio.tags.add(
-        COMM(encoding=3, lang="eng", desc="", text=tag_string)
+        COMM(encoding=0, lang="eng", desc="", text=tag_string)
     )
     audio.save()
 
@@ -201,10 +201,10 @@ def _write_wav(path: str, tag_string: str) -> None:
     if audio.tags is None:
         audio.add_tags()
     audio.tags.add(
-        COMM(encoding=3, lang="eng", desc=TAG_IDENTIFIER, text=tag_string)
+        COMM(encoding=0, lang="eng", desc=TAG_IDENTIFIER, text=tag_string)
     )
     audio.tags.add(
-        COMM(encoding=3, lang="eng", desc="", text=tag_string)
+        COMM(encoding=0, lang="eng", desc="", text=tag_string)
     )
     audio.save()
 

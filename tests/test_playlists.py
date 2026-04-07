@@ -21,8 +21,8 @@ def _make_assignment():
     ]
     group = GroupInfo(
         group_id="G001", member_indices=[0, 1], medoid_index=0,
-        energy=3, vibe="HYPN", bpm=126, structure="64H",
-        vocal="NV", folder_name="G001_E3HYP_126_64H",
+        key="9A", energy=3, vibe="HYPN", structure="64H",
+        vocal="NV", bpm=126, folder_name="9A_E3_HYPN_64H_NV_126",
     )
     assignment = GroupAssignment(
         groups=[group],
@@ -34,7 +34,7 @@ def _make_assignment():
 def test_group_playlist_created(tmp_path):
     tracks, assignment = _make_assignment()
     generate_group_playlists(tracks, assignment, str(tmp_path))
-    playlist = tmp_path / "groups" / "G001_E3HYP_126_64H.m3u8"
+    playlist = tmp_path / "groups" / "9A_E3_HYPN_64H_NV_126.m3u8"
     assert playlist.exists()
     content = playlist.read_text()
     assert "#EXTM3U" in content

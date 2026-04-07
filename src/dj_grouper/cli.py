@@ -148,6 +148,7 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
     n = len(feature_tracks)
     all_bpms = [t.info.bpm for t in feature_tracks]
     all_energies = [t.info.energy for t in feature_tracks]
+    all_keys = [t.info.key for t in feature_tracks]
     conf_threshold = config.vocal_confidence_threshold
 
     confident_v = [i for i in range(n) if feature_tracks[i].info.vocal == "V"
@@ -156,7 +157,7 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
                     or feature_tracks[i].info.confidences.get("vocal", 1.0) < conf_threshold]
 
     if len(confident_v) < 2:
-        return cluster_tracks(distance_matrix, config, bpms=all_bpms, energies=all_energies)
+        return cluster_tracks(distance_matrix, config, bpms=all_bpms, energies=all_energies, keys=all_keys)
 
     labels = np.zeros(n, dtype=np.intp)
 
@@ -164,7 +165,8 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
         sub = distance_matrix[np.ix_(confident_nv, confident_nv)]
         sub_bpms = [all_bpms[i] for i in confident_nv]
         sub_energies = [all_energies[i] for i in confident_nv]
-        sub_labels = cluster_tracks(sub, config, bpms=sub_bpms, energies=sub_energies)
+        sub_keys = [all_keys[i] for i in confident_nv]
+        sub_labels = cluster_tracks(sub, config, bpms=sub_bpms, energies=sub_energies, keys=sub_keys)
         for i, idx in enumerate(confident_nv):
             labels[idx] = sub_labels[i]
 
@@ -172,7 +174,8 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
     sub_v = distance_matrix[np.ix_(confident_v, confident_v)]
     sub_v_bpms = [all_bpms[i] for i in confident_v]
     sub_v_energies = [all_energies[i] for i in confident_v]
-    sub_v_labels = cluster_tracks(sub_v, config, bpms=sub_v_bpms, energies=sub_v_energies)
+    sub_v_keys = [all_keys[i] for i in confident_v]
+    sub_v_labels = cluster_tracks(sub_v, config, bpms=sub_v_bpms, energies=sub_v_energies, keys=sub_v_keys)
     for i, idx in enumerate(confident_v):
         labels[idx] = sub_v_labels[i] + label_offset
 
@@ -281,20 +284,26 @@ def _cmd_run(args) -> int:
 
     raw_cache = load_raw_cache(args.cache)
 
+    import time as _time
+
     n_cached = 0
     n_extracted = 0
     n_failed = 0
-    print(f"\n[1/5] Processing {len(tracks)} tracks...")
+    total_tracks = len(tracks)
+    print(f"\n[1/5] Extracting DSP features ({total_tracks} tracks)...")
+    t_step = _time.perf_counter()
 
     for i, t in enumerate(tracks):
+        done = i + 1
+        pct = done * 100 // total_tracks
         mtime = os.path.getmtime(t.path)
         cached = raw_cache.get(t.path)
         if cached and cached.mtime == mtime:
             cached.info = t
             n_cached += 1
-            print(f"  [{i+1}/{len(tracks)}] {Path(t.path).name} [cached]")
+            print(f"  [{done:>{len(str(total_tracks))}}/{total_tracks}] {pct:>3}%  {Path(t.path).name}  [cached]")
         else:
-            print(f"  [{i+1}/{len(tracks)}] {Path(t.path).name}", end="", flush=True)
+            print(f"  [{done:>{len(str(total_tracks))}}/{total_tracks}] {pct:>3}%  {Path(t.path).name}", end="", flush=True)
             try:
                 audio = load_audio_features(t.path)
                 feats = extract_dsp_features(audio)
@@ -311,11 +320,11 @@ def _cmd_run(args) -> int:
                     mtime=mtime, info=t, dsp=feats, section_dsp=sec_dsp,
                 )
                 n_extracted += 1
-                print(" OK")
+                print("  [extracted]")
             except Exception as e:
                 raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
                 n_failed += 1
-                print(f" FAILED: {e}")
+                print(f"  FAILED: {e}")
 
         # Save cache periodically (every 20 tracks) for crash resilience
         if (i + 1) % 20 == 0:
@@ -328,21 +337,35 @@ def _cmd_run(args) -> int:
         del raw_cache[p]
 
     save_raw_cache(raw_cache, args.cache)
-    print(f"  {n_cached} cached, {n_extracted} extracted, {n_failed} failed, {len(removed)} removed")
+    elapsed_step = _time.perf_counter() - t_step
+    summary_parts = []
+    if n_cached:
+        summary_parts.append(f"{n_cached} cached")
+    if n_extracted:
+        summary_parts.append(f"{n_extracted} extracted")
+    if n_failed:
+        summary_parts.append(f"{n_failed} failed")
+    if removed:
+        summary_parts.append(f"{len(removed)} removed")
+    print(f"  DSP features done: {', '.join(summary_parts)} ({elapsed_step:.1f}s)")
 
-    # ── Step 1b: Incremental CLAP extraction (separate cache) ──
+    # ── Step 1b: CLAP audio embeddings ──
     track_order = [t.path for t in tracks]
     clap_embeddings = None
 
     if not args.no_clap and is_clap_available():
-        print("  CLAP embeddings (incremental)...")
+        print(f"\n  Extracting CLAP audio embeddings ({total_tracks} tracks)...")
+        t_clap = _time.perf_counter()
         try:
             raw_clap = extract_clap_incremental(
                 track_order, args.clap_cache, force=args.force_clap,
             )
             clap_embeddings, _ = fit_pca(raw_clap, config.clap_pca_dims)
+            print(f"  CLAP done ({_time.perf_counter() - t_clap:.1f}s)")
         except Exception as e:
-            print(f"  CLAP failed: {e}")
+            print(f"  CLAP failed: {e} -- continuing without CLAP")
+    elif not args.no_clap:
+        print("\n  CLAP not installed -- skipping audio embeddings")
 
     cache = build_features_from_raw(raw_cache, track_order, clap_embeddings, config)
     feature_tracks = cache.tracks
@@ -365,43 +388,55 @@ def _cmd_run(args) -> int:
         n_del = len(known - current)
 
         if n_new == 0 and n_del == 0:
-            print(f"\n[2/5] All {len(feature_tracks)} tracks already grouped")
+            print(f"\n[2/5] Grouping -- all {len(feature_tracks)} tracks already assigned")
             assignment = existing_assignment
         else:
-            print(f"\n[2/5] Incremental grouping: {n_new} new, {n_del} removed...")
+            print(f"\n[2/5] Grouping -- incremental: {n_new} new, {n_del} removed...")
             assignment = assign_new_tracks(feature_tracks, existing_assignment, config)
     else:
         # Full re-clustering
-        print(f"\n[2/5] Clustering {len(feature_tracks)} tracks...")
+        n_ft = len(feature_tracks)
+        print(f"\n[2/5] Grouping {n_ft} tracks by similarity...")
+        _t = _time.perf_counter()
         distance_matrix = compute_distance_matrix(feature_tracks, config)
+        print(f"  Computing {n_ft}x{n_ft} distance matrix... ({_time.perf_counter() - _t:.1f}s)")
 
         feedback = load_feedback(args.feedback)
         if feedback:
             distance_matrix = apply_feedback_to_distances(distance_matrix, feature_tracks, feedback, config)
 
+        _t = _time.perf_counter()
         labels = _cluster_with_soft_vocal(feature_tracks, distance_matrix, config)
+        print(f"  Clustering + validation done ({_time.perf_counter() - _t:.1f}s)")
+
+        _t = _time.perf_counter()
         assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
 
     save_assignment(assignment, assignment_path)
 
     # ── Step 3: Groups ──
-    print(f"\n[3/5] Groups:")
+    n_groups = len(assignment.groups)
+    sizes = sorted([len(g.member_indices) for g in assignment.groups], reverse=True)
+    print(f"\n[3/5] {n_groups} groups formed (sizes: {', '.join(str(s) for s in sizes)})")
     for group in assignment.groups:
         print(f"  {group.folder_name}: {len(group.member_indices)} tracks")
 
     # ── Step 4: Recommendations ──
-    print(f"\n[4/5] Computing recommendations...")
+    print(f"\n[4/5] Scoring track-to-track recommendations ({len(feature_tracks)} tracks)...")
+    _t = _time.perf_counter()
     recommendations = compute_recommendations(feature_tracks, config)
+    n_recs = len(recommendations)
+    print(f"  {n_recs} recommendations computed ({_time.perf_counter() - _t:.1f}s)")
 
-    # ── Step 5: Output (atomic CSVs, clean folder recreation, incremental tags) ──
-    print(f"\n[5/5] Writing output...")
+    # ── Step 5: Output ──
+    print(f"\n[5/5] Writing output files...")
 
     # Atomic CSV: write to temp, then rename
     _atomic_write_csv(export_groups_csv, feature_tracks, assignment, args.csv)
-    print(f"  {args.csv}")
+    print(f"  CSV: {args.csv}")
 
     _atomic_write_csv(export_recommendations_csv, recommendations, args.recommendations_csv)
-    print(f"  {args.recommendations_csv}")
+    print(f"  CSV: {args.recommendations_csv}")
 
     if not args.dry_run:
         # Clean and recreate group folders (hard links are instant)
@@ -411,7 +446,7 @@ def _cmd_run(args) -> int:
             feature_tracks, assignment, args.output,
             dry_run=False, use_copy=args.copy,
         )
-        print(f"  {args.output}/")
+        print(f"  Folders: {args.output}/ ({n_groups} groups)")
 
         # Incremental tag writing: skip files that already have the correct tag
         if args.write_tags:
@@ -424,7 +459,7 @@ def _cmd_run(args) -> int:
                     new_tag = format_tag(
                         energy=info.energy, camelot=info.key, bpm=info.bpm,
                         structure=info.structure, vibe=info.vibe,
-                        has_vocals=info.vocal == "V", group_id=group.group_id,
+                        has_vocals=info.vocal == "V",
                     )
                     existing = read_existing_tag(tf.path)
                     if existing == new_tag:
@@ -434,7 +469,7 @@ def _cmd_run(args) -> int:
                         n_written += 1
             print(f"  Tags: {n_written} written, {n_skipped} unchanged")
     else:
-        print("  (dry run — no files modified)")
+        print("  (dry run -- no files modified)")
 
     if args.playlists:
         # Clean and recreate playlists
@@ -442,9 +477,9 @@ def _cmd_run(args) -> int:
             shutil.rmtree(args.playlists)
         generate_group_playlists(feature_tracks, assignment, args.playlists)
         generate_recommendation_playlists(recommendations, args.playlists)
-        print(f"  Playlists in {args.playlists}/")
+        print(f"  Playlists: {args.playlists}/")
 
-    print("\nDone.")
+    print(f"\nDone in {_time.perf_counter() - t_step:.0f}s.")
     return 0
 
 
@@ -669,7 +704,7 @@ def _cmd_apply(args) -> int:
                 tag = format_tag(
                     energy=info.energy, camelot=info.key, bpm=info.bpm,
                     structure=info.structure, vibe=info.vibe,
-                    has_vocals=info.vocal == "V", group_id=group.group_id,
+                    has_vocals=info.vocal == "V",
                 )
                 write_tag(tf.path, tag, dry_run=False)
         print(f"  Tags written to {len(tracks)} files")

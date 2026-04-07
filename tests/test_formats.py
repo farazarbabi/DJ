@@ -3,25 +3,33 @@
 from dj_tagger.formats import format_tag, parse_tag
 
 
-def test_format_with_bpm():
-    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "E3 | 9A | 126 | 64H | HYPN | NV"
-
-
-def test_format_with_bpm_and_group():
-    result = format_tag(3, "9A", 126, "64H", "HYPN", False, "G017")
-    assert result == "E3 | 9A | 126 | 64H | HYPN | NV | G017"
+def test_format_v3():
+    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "9A_E3_HYPN_64H_NV_126"
 
 
 def test_format_vocals():
-    assert format_tag(4, "5A", 130, "32D", "RAW", True) == "E4 | 5A | 130 | 32D | RAW | V"
+    assert format_tag(4, "5A", 130, "32D", "RAW", True) == "5A_E4_RAW_32D_V_130"
 
 
 def test_format_missing_fields():
     result = format_tag(None, None)
-    assert result == "E? | ?? | ??? | ?? | ?? | ??"
+    assert result == "??_E?_??_??_??_???"
 
 
-def test_parse_v2_with_bpm():
+def test_parse_v3():
+    result = parse_tag("9A_E3_HYPN_64H_NV_126")
+    assert result == {
+        "key": "9A",
+        "energy": "3",
+        "vibe": "HYPN",
+        "structure": "64H",
+        "vocal": "NV",
+        "bpm": "126",
+    }
+
+
+def test_parse_v2_legacy():
+    """Legacy v2 format should still parse."""
     result = parse_tag("E3 | 9A | 126 | 64H | HYPN | NV")
     assert result == {
         "energy": "3",
@@ -34,6 +42,7 @@ def test_parse_v2_with_bpm():
 
 
 def test_parse_v2_with_group():
+    """Legacy v2 with group ID should still parse."""
     result = parse_tag("E3 | 9A | 126 | 64H | HYPN | NV | G017")
     assert result is not None
     assert result["group_id"] == "G017"
@@ -41,7 +50,7 @@ def test_parse_v2_with_group():
 
 
 def test_parse_v1_legacy():
-    """Legacy format without BPM should still parse."""
+    """Legacy v1 format without BPM should still parse."""
     result = parse_tag("E3 | 9A | 64H | HYPN | NV")
     assert result is not None
     assert result["energy"] == "3"
@@ -50,9 +59,9 @@ def test_parse_v1_legacy():
     assert "bpm" not in result
 
 
-def test_parse_all_vibes():
+def test_parse_all_vibes_v3():
     for vibe in ("HYPN", "DRK", "RAW", "DEEP", "TRIB", "MEL", "ACID", "ATM"):
-        tag = f"E3 | 9A | 128 | 64H | {vibe} | NV"
+        tag = f"9A_E3_{vibe}_64H_NV_128"
         result = parse_tag(tag)
         assert result is not None
         assert result["vibe"] == vibe
@@ -64,9 +73,9 @@ def test_parse_invalid():
     assert parse_tag("E6 | 9A | 128 | 64H | HYPN | NV") is None  # E6 invalid
 
 
-def test_parse_all_flow_types():
+def test_parse_all_flow_types_v3():
     for flow in ("G", "H", "D", "B", "L"):
-        tag = f"E3 | 9A | 130 | 32{flow} | HYPN | NV"
+        tag = f"9A_E3_HYPN_32{flow}_NV_130"
         result = parse_tag(tag)
         assert result is not None
         assert result["structure"] == f"32{flow}"

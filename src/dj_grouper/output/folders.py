@@ -29,6 +29,8 @@ def create_group_folders(
     if not dry_run:
         out.mkdir(parents=True, exist_ok=True)
 
+    fell_back_to_copy = False
+
     for group in assignment.groups:
         folder = out / group.folder_name
         if not dry_run:
@@ -47,15 +49,17 @@ def create_group_folders(
                 logger.debug("Already exists: %s", dst)
                 continue
 
-            if use_copy:
+            if use_copy or fell_back_to_copy:
                 shutil.copy2(str(src), str(dst))
                 logger.debug("Copied: %s -> %s", src, dst)
             else:
                 try:
                     _create_hard_link(str(dst), str(src))
                     logger.debug("Linked: %s -> %s", src, dst)
-                except OSError:
-                    logger.warning("Hard link failed, falling back to copy: %s", src)
+                except OSError as e:
+                    if not fell_back_to_copy:
+                        logger.info("Hard links not supported (%s), using copy", e)
+                        fell_back_to_copy = True
                     shutil.copy2(str(src), str(dst))
 
         # Write group info file
@@ -64,7 +68,7 @@ def create_group_folders(
 
     n_folders = len(assignment.groups)
     n_files = sum(len(g.member_indices) for g in assignment.groups)
-    action = "DRY RUN" if dry_run else ("copied" if use_copy else "linked")
+    action = "DRY RUN" if dry_run else ("copied" if use_copy or fell_back_to_copy else "linked")
     logger.info("Created %d folders with %d files (%s)", n_folders, n_files, action)
 
 
@@ -75,6 +79,7 @@ def _write_group_info(folder: Path, group, member_tracks) -> None:
         f"Group: {group.group_id}",
         f"Folder: {group.folder_name}",
         f"Tracks: {len(member_tracks)}",
+        f"Key: {group.key}",
         f"Energy: E{group.energy}",
         f"Vibe: {group.vibe}",
         f"BPM: {group.bpm}",
@@ -87,6 +92,8 @@ def _write_group_info(folder: Path, group, member_tracks) -> None:
     for tf in member_tracks:
         info = tf.info
         tag_parts = []
+        if info.key:
+            tag_parts.append(info.key)
         if info.energy:
             tag_parts.append(f"E{info.energy}")
         if info.bpm:

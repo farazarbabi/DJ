@@ -37,12 +37,13 @@ dj-grouper depends on dj-tagger. Both are CLI entry points from one pyproject.to
 ## Key design decisions
 
 - **Input**: `./files/` — **Output**: `./outputs/` — nothing generated in project root
-- **Cache**: `outputs/features_cache.pkl` — incremental per-file keyed by path+mtime. Only audio extraction is cached; clustering and recommendations always recompute.
-- **Tag format**: `E# | KEY | BPM | STRUCT | VIBE | VOC [| GID]` — backward-compatible parser handles v1 (no BPM) and v2
+- **Tagger cache**: `outputs/tagger_cache.pkl` — per-track analysis results keyed by filename+mtime. Skips audio loading and all analyzers for unchanged files. Flags: `--no-cache` (force re-analysis), `--clear-cache` (delete and re-analyze). Version-gated by `ANALYZER_VERSION` in `cache.py`.
+- **Grouper cache**: `outputs/features_cache.pkl` — incremental per-file DSP extraction keyed by path+mtime. Only audio extraction is cached; clustering and recommendations always recompute.
+- **Tag format**: `KEY_ENERGY_VIBE_STRUCT_VOC_BPM` (e.g. `9A_E3_HYPN_64H_NV_126`) — backward-compatible parser handles legacy v1 (pipe-separated, no BPM) and v2 (pipe-separated with BPM)
 - **Metadata**: written to COMMENT field via mutagen — both generic (for DJ software) and tagged (desc="DJTAGGER" for self-detection)
 - **Group folders**: hard-linked files on NTFS (zero extra space), fall back to copy
 - **BPM detection**: reads native TBPM from file metadata (Rekordbox/DJ software) before falling back to librosa beat tracking
-- **Clustering**: agglomerative with average linkage, soft vocal partitioning (only split when vocal confidence > 0.5), post-clustering BPM validation (force-split groups with >6% BPM spread), post-clustering energy validation (force-split groups with >3 energy levels spread), target group size (2, 8)
+- **Clustering**: agglomerative with average linkage, soft vocal partitioning (only split when vocal confidence > 0.5), post-clustering BPM validation (force-split groups with >6% BPM spread), post-clustering energy validation (force-split groups with >3 energy levels spread), target group size (4, 12)
 - **Recommendations**: directional scoring (A→B ≠ B→A), DJ usability features, soft BPM penalty (4-8%), no recommendation modes — single similarity ranking
 - **Vibe**: internally continuous scores (8 floats), exported as argmax label. Used as continuous in distance computation.
 - **CLAP**: on by default when installed (opt-out with `--no-clap`). The old `--use-clap` flag is removed.
@@ -71,7 +72,7 @@ These files contain tunable thresholds that directly affect output quality. Chan
 
 - Tests use synthetic audio (numpy-generated WAVs via soundfile) — no real music files needed
 - `conftest.py` provides fixtures: sine waves, noise, silence, chords, etc.
-- Tag format tests cover v1 legacy and v2 with BPM/GID
+- Tag format tests cover current v3 (underscore-separated) and legacy v1/v2 (pipe-separated) parsing
 - Distance/scoring tests use `_make_track()` helper that builds TrackFeatures from parameters
 - TrackFeatures DSP vector is 21 dimensions (10 curated spectral/rhythmic + 5 MFCCs + 6 tonnetz)
 
@@ -87,10 +88,11 @@ These files contain tunable thresholds that directly affect output quality. Chan
 ## When changing analyzers
 
 1. Update the analyzer code
-2. Run `pytest tests/ -v` to verify
-3. Re-tag: `dj-tagger files -r --write-tags --overwrite`
-4. Re-extract: `dj-grouper run -r --force-extract --dry-run` to preview
-5. Check grouping quality before writing: look at group folder names and sizes
+2. Bump `ANALYZER_VERSION` in `src/dj_tagger/cache.py` (invalidates tagger cache)
+3. Run `pytest tests/ -v` to verify
+4. Re-tag: `dj-tagger files -r --write-tags --overwrite`
+5. Re-extract: `dj-grouper run -r --force-extract --dry-run` to preview
+6. Check grouping quality before writing: look at group folder names and sizes
 
 ## When changing distance/scoring
 

@@ -12,27 +12,39 @@ def format_tag(
     structure: str | None = None,
     vibe: str | None = None,
     has_vocals: bool | None = None,
-    group_id: str | None = None,
 ) -> str:
     """Build the final comment tag string.
 
-    Returns e.g. ``"E3 | 9A | 126 | 64H | HYPN | NV"``
-    or with group: ``"E3 | 9A | 126 | 64H | HYPN | NV | G017"``
+    Returns e.g. ``"9A_E3_HYPN_64H_NV_126"``
+    Order: KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM
     """
     parts = [
-        f"E{energy}" if energy is not None else "E?",
         camelot or "??",
-        str(bpm) if bpm is not None else "???",
-        structure or "??",
+        f"E{energy}" if energy is not None else "E?",
         vibe or "??",
+        structure or "??",
         "V" if has_vocals else "NV" if has_vocals is not None else "??",
+        str(bpm) if bpm is not None else "???",
     ]
-    if group_id is not None:
-        parts.append(group_id)
-    return " | ".join(parts)
+    return "_".join(parts)
 
 
-# New format: E# | KEY | BPM | STRUCT | VIBE | VOC [| GID]
+# Current format: KEY_ENERGY_VIBE_STRUCT_VOC_BPM
+_TAG_PATTERN_V3 = re.compile(
+    r"^(\d{1,2}[AB]|\?\?)"
+    r"_"
+    r"E([1-5?])"
+    r"_"
+    r"(HYPN|DRK|RAW|DEEP|TRIB|MEL|ACID|ATM|\?\?)"
+    r"_"
+    r"(\d{2}[GHDBL]|\?\?)"
+    r"_"
+    r"(V|NV|\?\?)"
+    r"_"
+    r"(\d{2,3}|\?\?\?)$"
+)
+
+# Legacy v2: E# | KEY | BPM | STRUCT | VIBE | VOC [| GID]
 _TAG_PATTERN_V2 = re.compile(
     r"^E([1-5?])"
     r"\s*\|\s*"
@@ -48,7 +60,7 @@ _TAG_PATTERN_V2 = re.compile(
     r"(?:\s*\|\s*(G\d{3}))?$"
 )
 
-# Legacy format: E# | KEY | STRUCT | VIBE | VOC
+# Legacy v1: E# | KEY | STRUCT | VIBE | VOC
 _TAG_PATTERN_V1 = re.compile(
     r"^E([1-5?])"
     r"\s*\|\s*"
@@ -65,11 +77,23 @@ _TAG_PATTERN_V1 = re.compile(
 def parse_tag(tag_string: str) -> dict[str, str] | None:
     """Parse a tag string back into components. Returns None if not a valid tag.
 
-    Handles both v1 (without BPM) and v2 (with BPM and optional GID) formats.
+    Handles v3 (current), v2 (legacy with BPM), and v1 (legacy without BPM).
     """
     s = tag_string.strip()
 
-    # Try v2 first (with BPM)
+    # Try v3 first (current: KEY | ENERGY | VIBE | STRUCT | VOC | BPM)
+    m = _TAG_PATTERN_V3.match(s)
+    if m:
+        return {
+            "key": m.group(1),
+            "energy": m.group(2),
+            "vibe": m.group(3),
+            "structure": m.group(4),
+            "vocal": m.group(5),
+            "bpm": m.group(6),
+        }
+
+    # Try v2 (legacy: E# | KEY | BPM | STRUCT | VIBE | VOC [| GID])
     m = _TAG_PATTERN_V2.match(s)
     if m:
         result = {

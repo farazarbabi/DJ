@@ -34,7 +34,7 @@ def _get_clap_model():
     global _clap_model
     if _clap_model is None:
         import laion_clap
-        _clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
+        _clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-tiny")
         _clap_model.load_ckpt()
         logger.info("CLAP model loaded")
     return _clap_model
@@ -97,7 +97,8 @@ def extract_clap_incremental(
             batch_paths = [p for _, p in batch]
             batch_end = min(batch_start + CLAP_BATCH_SIZE, n_total)
 
-            print(f"    CLAP batch {batch_start + 1}-{batch_end}/{n_total}", flush=True)
+            pct = batch_end * 100 // n_total
+            print(f"    [{batch_end}/{n_total}] {pct:>3}%  extracting CLAP embeddings...", flush=True)
 
             try:
                 embeddings = model.get_audio_embedding_from_filelist(
@@ -112,9 +113,9 @@ def extract_clap_incremental(
                 save_clap_cache(cache, cache_path)
             except Exception as e:
                 logger.warning("CLAP batch failed: %s", e)
-                print(f"    CLAP batch failed: {e}")
+                print(f"    CLAP batch {batch_start + 1}-{batch_end} failed: {e}")
     else:
-        print(f"    CLAP: all {len(file_paths)} tracks cached")
+        print(f"    All {len(file_paths)} CLAP embeddings cached")
 
     # Remove deleted files from cache
     current_set = set(file_paths)
