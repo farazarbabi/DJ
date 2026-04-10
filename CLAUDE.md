@@ -12,7 +12,7 @@ DJ music library toolkit: `dj-tagger` (per-track audio analysis) + `dj-grouper` 
 # Install
 pip install -e ".[dev]"
 
-# Run tests (80 tests, ~12s)
+# Run tests (84 tests)
 pytest tests/ -v
 
 # Tag tracks (defaults to ./files)

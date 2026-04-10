@@ -104,14 +104,14 @@ Group ID + dominant energy + vibe abbreviation + median BPM + dominant structure
 
 ```bash
 # Full pipeline (loads from cache if available)
-dj-grouper run -r --write-tags
+dj-grouper --write-tags
 
 # Force re-extraction
-dj-grouper run -r --write-tags --force-extract
+dj-grouper --write-tags --force-extract
 
 # Step by step
-dj-grouper extract -r              # skips if cache exists
-dj-grouper extract -r --force      # regenerate cache
+dj-grouper extract              # skips if cache exists
+dj-grouper extract --force      # regenerate cache
 dj-grouper cluster
 dj-grouper review
 dj-grouper apply --write-tags

@@ -91,23 +91,27 @@ Analyzes audio files and writes per-track tags into the COMMENT metadata field.
 
 ```bash
 # Preview (dry run, default) -- reads from ./files
-dj-tagger files -r
+dj-tagger
 
 # Write tags
-dj-tagger files -r --write-tags
+dj-tagger --write-tags
+
+# Specify a different directory
+dj-tagger "E:\Music" --write-tags
 
 # Export to CSV
-dj-tagger files -r --csv outputs/results.csv
+dj-tagger --csv outputs/results.csv
 
 # JSON output, 4 workers, first 20 files
-dj-tagger files -r --json -w 4 --limit 20
+dj-tagger --json -w 4 --limit 20
 ```
 
 ### Options
 
 ```
-dj-tagger PATH [PATH ...] [OPTIONS]
+dj-tagger [PATH ...] [OPTIONS]
 
+  PATH                    Audio files or directories (default: ./files)
   -r, --recursive         Recurse into subdirectories
   --write-tags            Write tags to file metadata
   --overwrite             Overwrite existing comment tags
@@ -128,7 +132,7 @@ MP3, FLAC, AIFF, WAV, M4A
 | Analyzer | Output | Method |
 |----------|--------|--------|
 | Energy | E1--E5 + confidence | Weighted composite: RMS, spectral centroid, flux, onset density, low-freq ratio |
-| Key | Camelot (e.g., 9A) + confidence | Chroma + Krumhansl-Schmuckler profiles. Optional Essentia EDMA backend |
+| Key | Camelot (e.g., 9A) + confidence | 4-profile ensemble (EDMA, Krumhansl, Temperley, simple) with segment voting. Optional Essentia backend |
 | BPM | Integer | Native metadata (TBPM from Rekordbox/DJ software), fallback to librosa beat tracking |
 | Structure | e.g., 64H + confidence | Intro bars from onset energy envelope + flow type from energy variance |
 | Vibe | Label + continuous scores + confidence | Heuristic scoring from spectral features; all 8 scores preserved |
@@ -180,16 +184,19 @@ Groups tracks into similarity-based families and recommends similar tracks for e
 
 ```bash
 # Dry run -- see results without writing anything
-dj-grouper run -r --dry-run
+dj-grouper --dry-run
 
 # Full run -- everything at once
-dj-grouper run -r --write-tags
+dj-grouper --write-tags
+
+# Specify a different directory
+dj-grouper "E:\Music" --write-tags
 
 # Force re-extraction of features
-dj-grouper run -r --force-extract
+dj-grouper --force-extract
 ```
 
-That single `run` command:
+The default command:
 1. Scans `./files` for audio files
 2. Extracts features (incremental: only new/changed files, skips cached ones)
 3. Clusters tracks into groups (soft vocal partitioning, agglomerative with average linkage)
@@ -208,21 +215,21 @@ Feature extraction is the slow step. Results are cached incrementally in `output
 
 ```bash
 # First run: extracts features (~10s per track), saves cache
-dj-grouper run -r
+dj-grouper
 
 # Subsequent runs: only extracts new/changed files, loads rest from cache
-dj-grouper run -r
+dj-grouper
 
 # Force full re-extraction
-dj-grouper run -r --force-extract
+dj-grouper --force-extract
 ```
 
 ### Step-by-Step
 
 ```bash
 # Extract features only (incremental by default, --force to regenerate all)
-dj-grouper extract -r
-dj-grouper extract -r --force
+dj-grouper extract
+dj-grouper extract --force
 
 # Cluster and review interactively
 dj-grouper cluster
@@ -245,9 +252,11 @@ dj-grouper feedback --override "track.aiff" G017
 
 ### Subcommands
 
+Running `dj-grouper` with no subcommand runs the full pipeline (equivalent to `dj-grouper run`).
+
 | Command | Description |
 |---------|-------------|
-| `run` | Full pipeline in one shot |
+| *(default)* | Full pipeline in one shot |
 | `extract` | Extract features, save to cache (incremental) |
 | `cluster` | Cluster tracks into groups |
 | `review` | Interactive review of proposed groupings |
@@ -356,13 +365,13 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 
 | Constant | Default | Tunes |
 |----------|---------|-------|
-| `ENERGY_WEIGHTS` | rms:0.30, centroid:0.15, flux:0.20, onset:0.20, low_freq:0.15 | Energy feature weighting |
+| `ENERGY_WEIGHTS` | rms:0.25, centroid:0.10, flux:0.25, onset:0.15, low_freq:0.05, bpm:0.20 | Energy feature weighting |
 | `ENERGY_THRESHOLDS` | [0.20, 0.40, 0.60, 0.80] | E1--E5 boundaries |
 | `INTRO_ENERGY_RATIO` | 0.80 | Intro end detection sensitivity |
 | `INTRO_SUSTAIN_BARS` | 8 | Bars above threshold for intro end |
-| `VOCAL_ENERGY_RATIO` | 0.15 | Vocal band energy threshold |
-| `VOCAL_FLATNESS_MAX` | 0.40 | Spectral flatness threshold |
-| `VOCAL_FRAME_THRESHOLD` | 0.08 | Fraction of vocal frames for V |
+| `VOCAL_ENERGY_RATIO` | 0.12 | Vocal band energy threshold |
+| `VOCAL_FLATNESS_MAX` | 0.50 | Spectral flatness threshold |
+| `VOCAL_FRAME_THRESHOLD` | 0.20 | Fraction of vocal frames for V |
 
 ### dj-grouper -- `src/dj_grouper/config.py`
 
@@ -390,7 +399,7 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 
 ## Limitations
 
-- **Key detection**: chroma-based, can miss on heavily percussive tracks. Use `--use-essentia` for better accuracy.
+- **Key detection**: 4-profile ensemble with segment voting, 80% exact / 95% Camelot-compatible on test library. Use `--use-essentia` for an alternative backend.
 - **Vocal detection**: multi-stage spectral heuristics, not ML. Resonant synth leads may false positive.
 - **Structure**: assumes 4/4 time.
 - **Vibe**: heuristic, consistent but not always matching subjective judgment.
@@ -404,7 +413,7 @@ Feedback is stored in `outputs/feedback.csv` and persists across runs.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -v       # 80 tests
+pytest tests/ -v       # 84 tests
 ```
 
 ---
