@@ -14,6 +14,17 @@ logger = logging.getLogger(__name__)
 _DEFAULTS = GrouperConfig()
 
 
+def _fmt_elapsed(seconds: float) -> str:
+    """Format elapsed time as human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m{s:02d}s"
+
+
 def _setup_logging(verbose: bool, quiet: bool) -> None:
     level = logging.ERROR if quiet else (logging.DEBUG if verbose else logging.INFO)
     fmt = (
@@ -290,7 +301,7 @@ def _cmd_run(args) -> int:
         return 0
 
     n_tagged = sum(1 for t in tracks if t.energy is not None)
-    print(f" {len(tracks)} tracks found ({n_tagged} tagged, {len(tracks) - n_tagged} untagged) ({_time.perf_counter() - t_step:.1f}s)")
+    print(f" {len(tracks)} tracks found ({n_tagged} tagged, {len(tracks) - n_tagged} untagged) ({_fmt_elapsed(_time.perf_counter() - t_step)})")
 
     raw_cache = load_raw_cache(args.cache)
 
@@ -390,7 +401,7 @@ def _cmd_run(args) -> int:
         summary_parts.append(f"{n_failed} failed")
     if removed:
         summary_parts.append(f"{len(removed)} removed")
-    print(f"  Done: {', '.join(summary_parts)} ({elapsed_step:.1f}s)")
+    print(f"  Done: {', '.join(summary_parts)} ({_fmt_elapsed(elapsed_step)})")
 
     # ── Step 1b: CLAP audio embeddings ──
     track_order = [t.path for t in tracks]
@@ -404,7 +415,7 @@ def _cmd_run(args) -> int:
                 track_order, args.clap_cache, force=args.force_clap,
             )
             clap_embeddings, _ = fit_pca(raw_clap, config.clap_pca_dims)
-            print(f"  CLAP done ({_time.perf_counter() - t_clap:.1f}s)")
+            print(f"  CLAP done ({_fmt_elapsed(_time.perf_counter() - t_clap)})")
         except Exception as e:
             print(f"  CLAP failed: {e} -- continuing without CLAP")
     elif not args.no_clap:
@@ -442,7 +453,7 @@ def _cmd_run(args) -> int:
         print(f"\n[2/5] Grouping {n_ft} tracks by similarity...")
         _t = _time.perf_counter()
         distance_matrix = compute_distance_matrix(feature_tracks, config)
-        print(f"  Computing {n_ft}x{n_ft} distance matrix... ({_time.perf_counter() - _t:.1f}s)")
+        print(f"  Computing {n_ft}x{n_ft} distance matrix... ({_fmt_elapsed(_time.perf_counter() - _t)})")
 
         feedback = load_feedback(args.feedback)
         if feedback:
@@ -450,7 +461,7 @@ def _cmd_run(args) -> int:
 
         _t = _time.perf_counter()
         labels = _cluster_with_soft_vocal(feature_tracks, distance_matrix, config)
-        print(f"  Clustering + validation done ({_time.perf_counter() - _t:.1f}s)")
+        print(f"  Clustering + validation done ({_fmt_elapsed(_time.perf_counter() - _t)})")
 
         _t = _time.perf_counter()
         assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
@@ -469,7 +480,7 @@ def _cmd_run(args) -> int:
     _t = _time.perf_counter()
     recommendations = compute_recommendations(feature_tracks, config)
     n_recs = len(recommendations)
-    print(f"  {n_recs} recommendations computed ({_time.perf_counter() - _t:.1f}s)")
+    print(f"  {n_recs} recommendations computed ({_fmt_elapsed(_time.perf_counter() - _t)})")
 
     # ── Step 5: Output ──
     print(f"\n[5/5] Writing output files...")
@@ -523,7 +534,7 @@ def _cmd_run(args) -> int:
         generate_recommendation_playlists(recommendations, args.playlists)
         print(f"  Playlists: {args.playlists}/")
 
-    print(f"\nDone in {_time.perf_counter() - t_step:.0f}s.")
+    print(f"\nDone in {_fmt_elapsed(_time.perf_counter() - t_step)}.")
     return 0
 
 

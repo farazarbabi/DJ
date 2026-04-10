@@ -61,35 +61,41 @@ ESSENTIA_KEY_TO_CAMELOT: dict[tuple[str, str], str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Key profiles (Temperley 2007 — better major/minor and fifth separation
-# than Krumhansl-Schmuckler, especially on produced/electronic music)
+# Key profiles (EDMA — designed for Electronic Dance Music Analysis,
+# better root/fifth separation than Temperley on produced electronic music)
 # ---------------------------------------------------------------------------
 MAJOR_PROFILE: list[float] = [
-    5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0,
+    6.0, 1.0, 3.5, 1.0, 5.0, 3.0, 1.0, 5.5, 1.0, 2.5, 1.0, 3.0,
 ]
 MINOR_PROFILE: list[float] = [
-    5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0,
+    6.0, 1.0, 3.0, 5.0, 1.0, 3.0, 1.0, 5.5, 3.5, 1.0, 2.0, 3.0,
 ]
 
 # ---------------------------------------------------------------------------
 # Energy thresholds
 # ---------------------------------------------------------------------------
 ENERGY_WEIGHTS: dict[str, float] = {
-    "rms": 0.30,
-    "centroid": 0.15,
-    "flux": 0.20,
-    "onset": 0.20,
-    "low_freq": 0.15,
+    "rms": 0.25,
+    "centroid": 0.10,
+    "flux": 0.25,
+    "onset": 0.15,
+    "low_freq": 0.05,
+    "bpm": 0.20,
 }
 
+# BPM normalization for energy scoring
+ENERGY_BPM_NORM: tuple[float, float] = (85.0, 55.0)  # 85->0, 140->1
+
 # (min, range) for normalization: normalized = clip((value - min) / range, 0, 1)
-# Tightened for mastered electronic music (techno/house/downtempo)
+# Calibrated from 40-track electronic library:
+#   rms: 0.167-0.345  centroid: 1165-2645  flux: 1.64-4.37
+#   onset_rate: 1.46-7.27  low_ratio: 34-67
 ENERGY_NORM: dict[str, tuple[float, float]] = {
-    "rms":      (0.04, 0.08),      # mastered electronic: ~0.04-0.12
-    "centroid": (1500.0, 2500.0),   # electronic: ~1500-4000
-    "flux":     (0.5, 2.5),         # electronic: ~0.5-3.0
-    "onset":    (1.5, 4.0),         # electronic: ~1.5-5.5
-    "low_freq": (0.15, 0.30),       # bass-heavy music: ~0.15-0.45
+    "rms":      (0.15, 0.20),      # mastered electronic: ~0.15-0.35
+    "centroid": (1100.0, 1800.0),   # electronic: ~1100-2900
+    "flux":     (1.5, 3.0),         # electronic: ~1.5-4.5
+    "onset":    (1.0, 6.5),         # electronic: ~1.0-7.5
+    "low_freq": (30.0, 40.0),       # bass-heavy: ~30-70 (per-bin ratio)
 }
 
 # Composite score boundaries -> energy level
@@ -114,10 +120,10 @@ FLOW_PLATEAU_MIN: int = 2
 # Vocal detection thresholds
 # ---------------------------------------------------------------------------
 VOCAL_FREQ_LOW: float = 300.0
-VOCAL_FREQ_HIGH: float = 3000.0
-VOCAL_ENERGY_RATIO: float = 0.15
-VOCAL_FLATNESS_MAX: float = 0.4
-VOCAL_FRAME_THRESHOLD: float = 0.08
+VOCAL_FREQ_HIGH: float = 3400.0
+VOCAL_ENERGY_RATIO: float = 0.12
+VOCAL_FLATNESS_MAX: float = 0.5
+VOCAL_FRAME_THRESHOLD: float = 0.20
 
 # ---------------------------------------------------------------------------
 # Metadata

@@ -86,7 +86,9 @@ def cluster_tracks(
         print(f"    Re-merged {n_before - n_after} small groups", flush=True)
 
     n_groups = len(np.unique(labels))
-    print(f"    Final: {n_groups} groups ({time.perf_counter() - t0:.1f}s)", flush=True)
+    elapsed = time.perf_counter() - t0
+    t_str = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed)//60}m{int(elapsed)%60:02d}s"
+    print(f"    Final: {n_groups} groups ({t_str})", flush=True)
     return labels
 
 

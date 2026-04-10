@@ -9,7 +9,7 @@ import librosa
 import numpy as np
 
 from ..audio import TrackAudio
-from ..constants import ENERGY_NORM, ENERGY_THRESHOLDS, ENERGY_WEIGHTS
+from ..constants import ENERGY_BPM_NORM, ENERGY_NORM, ENERGY_THRESHOLDS, ENERGY_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,11 @@ def analyze_energy(track_audio: TrackAudio) -> EnergyResult:
     low_ratio = low_energy / (total_energy + 1e-8)
     low_norm = _normalize(low_ratio, "low_freq")
 
+    # BPM normalization
+    bpm = track_audio.tempo
+    bpm_lo, bpm_rng = ENERGY_BPM_NORM
+    bpm_norm = float(np.clip((bpm - bpm_lo) / bpm_rng, 0.0, 1.0))
+
     # Weighted composite
     features = {
         "rms": rms_norm,
@@ -71,6 +76,7 @@ def analyze_energy(track_audio: TrackAudio) -> EnergyResult:
         "flux": flux_norm,
         "onset": onset_norm,
         "low_freq": low_norm,
+        "bpm": bpm_norm,
     }
     composite = sum(ENERGY_WEIGHTS[k] * v for k, v in features.items())
 

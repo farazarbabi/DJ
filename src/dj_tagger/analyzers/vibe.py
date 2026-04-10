@@ -65,76 +65,70 @@ def analyze_vibe(track_audio: TrackAudio) -> VibeResult:
     spec_avg = np.mean(S, axis=1)
     peakiness = float(np.max(spec_avg)) / (float(np.mean(spec_avg)) + 1e-8)
 
+    # --- Helper ---
+    def _clip01(v: float) -> float:
+        return max(0.0, min(1.0, v))
+
     # --- Score each vibe ---
+    # Evidence-based approach: MEL is the baseline for electronic music.
+    # Other vibes require strong, specific spectral evidence to override.
+    # Absolute thresholds calibrated on real electronic music features:
+    #   onset_var: 1.2-3.5   flatness: 0.006-0.049   low_ratio: 34-67
+    #   flux: 1.6-4.4        perc_ratio: 0.12-0.51
+
+    chroma_var = float(np.mean(np.var(chroma, axis=1)))
+
     scores: dict[str, float] = {}
 
-    # HYPN: repetitive, stable, trance-inducing — works at ANY energy level
-    # Key: spectral stability + low onset variance + groove consistency
-    # No RMS penalty — trance and hypnotic techno are loud
-    scores["HYPN"] = (
-        0.40 * spectral_stability
-        + 0.30 * (1.0 - min(1.0, onset_var / 2.0))
-        + 0.15 * (1.0 - min(1.0, chroma_strength * 1.2))  # less melodic = more hypnotic
-        + 0.15 * min(1.0, onset_density / 4.0)             # driving rhythm
-    )
+    # MEL: baseline — chroma_var drives melodic evidence, low flatness = clean
+    mel_chroma = min(1.0, chroma_var / 0.065)
+    mel_lowflat = _clip01((0.025 - flatness) / 0.015)
+    scores["MEL"] = 0.38 + 0.25 * mel_chroma + 0.12 * mel_lowflat
 
-    # DRK: dark, heavy, low-frequency — low brightness, bass-heavy
+    # DRK: aggressive rhythmic character + noisiness + bass-heavy
+    drk_onset = _clip01((onset_var - 1.5) / 2.0)
+    drk_flat = _clip01((flatness - 0.010) / 0.030)
+    drk_low = _clip01((low_ratio - 45) / 25)
+    drk_flux = _clip01((flux - 2.0) / 2.5)
     scores["DRK"] = (
-        0.30 * (1.0 - min(1.0, centroid_mean / 3000))      # dark = low centroid
-        + 0.25 * min(1.0, low_ratio * 3)                    # heavy bass
-        + 0.25 * min(1.0, flux / 3.0)                       # spectral aggression
-        + 0.20 * min(1.0, rms * 8)                          # loud
+        0.25 * drk_onset
+        + 0.30 * drk_flat
+        + 0.25 * drk_low
+        + 0.20 * drk_flux
     )
 
-    # RAW: industrial, harsh, aggressive — high energy + noise + brightness
-    scores["RAW"] = (
-        0.25 * min(1.0, flatness * 10)                      # noisy
-        + 0.25 * min(1.0, rms * 10)                         # loud
-        + 0.20 * min(1.0, flux / 2.5)                       # harsh spectral change
-        + 0.15 * min(1.0, centroid_mean / 3000)             # bright/harsh
-        + 0.15 * min(1.0, onset_density / 4.0)              # dense transients
-    )
+    # TRB: very high percussion ratio — must be clearly percussive, not noisy
+    trib_perc = _clip01((perc_ratio - 0.40) / 0.15)
+    trib_clean = _clip01((0.03 - flatness) / 0.02)
+    scores["TRIB"] = 0.70 * trib_perc + 0.30 * trib_clean
 
-    # DEEP: warm, subby, lower energy — low centroid, bass-heavy, NOT loud
+    # RAW: non-electronic character (very low bass ratio + sparse)
+    raw_nobass = _clip01((42 - low_ratio) / 12)
+    raw_sparse = _clip01((1.5 - onset_density) / 0.8)
+    raw_lowvar = _clip01((1.5 - onset_var) / 1.0)
+    scores["RAW"] = 0.45 * raw_nobass + 0.30 * raw_sparse + 0.25 * raw_lowvar
+
+    # HYPN: high stability, low onset variance
+    scores["HYPN"] = 0.50 * spectral_stability + 0.50 * _clip01((2.0 - onset_var) / 1.5)
+
+    # DEEP: low centroid + low loudness + bass-heavy
     scores["DEEP"] = (
-        0.30 * min(1.0, low_ratio * 3)                      # bass-heavy
-        + 0.30 * (1.0 - min(1.0, centroid_mean / 2500))     # warm/dark
-        + 0.20 * (1.0 - min(1.0, rms * 10))                 # not aggressive
-        + 0.20 * (1.0 - min(1.0, onset_density / 4.0))      # sparse
+        0.35 * _clip01((2000 - centroid_mean) / 1000)
+        + 0.35 * _clip01((0.22 - rms) / 0.10)
+        + 0.30 * _clip01((low_ratio - 50) / 20)
     )
 
-    # TRIB: percussive, polyrhythmic
-    scores["TRIB"] = (
-        0.40 * perc_ratio
-        + 0.35 * min(1.0, onset_density / 5.0)
-        + 0.25 * (1.0 - min(1.0, harmonic_energy * 50))
-    )
+    # ACID: extreme spectral movement (filter sweeps) — very rare
+    scores["ACID"] = _clip01((centroid_var - 0.75) / 0.40)
 
-    # MEL: melodic — requires genuine melodic MOVEMENT, not just tonal content
-    # High bar: needs chroma variation over time AND harmonic dominance
-    chroma_var = float(np.mean(np.var(chroma, axis=1)))
-    melodic_movement = min(1.0, chroma_var * 30)  # stricter threshold
-    scores["MEL"] = (
-        0.35 * melodic_movement                              # actual melodic progression
-        + 0.25 * chroma_strength                             # tonal content
-        + 0.20 * (1.0 - perc_ratio)                          # harmonic-dominant
-        + 0.20 * (1.0 - min(1.0, flatness * 10))            # not noisy
-    )
-
-    # ACID: filter sweeps, resonant peaks
-    scores["ACID"] = (
-        0.40 * min(1.0, centroid_var * 3)
-        + 0.35 * min(1.0, peakiness / 10)
-        + 0.25 * (1.0 - chroma_strength)
-    )
-
-    # ATM: atmospheric, ambient, spatial — quiet, wide, sparse
+    # ATM: sparse + quiet
     scores["ATM"] = (
-        0.30 * (1.0 - min(1.0, onset_density / 3.0))        # sparse
-        + 0.30 * min(1.0, bandwidth / 3000)                  # wide spectrum
-        + 0.25 * (1.0 - min(1.0, rms * 10))                 # quiet
-        + 0.15 * (1.0 - min(1.0, flux / 2.0))               # smooth, not harsh
+        0.50 * _clip01((1.5 - onset_density) / 1.0)
+        + 0.50 * _clip01((0.20 - rms) / 0.08)
     )
+
+    # Clamp all scores to [0, 1]
+    scores = {k: max(0.0, min(1.0, v)) for k, v in scores.items()}
 
     best_label = max(scores, key=scores.get)  # type: ignore[arg-type]
 

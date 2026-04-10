@@ -11,7 +11,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Bump this when any analyzer logic changes to invalidate all cached results.
-ANALYZER_VERSION = "3"
+ANALYZER_VERSION = "4"
 
 
 @dataclass

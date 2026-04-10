@@ -103,10 +103,11 @@ def _detect_key_librosa(track_audio: TrackAudio) -> KeyResult:
     if n_seg <= 1:
         return _detect_key_whole_track(y, sr)
 
-    # Detect key per segment
+    # Detect key per segment (skip last segment — outros have weak key signal)
     votes: dict[tuple[int, str], float] = {}
+    seg_end = n_seg - 1 if n_seg > 2 else n_seg
 
-    for seg_idx in range(n_seg):
+    for seg_idx in range(seg_end):
         start = seg_idx * segment_len
         end = start + segment_len if seg_idx < n_seg - 1 else n_samples
         segment = y[start:end]

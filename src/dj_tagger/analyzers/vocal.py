@@ -53,20 +53,19 @@ def analyze_vocal(track_audio: TrackAudio) -> VocalResult:
     arith_mean = np.mean(vocal_S, axis=0)
     flatness_per_frame = geo_mean / (arith_mean + 1e-8)
 
-    # Stage 3: Harmonic-to-noise ratio in vocal band
-    # High HNR = more tonal (vocal-like), low HNR = noise
-    vocal_harmonic = np.mean(vocal_S ** 2, axis=0)
-    # Use sub-bass as noise reference (below vocal range)
-    noise_mask = freqs < VOCAL_FREQ_LOW
-    noise_energy = np.mean(S[noise_mask, :] ** 2, axis=0) if np.any(noise_mask) else np.ones_like(vocal_harmonic)
-    hnr_per_frame = vocal_harmonic / (noise_energy + 1e-8)
-    hnr_high = hnr_per_frame > 1.5  # vocal band louder than sub-bass
+    # Stage 3: Harmonic structure in vocal band
+    # Use high-frequency content (>5kHz) as reference instead of sub-bass,
+    # since electronic music has massive sub-bass that dwarfs the vocal band.
+    hi_mask = freqs > 5000
+    hi_energy = np.mean(S[hi_mask, :] ** 2, axis=0) if np.any(hi_mask) else np.ones_like(vocal_energy)
+    vocal_vs_hi = vocal_energy / (hi_energy + 1e-8)
+    harmonic_check = vocal_vs_hi > 1.5  # vocal band should dominate over high noise
 
     # Combined vocal-like detection
     vocal_frames = (
         (vocal_ratio_per_frame > VOCAL_ENERGY_RATIO)
         & (flatness_per_frame < VOCAL_FLATNESS_MAX)
-        & hnr_high
+        & harmonic_check
     )
 
     vocal_fraction = float(np.mean(vocal_frames))
