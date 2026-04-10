@@ -15,14 +15,16 @@ pip install -e ".[dev]"
 # Run tests (80 tests, ~12s)
 pytest tests/ -v
 
-# Tag tracks
-dj-tagger files -r --write-tags
+# Tag tracks (defaults to ./files)
+dj-tagger --write-tags
+dj-tagger "E:\Music" --write-tags
 
-# Group and recommend (single command)
-dj-grouper run -r --write-tags
+# Group and recommend (defaults to ./files)
+dj-grouper --write-tags
+dj-grouper "E:\Music" --write-tags
 
 # Force re-extract (after changing analyzers or adding tracks)
-dj-grouper run -r --force-extract --write-tags
+dj-grouper --force-extract --write-tags
 ```
 
 ## Architecture
@@ -90,13 +92,13 @@ These files contain tunable thresholds that directly affect output quality. Chan
 1. Update the analyzer code
 2. Bump `ANALYZER_VERSION` in `src/dj_tagger/cache.py` (invalidates tagger cache)
 3. Run `pytest tests/ -v` to verify
-4. Re-tag: `dj-tagger files -r --write-tags --overwrite`
-5. Re-extract: `dj-grouper run -r --force-extract --dry-run` to preview
+4. Re-tag: `dj-tagger --write-tags --overwrite`
+5. Re-extract: `dj-grouper --force-extract --dry-run` to preview
 6. Check grouping quality before writing: look at group folder names and sizes
 
 ## When changing distance/scoring
 
 1. Update distance.py or scoring.py
 2. Run tests
-3. No need to re-extract — just re-run: `dj-grouper run -r --dry-run`
+3. No need to re-extract — just re-run: `dj-grouper --dry-run`
 4. Cache is reused; only clustering/recommendations recompute

@@ -47,9 +47,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "paths",
-        nargs="+",
+        nargs="*",
+        default=["files"],
         metavar="PATH",
-        help="Audio files or directories to process",
+        help="Audio files or directories to process (default: ./files)",
     )
     parser.add_argument(
         "-r", "--recursive",

@@ -44,11 +44,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     # --- run (all-in-one) ---
     p_run = sub.add_parser("run", help="Run full pipeline: extract -> cluster -> recommend -> output")
-    p_run.add_argument("--input", nargs="+", default=[_DEFAULTS.input_dir], help="Library paths (default: ./files)")
+    p_run.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help="Library paths (default: ./files)")
     p_run.add_argument("-r", "--recursive", action="store_true")
     p_run.add_argument("--output", default=_DEFAULTS.grouped_dir, help="Folder output dir")
     p_run.add_argument("--write-tags", action="store_true", help="Write tags to file metadata")
@@ -68,7 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- extract ---
     p_extract = sub.add_parser("extract", help="Extract features for all tracks")
-    p_extract.add_argument("--input", nargs="+", default=[_DEFAULTS.input_dir], help="Library paths (default: ./files)")
+    p_extract.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help="Library paths (default: ./files)")
     p_extract.add_argument("-r", "--recursive", action="store_true")
     p_extract.add_argument("--cache", default=_DEFAULTS.cache_file)
     p_extract.add_argument("--features-csv", default=None)
@@ -115,9 +115,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_SUBCOMMANDS = {"run", "extract", "cluster", "review", "apply", "recommend", "feedback", "evaluate"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    # Default to "run" when no subcommand is given
+    raw = argv if argv is not None else sys.argv[1:]
+    if not any(arg in _SUBCOMMANDS for arg in raw):
+        raw = ["run"] + list(raw)
+    args = parser.parse_args(raw)
     _setup_logging(getattr(args, "verbose", False), getattr(args, "quiet", False))
 
     try:
@@ -238,7 +245,7 @@ def _cmd_run(args) -> int:
 
     # ── Resolve output directory ──
     # If input is outside the project directory, write outputs next to the input
-    input_path = Path(args.input[0]).resolve()
+    input_path = Path(args.paths[0]).resolve()
     project_dir = Path.cwd().resolve()
 
     try:
@@ -295,7 +302,7 @@ def _cmd_run(args) -> int:
     # ── Step 1: Scan + analyze + extract ──
     print("\n[1/5] Scanning library...", end="", flush=True)
     t_step = _time.perf_counter()
-    tracks = scan_library(args.input, args.recursive)
+    tracks = scan_library(args.paths, args.recursive)
     if not tracks:
         print(" no tracks found.")
         return 0
@@ -584,7 +591,7 @@ def _cmd_extract(args) -> int:
     config = GrouperConfig()
     Path(_DEFAULTS.output_dir).mkdir(parents=True, exist_ok=True)
 
-    tracks = scan_library(args.input, args.recursive)
+    tracks = scan_library(args.paths, args.recursive)
     if not tracks:
         print("No tracks found.")
         return 0
