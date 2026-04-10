@@ -61,15 +61,36 @@ ESSENTIA_KEY_TO_CAMELOT: dict[tuple[str, str], str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Key profiles (EDMA — designed for Electronic Dance Music Analysis,
-# better root/fifth separation than Temperley on produced electronic music)
+# Key profiles — multiple profiles for ensemble voting.
+# 4-profile ensemble reduces non-neighbour errors vs any single profile.
 # ---------------------------------------------------------------------------
-MAJOR_PROFILE: list[float] = [
-    6.0, 1.0, 3.5, 1.0, 5.0, 3.0, 1.0, 5.5, 1.0, 2.5, 1.0, 3.0,
-]
-MINOR_PROFILE: list[float] = [
-    6.0, 1.0, 3.0, 5.0, 1.0, 3.0, 1.0, 5.5, 3.5, 1.0, 2.0, 3.0,
-]
+KEY_PROFILES: dict[str, dict[str, list[float]]] = {
+    "edma": {
+        "major": [6.0, 1.0, 3.5, 1.0, 5.0, 3.0, 1.0, 5.5, 1.0, 2.5, 1.0, 3.0],
+        "minor": [6.0, 1.0, 3.0, 5.0, 1.0, 3.0, 1.0, 5.5, 3.5, 1.0, 2.0, 3.0],
+    },
+    "krumhansl": {
+        "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+        "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+    },
+    "temperley": {
+        "major": [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0],
+        "minor": [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0],
+    },
+    "simple": {
+        "major": [5.0, 1.0, 2.0, 1.0, 4.0, 2.0, 1.0, 4.5, 1.0, 2.0, 1.0, 2.0],
+        "minor": [5.0, 1.0, 2.0, 4.0, 1.0, 2.0, 1.0, 4.5, 2.0, 1.0, 2.0, 2.0],
+    },
+}
+
+# Backwards compat: default profiles for non-ensemble callers
+MAJOR_PROFILE: list[float] = KEY_PROFILES["simple"]["major"]
+MINOR_PROFILE: list[float] = KEY_PROFILES["simple"]["minor"]
+
+# Key detection tuning constants
+KEY_MINOR_BIAS: float = 0.05
+KEY_GAP_DIVISOR: float = 0.15
+KEY_SAME_ROOT_MINOR_PREF: float = 0.8
 
 # ---------------------------------------------------------------------------
 # Energy thresholds

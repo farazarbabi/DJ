@@ -212,23 +212,9 @@ def _gap_confidence(best: float, second: float) -> float:
     return max(0.0, min(1.0, gap / 0.15))
 
 
-def score_key(f: dict) -> tuple[str, str, float]:
-    """Score key from cached segment chromas using EDMA profiles.
-
-    Skips last segment (outro). Returns (camelot, key_name, confidence).
-    """
+def _score_key_single_profile(use_chromas, major, minor):
+    """Run key detection with one profile. Returns (camelot, confidence)."""
     import numpy as np
-
-    seg_chromas = f.get("segment_chromas", [])
-    if not seg_chromas:
-        return "??", "??", 0.0
-
-    # EDMA profiles (matches constants.py)
-    major = np.array([6.0, 1.0, 3.5, 1.0, 5.0, 3.0, 1.0, 5.5, 1.0, 2.5, 1.0, 3.0])
-    minor = np.array([6.0, 1.0, 3.0, 5.0, 1.0, 3.0, 1.0, 5.5, 3.5, 1.0, 2.0, 3.0])
-
-    # Skip last segment (outro has weak key signal)
-    use_chromas = seg_chromas[:-1] if len(seg_chromas) > 2 else seg_chromas
 
     votes: dict[tuple[int, str], float] = {}
     for seg_chroma in use_chromas:
@@ -248,22 +234,84 @@ def score_key(f: dict) -> tuple[str, str, float]:
                     best_mode = mode
                 elif c > second_corr:
                     second_corr = c
-        conf = _gap_confidence(best_corr, second_corr)
+
+        # gap * abs confidence + minor bias + sum-squared
+        gap = best_corr - second_corr
+        conf = max(0.0, min(1.0, gap / 0.15)) * max(0.0, best_corr)
+        if best_mode == "minor":
+            conf += 0.05
         vote_key = (best_key, best_mode)
-        votes[vote_key] = votes.get(vote_key, 0.0) + conf
+        votes[vote_key] = votes.get(vote_key, 0.0) + conf ** 2
 
     if not votes:
-        return "??", "??", 0.0
+        return "??", 0.0
+
+    # Same-root minor preference
+    sorted_v = sorted(votes.items(), key=lambda x: -x[1])
+    if len(sorted_v) >= 2:
+        (k1, m1), w1 = sorted_v[0]
+        (k2, m2), w2 = sorted_v[1]
+        if k1 == k2 and m1 != m2:
+            votes[(k1, "minor")] = votes.get((k1, "minor"), 0.0) + 0.8 * w1
 
     winner = max(votes, key=votes.get)
-    best_key, best_mode = winner
     total_weight = sum(votes.values())
     vote_conf = votes[winner] / total_weight if total_weight > 0 else 0.0
+    camelot = _KEY_TO_CAMELOT[(winner[0], winner[1])]
+    return camelot, vote_conf
 
-    camelot = _KEY_TO_CAMELOT[(best_key, best_mode)]
-    suffix = "m" if best_mode == "minor" else ""
-    key_name = f"{NOTE_NAMES[best_key]}{suffix}"
-    return camelot, key_name, vote_conf
+
+# 4-profile ensemble (matches constants.py KEY_PROFILES)
+_KEY_PROFILES = {
+    "edma": ([6.0,1.0,3.5,1.0,5.0,3.0,1.0,5.5,1.0,2.5,1.0,3.0], [6.0,1.0,3.0,5.0,1.0,3.0,1.0,5.5,3.5,1.0,2.0,3.0]),
+    "krumhansl": ([6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88], [6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17]),
+    "temperley": ([5.0,2.0,3.5,2.0,4.5,4.0,2.0,4.5,2.0,3.5,1.5,4.0], [5.0,2.0,3.5,4.5,2.0,4.0,2.0,4.5,3.5,2.0,1.5,4.0]),
+    "simple": ([5.0,1.0,2.0,1.0,4.0,2.0,1.0,4.5,1.0,2.0,1.0,2.0], [5.0,1.0,2.0,4.0,1.0,2.0,1.0,4.5,2.0,1.0,2.0,2.0]),
+}
+
+
+def score_key(f: dict) -> tuple[str, str, float]:
+    """Score key using 4-profile ensemble with segment voting.
+
+    Skips first+last segments, uses gap*abs confidence, sum-squared
+    aggregation, minor bias, same-root minor preference, majority vote.
+    """
+    import numpy as np
+    from collections import Counter
+
+    seg_chromas = f.get("segment_chromas", [])
+    if not seg_chromas:
+        return "??", "??", 0.0
+
+    # Skip first and last segments (intro/outro)
+    if len(seg_chromas) > 3:
+        use_chromas = seg_chromas[1:-1]
+    elif len(seg_chromas) > 2:
+        use_chromas = seg_chromas[:-1]
+    else:
+        use_chromas = seg_chromas
+
+    # Run each profile independently
+    profile_preds = []
+    for name, (maj, mn) in _KEY_PROFILES.items():
+        major = np.array(maj)
+        minor = np.array(mn)
+        cam, conf = _score_key_single_profile(use_chromas, major, minor)
+        profile_preds.append(cam)
+
+    # Majority vote
+    counter = Counter(profile_preds)
+    best_cam = counter.most_common(1)[0][0]
+    agreement = counter[best_cam] / len(profile_preds)
+
+    # Derive key name
+    for (pc, mode), cam in _KEY_TO_CAMELOT.items():
+        if cam == best_cam:
+            suffix = "m" if mode == "minor" else ""
+            key_name = f"{NOTE_NAMES[pc]}{suffix}"
+            return best_cam, key_name, agreement
+
+    return best_cam, "??", agreement
 
 
 def camelot_distance(a: str, b: str) -> int:
