@@ -131,7 +131,10 @@ class UniversalCache:
         return entry.data
 
     def put(self, key: str, data: object, version: str = "1", mtime: float = 0.0) -> None:
-        """Store data in cache."""
+        """Store data in cache. Skips write if entry already exists with same version."""
+        existing = self._entries.get(key)
+        if existing is not None and existing.version == version:
+            return  # already cached with same version, no change needed
         self._entries[key] = CacheEntry(version=version, mtime=mtime, data=data)
         layer = self._layer_from_key(key)
         if layer in RAW_LAYERS:
