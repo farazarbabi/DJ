@@ -56,8 +56,8 @@ class GrouperConfig:
     # --- Default paths ---
     input_dir: str = "./files"
     output_dir: str = "./outputs"
-    cache_file: str = "./outputs/features_cache.pkl"
-    clap_cache_file: str = "./outputs/clap_cache.pkl"
+    cache_file: str = "./cache/features_cache.pkl"
+    clap_cache_file: str = "./cache/clap_cache.pkl"
     feedback_file: str = "./outputs/feedback.csv"
     groups_file: str = "./outputs/groups.csv"
     recommendations_file: str = "./outputs/recommendations.csv"

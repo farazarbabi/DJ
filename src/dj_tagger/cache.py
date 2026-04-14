@@ -1,4 +1,8 @@
-"""Analysis result cache for dj-tagger."""
+"""Analysis result cache for dj-tagger.
+
+Cache key: filename + rounded duration (stable across tag edits, avoids
+collisions when the same filename exists in different folders).
+"""
 
 from __future__ import annotations
 
@@ -24,9 +28,16 @@ class TaggerCacheEntry:
 TaggerCache = dict[str, TaggerCacheEntry]
 
 
-def cache_key(filepath: str) -> str:
-    """Return the cache key for a file (filename with extension)."""
-    return Path(filepath).name
+def cache_key(filepath: str, duration: float | None = None) -> str:
+    """Return the cache key for a file.
+
+    Uses filename + rounded duration for robust matching.
+    Falls back to filename-only if duration is not provided (backward compat).
+    """
+    name = Path(filepath).name
+    if duration is not None and duration > 0:
+        return f"{name}|{duration:.1f}"
+    return name
 
 
 def load_cache(path: str) -> TaggerCache:
@@ -55,7 +66,21 @@ def save_cache(cache: TaggerCache, path: str) -> None:
     logger.info("Tagger cache saved to %s (%d entries)", path, len(cache))
 
 
-def get_cached(cache: TaggerCache, filepath: str, mtime: float) -> dict | None:
+def get_cached(
+    cache: TaggerCache,
+    filepath: str,
+    mtime: float,
+    duration: float | None = None,
+) -> dict | None:
+    """Look up a cached result. Tries duration-keyed first, falls back to name-only."""
+    # Try new key format (filename|duration)
+    if duration is not None and duration > 0:
+        key = cache_key(filepath, duration)
+        entry = cache.get(key)
+        if entry and entry.version == ANALYZER_VERSION:
+            return entry.result
+
+    # Fall back to old key format (filename only) for backward compat
     key = cache_key(filepath)
     entry = cache.get(key)
     if entry is None:
@@ -67,6 +92,17 @@ def get_cached(cache: TaggerCache, filepath: str, mtime: float) -> dict | None:
     return entry.result
 
 
-def put_cached(cache: TaggerCache, filepath: str, mtime: float, result: dict) -> None:
-    key = cache_key(filepath)
-    cache[key] = TaggerCacheEntry(mtime=mtime, version=ANALYZER_VERSION, result=result)
+def put_cached(
+    cache: TaggerCache,
+    filepath: str,
+    mtime: float,
+    result: dict,
+    duration: float | None = None,
+) -> None:
+    """Store a result in cache. Writes both key formats during migration."""
+    entry = TaggerCacheEntry(mtime=mtime, version=ANALYZER_VERSION, result=result)
+    # Always write duration-keyed entry if duration available
+    if duration is not None and duration > 0:
+        cache[cache_key(filepath, duration)] = entry
+    # Also write name-only key for backward compat with dj-tagger
+    cache[cache_key(filepath)] = entry

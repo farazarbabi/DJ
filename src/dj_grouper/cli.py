@@ -312,8 +312,8 @@ def _cmd_run(args) -> int:
 
     if is_external:
         ext_out = str(input_path / "outputs")
-        args.cache = str(input_path / "outputs" / "features_cache.pkl")
-        args.clap_cache = str(input_path / "outputs" / "clap_cache.pkl")
+        args.cache = str(input_path / "cache" / "features_cache.pkl")
+        args.clap_cache = str(input_path / "cache" / "clap_cache.pkl")
         args.csv = str(input_path / "outputs" / "groups.csv")
         args.recommendations_csv = str(input_path / "outputs" / "recommendations.csv")
         args.output = str(input_path / "outputs" / "Grouped")

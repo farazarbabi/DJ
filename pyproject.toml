@@ -19,11 +19,13 @@ dependencies = [
 [project.optional-dependencies]
 essentia = ["essentia>=2.1b6"]
 clap = ["laion-clap>=1.0", "torch>=2.0"]
+registry = ["httpx>=0.25", "lxml>=4.9", "python-dotenv>=1.0"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 [project.scripts]
 dj-tagger = "dj_tagger.cli:main"
 dj-grouper = "dj_grouper.cli:main"
+dj-registry = "dj_registry.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,247 @@
+"""File scanner — discovers audio files and extracts metadata."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import mutagen
+import soundfile as sf
+
+from ..config import RegistryConfig
+from ..key_utils import parse_any_key
+from ..models import FileRecord, SourceObservation, PayloadIndexEntry, now_iso
+from ..store.csv_store import CsvStore
+from ..store.obs_cache import ObsCache
+from .tag_extractor import extract_tags
+
+logger = logging.getLogger(__name__)
+
+
+def _sha256(path: str) -> str:
+    """Compute SHA256 hash of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _audio_info(path: str) -> dict:
+    """Extract audio technical metadata via soundfile."""
+    try:
+        info = sf.info(path)
+        return {
+            "duration": info.duration,
+            "sample_rate": info.samplerate,
+            "channels": info.channels,
+        }
+    except Exception:
+        # Fallback via mutagen
+        try:
+            m = mutagen.File(path)
+            if m and m.info:
+                return {
+                    "duration": getattr(m.info, "length", 0.0),
+                    "sample_rate": getattr(m.info, "sample_rate", 0),
+                    "channels": getattr(m.info, "channels", 0),
+                }
+        except Exception:
+            pass
+    return {"duration": 0.0, "sample_rate": 0, "channels": 0}
+
+
+def _bitrate(path: str) -> int:
+    """Extract bitrate via mutagen."""
+    try:
+        m = mutagen.File(path)
+        if m and m.info:
+            return getattr(m.info, "bitrate", 0)
+    except Exception:
+        pass
+    return 0
+
+
+def find_audio_files(
+    roots: list[str],
+    extensions: list[str],
+    recursive: bool = True,
+) -> list[Path]:
+    """Discover audio files matching supported extensions."""
+    results: list[Path] = []
+    ext_set = {e.lower() for e in extensions}
+    for root in roots:
+        p = Path(root)
+        if p.is_file() and p.suffix.lower() in ext_set:
+            results.append(p)
+        elif p.is_dir():
+            pattern = "**/*" if recursive else "*"
+            for child in sorted(p.glob(pattern)):
+                if child.is_file() and child.suffix.lower() in ext_set:
+                    # Exclude outputs directory
+                    try:
+                        rel = child.relative_to(p)
+                        if any(part.lower() == "outputs" for part in rel.parts):
+                            continue
+                    except ValueError:
+                        pass
+                    results.append(child)
+    return results
+
+
+def scan_files(
+    config: RegistryConfig,
+    store: CsvStore,
+    obs_cache: ObsCache | None = None,
+) -> list[FileRecord]:
+    """Scan library, create/update FileRecords, extract tags as observations.
+
+    Returns list of all FileRecords (new + existing).
+    """
+    paths = find_audio_files(
+        config.library_roots, config.supported_extensions
+    )
+    logger.debug("Found %d audio files", len(paths))
+
+    existing_files = {f.path_abs: f for f in store.load_files()}
+    existing_obs = store.load_observations()
+    payload_entries = store.load_payload_index()
+
+    new_files: list[FileRecord] = []
+    new_obs: list[SourceObservation] = []
+    new_payloads: list[PayloadIndexEntry] = []
+    updated = 0
+    skipped = 0
+
+    for path in paths:
+        path_abs = str(path.resolve())
+        stat = path.stat()
+        mtime_str = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+
+        existing = existing_files.get(path_abs)
+        if existing and existing.mtime_utc == mtime_str:
+            # File unchanged — still emit tag observation from cache or existing data
+            duration = existing.audio_duration_sec
+            cached_tag = obs_cache.get_by_file(path_abs, duration, "tag") if obs_cache else None
+            if cached_tag:
+                cached_tag.observation_id = f"OBS-tag-{existing.file_id}"
+                cached_tag.file_id = existing.file_id
+                new_obs.append(cached_tag)
+            elif existing.embedded_key_camelot or existing.embedded_bpm or existing.embedded_genre:
+                new_obs.append(SourceObservation(
+                    observation_id=f"OBS-tag-{existing.file_id}",
+                    file_id=existing.file_id,
+                    source_system="tag",
+                    key_standard=existing.embedded_key_standard,
+                    key_camelot=existing.embedded_key_camelot,
+                    key_confidence=1.0 if existing.embedded_key_camelot else 0.0,
+                    bpm=existing.embedded_bpm,
+                    genre=existing.embedded_genre,
+                    observed_at=existing.last_scanned_at,
+                ))
+            skipped += 1
+            continue
+
+        # Compute file metadata
+        file_hash = _sha256(path_abs)
+        audio = _audio_info(path_abs)
+        br = _bitrate(path_abs)
+
+        file_id = existing.file_id if existing else f"F{len(existing_files) + len(new_files) + 1:05d}"
+
+        tags = extract_tags(path_abs)
+
+        rec = FileRecord(
+            file_id=file_id,
+            path_abs=path_abs,
+            path_rel=str(path),
+            file_name=path.name,
+            extension=path.suffix.lower(),
+            size_bytes=stat.st_size,
+            mtime_utc=mtime_str,
+            sha256=file_hash,
+            audio_duration_sec=audio["duration"],
+            sample_rate=audio["sample_rate"],
+            bitrate=br,
+            channels=audio["channels"],
+            embedded_title=tags["title"],
+            embedded_artist=tags["artist"],
+            embedded_album=tags["album"],
+            embedded_genre=tags["genre"],
+            embedded_bpm=tags["bpm"],
+            embedded_key_standard=tags["key_standard"],
+            embedded_key_camelot=tags["key_camelot"],
+            embedded_comment=tags["comment"],
+            embedded_isrc=tags["isrc"],
+            tag_read_status="ok",
+            last_scanned_at=now_iso(),
+        )
+
+        if existing:
+            rec.track_id = existing.track_id
+            rec.is_primary_file = existing.is_primary_file
+            rec.match_method = existing.match_method
+            rec.match_score = existing.match_score
+            existing_files[path_abs] = rec
+            updated += 1
+        else:
+            new_files.append(rec)
+
+        # Create tag observation — check cache first
+        duration = audio["duration"]
+        cached_tag = obs_cache.get_by_file(path_abs, duration, "tag") if obs_cache else None
+        if cached_tag:
+            cached_tag.observation_id = f"OBS-tag-{file_id}"
+            cached_tag.file_id = file_id
+            new_obs.append(cached_tag)
+        elif tags["key_camelot"] or tags["bpm"] or tags["genre"]:
+            obs = SourceObservation(
+                observation_id=f"OBS-tag-{file_id}",
+                file_id=file_id,
+                source_system="tag",
+                key_standard=tags["key_standard"],
+                key_camelot=tags["key_camelot"],
+                key_confidence=1.0 if tags["key_camelot"] else 0.0,
+                bpm=tags["bpm"],
+                genre=tags.get("genre", ""),
+                observed_at=now_iso(),
+            )
+            new_obs.append(obs)
+            if obs_cache:
+                obs_cache.put_by_file(path_abs, duration, "tag", obs)
+
+        # Save tag snapshot
+        raw_dir = os.path.join(config.raw_dir, "file_tag_snapshots")
+        os.makedirs(raw_dir, exist_ok=True)
+        snapshot_path = os.path.join(raw_dir, f"{file_id}.json")
+        payload_ref = f"tag-snapshot-{file_id}"
+        rec.file_tag_payload_ref = payload_ref
+
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(tags, f, indent=2)
+
+        new_payloads.append(PayloadIndexEntry(
+            payload_ref=payload_ref,
+            source_system="tag",
+            source_type="json",
+            file_id=file_id,
+            payload_path=os.path.relpath(snapshot_path, config.output_dir),
+            fetched_at=now_iso(),
+        ))
+
+    all_files = list(existing_files.values()) + new_files
+
+    store.save_files(all_files)
+    if new_obs:
+        store.add_observations(new_obs)
+    if new_payloads:
+        all_payload = store.load_payload_index()
+        all_payload.extend(new_payloads)
+        store.save_payload_index(all_payload)
+
+    logger.info("Scan: %d files (%d new, %d updated, %d cached)", len(all_files), len(new_files), updated, skipped)
+    return all_files

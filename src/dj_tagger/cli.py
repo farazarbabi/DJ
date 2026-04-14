@@ -141,8 +141,20 @@ def _setup_logging(verbose: bool, quiet: bool) -> None:
     logging.basicConfig(level=level, format=fmt, force=True)
 
 
+def _quick_duration(path: str) -> float | None:
+    """Get audio duration cheaply via mutagen (no audio decoding)."""
+    try:
+        import mutagen
+        m = mutagen.File(path)
+        if m and m.info:
+            return getattr(m.info, "length", None)
+    except Exception:
+        pass
+    return None
+
+
 def _resolve_cache_path() -> str:
-    return os.path.join("outputs", "tagger_cache.pkl")
+    return os.path.join("cache", "tagger_cache.pkl")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -237,7 +249,8 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 misses.append(fpath)
                 continue
-            cached_result = get_cached(cache, str(fpath), mtime)
+            dur = _quick_duration(str(fpath))
+            cached_result = get_cached(cache, str(fpath), mtime, duration=dur)
             if cached_result is not None:
                 hits.append((fpath, cached_result))
             else:
@@ -283,7 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         if use_cache:
             try:
                 mtime = os.path.getmtime(str(fpath))
-                put_cached(cache, str(fpath), mtime, result)
+                dur = _quick_duration(str(fpath))
+                put_cached(cache, str(fpath), mtime, result, duration=dur)
             except OSError:
                 pass
             if new_results_count % 20 == 0:
