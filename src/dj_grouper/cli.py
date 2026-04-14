@@ -297,33 +297,44 @@ def _run_extraction(
         filename = Path(t.path).name
         dur = _durations.get(t.path)
 
+        # When force=True, skip universal cache and re-extract everything
+        if force:
+            needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
+            to_extract.append((i, t, mtime, needs_analysis))
+            continue
+
         # Check universal cache for DSP features
         dsp_data = ucache.get_track(filename, dur, "dsp")
         section_dsp_data = ucache.get_track(filename, dur, "section_dsp")
 
-        if dsp_data and isinstance(dsp_data, dict):
-            # Check universal cache for tagger analysis (vibe, vocal, etc.)
-            tagger_data = ucache.get_track(filename, None, "tagger")
-            if tagger_data and isinstance(tagger_data, dict):
-                # Fully cached in universal cache — apply and skip
-                _apply_tagger_result(t, tagger_data, analyze_untagged)
-                # (dur already set above)
-                raw_cache[t.path] = RawCacheEntry(
-                    mtime=mtime, info=t, dsp=dsp_data,
-                    section_dsp=section_dsp_data if isinstance(section_dsp_data, dict) else {},
-                )
-                stats.n_cached += 1
-                continue
-
-        # Check if tagger already analyzed (but no DSP yet)
+        # Check universal cache for tagger + DSP
         tagger_data = ucache.get_track(filename, dur, "tagger")
         if tagger_data and isinstance(tagger_data, dict):
-            # Tagger ran, but DSP not extracted — only need DSP extraction
             _apply_tagger_result(t, tagger_data, analyze_untagged)
+
+        # Check if critical fields are still missing after tagger cache apply.
+        # _extract_worker always runs vibe/vocal analysis, so route there.
+        missing_analysis = t.vibe is None or t.vocal is None
+
+        if dsp_data and isinstance(dsp_data, dict) and not missing_analysis:
+            # Fully cached — both DSP and tagger analysis are complete
+            raw_cache[t.path] = RawCacheEntry(
+                mtime=mtime, info=t, dsp=dsp_data,
+                section_dsp=section_dsp_data if isinstance(section_dsp_data, dict) else {},
+            )
+            stats.n_cached += 1
+            continue
+
+        # Need at least DSP extraction (and maybe vibe/vocal re-analysis)
+        needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
+        if dsp_data and isinstance(dsp_data, dict):
+            # DSP cached but vibe/vocal missing — need extraction for vibe/vocal
+            to_dsp_only.append((i, t, mtime))
+        elif tagger_data and isinstance(tagger_data, dict):
+            # Tagger ran, but no DSP — need DSP extraction
             to_dsp_only.append((i, t, mtime))
         else:
             # Need full analysis + DSP extraction
-            needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
             to_extract.append((i, t, mtime, needs_analysis))
 
     n_from_ucache = stats.n_cached - sum(1 for _ in [])  # logged below
@@ -451,7 +462,13 @@ def _run_extraction(
 
 
 def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
-    """Apply cached tagger analysis result to a TrackInfo object."""
+    """Apply cached tagger analysis result to a TrackInfo object.
+
+    The tagger result dict has this structure:
+      energy: int, camelot: str, bpm: float, structure: str,
+      vibe: str, vocal: "V"|"NV", vibe_scores: dict, vocal_ratio: float,
+      confidences: {energy: float, key: float, structure: float, vibe: float, vocal: float}
+    """
     if analyze_untagged and (t.energy is None or t.key is None):
         if "energy" in tagger_data:
             t.energy = tagger_data.get("energy")
@@ -469,6 +486,8 @@ def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
                     t.flow_type = t.structure[-1]
                 except (ValueError, IndexError):
                     pass
+
+    # Vibe and vocal — always apply (these are analyzed regardless of tags)
     if "vibe" in tagger_data:
         t.vibe = tagger_data.get("vibe")
     if "vibe_scores" in tagger_data:
@@ -477,11 +496,17 @@ def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
         vocal = tagger_data.get("vocal")
         if vocal in ("V", "NV"):
             t.vocal = vocal
-    # Confidences from tagger
-    for conf_key in ("energy", "key", "structure", "vibe", "vocal"):
-        conf_val = tagger_data.get(f"{conf_key}_confidence") or tagger_data.get(f"key_confidence" if conf_key == "key" else "")
-        if conf_val is not None:
-            t.confidences[conf_key] = conf_val
+
+    # Confidences — tagger stores as nested dict {"energy": 0.9, "key": 0.85, ...}
+    confs = tagger_data.get("confidences")
+    if isinstance(confs, dict):
+        for conf_key in ("energy", "key", "structure", "vibe", "vocal"):
+            val = confs.get(conf_key)
+            if val is not None:
+                t.confidences[conf_key] = val
+    # Also check flat key_confidence (legacy format)
+    elif "key_confidence" in tagger_data:
+        t.confidences["key"] = tagger_data["key_confidence"]
 
 
 # ─── Soft vocal partitioning helper ──────────────────────────────────────────

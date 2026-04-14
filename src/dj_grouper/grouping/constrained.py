@@ -168,11 +168,12 @@ def _assign_step(
             break
 
         if not assigned:
-            # Safety valve: create a new singleton-like assignment
-            # Assign to the least-bad cluster (nearest medoid)
-            labels[i] = cluster_dists[0][1]
-            cluster_members[cluster_dists[0][1]].add(i)
-            logger.debug("Track %d: no constraint-valid cluster, assigned to nearest", i)
+            # No existing cluster can accept this track without violating constraints.
+            # Create a new cluster for it (never violate constraints).
+            new_cluster_id = len(cluster_members)
+            labels[i] = new_cluster_id
+            cluster_members.append({i})
+            logger.debug("Track %d: no constraint-valid cluster, created new cluster %d", i, new_cluster_id)
 
     return labels
 

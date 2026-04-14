@@ -7,6 +7,15 @@ import pytest
 
 from dj_grouper.scanner import TrackInfo
 from dj_grouper.cli import _run_extraction, _ExtractionStats
+from dj_tagger.universal_cache import reset_cache
+
+
+@pytest.fixture(autouse=True)
+def _reset_ucache():
+    """Reset universal cache singleton between tests."""
+    reset_cache()
+    yield
+    reset_cache()
 
 
 def _make_wav(path: str, duration_sec: float = 3.0) -> None:
