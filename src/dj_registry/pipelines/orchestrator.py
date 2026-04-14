@@ -12,6 +12,7 @@ from ..adapters.songstats import ingest_songstats
 from ..adapters.spotify_isrc import enrich_isrcs
 from ..config import RegistryConfig
 from ..identity.matcher import link_files_to_tracks
+from ..resolver.bpm_resolver import resolve_all_bpms
 from ..resolver.key_resolver import resolve_all_keys
 from ..review.queue_builder import build_review_queue
 from ..store.csv_store import CsvStore
@@ -97,6 +98,10 @@ def run_full_pipeline(
     resolved, review = resolve_all_keys(config, store, force=True)
     summary["keys_resolved"] = resolved
     summary["keys_need_review"] = review
+
+    bpm_resolved, bpm_missing = resolve_all_bpms(config, store, force=True)
+    summary["bpm_resolved"] = bpm_resolved
+    summary["bpm_missing"] = bpm_missing
     summary["review_items"] = build_review_queue(config, store)
 
     if write_tags and not dry_run:

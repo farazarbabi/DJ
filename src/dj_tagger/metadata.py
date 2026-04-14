@@ -84,7 +84,7 @@ def _read_mp3(path: str) -> str | None:
 
 def _write_mp3(path: str, tag_string: str) -> None:
     from mutagen.mp3 import MP3
-    from mutagen.id3 import ID3, COMM, ID3NoHeaderError
+    from mutagen.id3 import COMM, ID3NoHeaderError
 
     try:
         audio = MP3(path)

@@ -140,7 +140,7 @@ def _post_process(
         for label in unique_labels:
             members = np.where(labels == label)[0]
             if len(members) < config.min_group_size:
-                other_labels = [l for l in unique_labels if l != label and np.sum(labels == l) >= config.min_group_size]
+                other_labels = [lb for lb in unique_labels if lb != label and np.sum(labels == lb) >= config.min_group_size]
                 if not other_labels:
                     continue
                 best_target = None
@@ -384,8 +384,8 @@ def _merge_small_groups(
 
         # Find candidate groups that already meet min_group_size
         other_labels = [
-            l for l in np.unique(labels)
-            if l != label and np.sum(labels == l) >= config.min_group_size
+            lb for lb in np.unique(labels)
+            if lb != label and np.sum(labels == lb) >= config.min_group_size
         ]
         if not other_labels:
             continue
@@ -441,4 +441,4 @@ def _renumber(labels: NDArray) -> NDArray:
     """Re-number labels to be contiguous starting from 0."""
     unique = np.unique(labels)
     remap = {old: new for new, old in enumerate(unique)}
-    return np.array([remap[l] for l in labels], dtype=np.intp)
+    return np.array([remap[lb] for lb in labels], dtype=np.intp)

@@ -207,6 +207,176 @@ def _extract_worker(track_path: str, needs_analysis: bool) -> dict:
     return result
 
 
+# ─── Shared extraction service ──────────────────────────────────────────────
+
+
+class _ExtractionStats:
+    __slots__ = ("n_cached", "n_extracted", "n_analyzed", "n_failed", "n_removed")
+
+    def __init__(self) -> None:
+        self.n_cached = 0
+        self.n_extracted = 0
+        self.n_analyzed = 0
+        self.n_failed = 0
+        self.n_removed = 0
+
+    def summary_parts(self) -> list[str]:
+        parts = []
+        if self.n_cached:
+            parts.append(f"{self.n_cached} cached")
+        if self.n_analyzed:
+            parts.append(f"{self.n_analyzed} analyzed")
+        if self.n_extracted:
+            parts.append(f"{self.n_extracted} extracted")
+        if self.n_failed:
+            parts.append(f"{self.n_failed} failed")
+        if self.n_removed:
+            parts.append(f"{self.n_removed} removed")
+        return parts
+
+
+def _run_extraction(
+    tracks,
+    cache_path: str,
+    *,
+    force: bool = False,
+    workers: int = 1,
+    analyze_untagged: bool = False,
+    write_tags: bool = False,
+) -> tuple[dict, _ExtractionStats]:
+    """Shared extraction logic for run and extract commands.
+
+    Args:
+        tracks: scanned track list from scan_library.
+        cache_path: path to the raw features pickle cache.
+        force: clear cache and re-extract everything.
+        workers: parallel worker count.
+        analyze_untagged: if True, run full analysis (energy/key/structure)
+            on tracks missing tags. If False, only extract DSP/vibe/vocal.
+        write_tags: if True and analysis ran, write tags to file metadata.
+
+    Returns (raw_cache, stats).
+    """
+    import os
+    from pathlib import Path
+    from .features.builder import RawCacheEntry, load_raw_cache, save_raw_cache
+
+    stats = _ExtractionStats()
+    raw_cache = {} if force else load_raw_cache(cache_path)
+
+    # Separate cached vs needs-extraction
+    to_extract: list[tuple[int, object, float, bool]] = []
+    for i, t in enumerate(tracks):
+        mtime = os.path.getmtime(t.path)
+        cached = raw_cache.get(t.path)
+        if cached and cached.mtime == mtime:
+            cached.info = t
+            stats.n_cached += 1
+        else:
+            needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
+            to_extract.append((i, t, mtime, needs_analysis))
+
+    if stats.n_cached:
+        print(f"  {stats.n_cached} tracks loaded from cache")
+
+    # Tag writing imports (only when needed)
+    _format_tag = None
+    _write_tag = None
+    if write_tags:
+        from dj_tagger.formats import format_tag as _format_tag
+        from dj_tagger.metadata import write_tag as _write_tag
+
+    def _apply_result(t, mtime, needs_analysis, result):
+        """Apply worker result to track object and cache."""
+        if needs_analysis:
+            t.energy = result["energy"]
+            t.confidences["energy"] = result["energy_conf"]
+            t.key = result["key"]
+            t.confidences["key"] = result["key_conf"]
+            t.structure = result["structure"]
+            t.intro_bars = result["intro_bars"]
+            t.flow_type = result["flow_type"]
+            t.confidences["structure"] = result["structure_conf"]
+            stats.n_analyzed += 1
+
+        if t.bpm is None and result["tempo"] > 0:
+            t.bpm = round(result["tempo"])
+        t.vibe = result["vibe"]
+        t.vibe_scores = result["vibe_scores"]
+        t.confidences["vibe"] = result["vibe_conf"]
+        t.vocal = result["vocal"]
+        t.confidences["vocal"] = result["vocal_conf"]
+
+        if needs_analysis and _format_tag and _write_tag:
+            base_tag = _format_tag(
+                energy=t.energy, camelot=t.key, bpm=t.bpm,
+                structure=t.structure, vibe=t.vibe,
+                has_vocals=result["has_vocals"],
+            )
+            _write_tag(t.path, base_tag, dry_run=False)
+
+        raw_cache[t.path] = RawCacheEntry(
+            mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
+        )
+        stats.n_extracted += 1
+
+    # Run extraction
+    n_todo = len(to_extract)
+    actual_workers = workers if workers > 0 else 1
+
+    if n_todo == 0:
+        pass
+    elif actual_workers <= 1 or n_todo == 1:
+        for j, (i, t, mtime, needs_analysis) in enumerate(to_extract):
+            done = j + 1
+            print(f"  [{done:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}", end="", flush=True)
+            try:
+                result = _extract_worker(t.path, needs_analysis)
+                _apply_result(t, mtime, needs_analysis, result)
+                status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
+                print(f"  {status}")
+            except Exception as e:
+                raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
+                stats.n_failed += 1
+                print(f"  FAILED: {e}")
+            if done % 20 == 0:
+                save_raw_cache(raw_cache, cache_path)
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        print(f"  Using {actual_workers} workers for {n_todo} tracks...")
+        futures = {}
+        with ProcessPoolExecutor(max_workers=actual_workers) as pool:
+            for i, t, mtime, needs_analysis in to_extract:
+                fut = pool.submit(_extract_worker, t.path, needs_analysis)
+                futures[fut] = (i, t, mtime, needs_analysis)
+
+            done_count = 0
+            for fut in as_completed(futures):
+                i, t, mtime, needs_analysis = futures[fut]
+                done_count += 1
+                try:
+                    result = fut.result()
+                    _apply_result(t, mtime, needs_analysis, result)
+                    status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
+                    print(f"  [{done_count:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}  {status}")
+                except Exception as e:
+                    raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
+                    stats.n_failed += 1
+                    print(f"  [{done_count:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}  FAILED: {e}")
+                if done_count % 20 == 0:
+                    save_raw_cache(raw_cache, cache_path)
+
+    # Remove deleted files from cache
+    current_paths = {t.path for t in tracks}
+    removed = [p for p in raw_cache if p not in current_paths]
+    for p in removed:
+        del raw_cache[p]
+    stats.n_removed = len(removed)
+
+    save_raw_cache(raw_cache, cache_path)
+    return raw_cache, stats
+
+
 # ─── Soft vocal partitioning helper ──────────────────────────────────────────
 
 def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
@@ -257,33 +427,59 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
     return labels
 
 
+# ─── Delete-target validation ───────────────────────────────────────────────
+
+def _safe_rmtree(target: str, allowed_roots: list[str]) -> bool:
+    """Remove a directory tree only if it's under one of the allowed roots.
+
+    Returns True if deleted, False if skipped.
+    """
+    import shutil
+    from pathlib import Path
+
+    resolved = Path(target).resolve()
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(Path(root).resolve())
+            if resolved.exists():
+                shutil.rmtree(str(resolved))
+            return True
+        except ValueError:
+            continue
+    logger.warning("Refusing to delete %s — not under allowed roots %s", target, allowed_roots)
+    return False
+
+
+def _safe_unlink(target: str, allowed_roots: list[str]) -> bool:
+    """Remove a file only if it's under one of the allowed roots."""
+    from pathlib import Path
+
+    resolved = Path(target).resolve()
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(Path(root).resolve())
+            if resolved.exists():
+                resolved.unlink()
+            return True
+        except ValueError:
+            continue
+    logger.warning("Refusing to delete %s — not under allowed roots %s", target, allowed_roots)
+    return False
+
+
 # ─── run: all-in-one pipeline ───────────────────────────────────────────────
 
 def _cmd_run(args) -> int:
-    import numpy as np
-    import shutil
-    import tempfile
     from pathlib import Path
     from .scanner import scan_library
-    from .features.builder import (
-        RawCacheEntry, load_raw_cache, save_raw_cache,
-        build_features_from_raw,
-    )
-    from .features.dsp import extract_dsp_features, extract_section_dsp
+    from .features.builder import build_features_from_raw
     from .features.embeddings import (
         is_clap_available, extract_clap_incremental, fit_pca,
     )
     from .grouping.distance import compute_distance_matrix
-    from .grouping.clustering import cluster_tracks
     from .grouping.assignment import (
         assign_group_ids, save_assignment, load_assignment, assign_new_tracks,
     )
-    from dj_tagger.analyzers.energy import analyze_energy
-    from dj_tagger.analyzers.key import analyze_key
-    from dj_tagger.analyzers.sections import analyze_sections
-    from dj_tagger.analyzers.structure import analyze_structure
-    from dj_tagger.analyzers.vibe import analyze_vibe
-    from dj_tagger.analyzers.vocal import analyze_vocal
     from .feedback.store import load_feedback
     from .feedback.apply import apply_feedback_to_distances
     from .output.csv_export import export_groups_csv, export_recommendations_csv
@@ -291,11 +487,8 @@ def _cmd_run(args) -> int:
     from .output.playlists import generate_group_playlists, generate_recommendation_playlists
     from .recommend.neighbors import compute_recommendations
     from .config import GrouperConfig
-    from dj_tagger.audio import load_audio_features
     from dj_tagger.formats import format_tag
     from dj_tagger.metadata import read_existing_tag, write_tag
-    from dj_tagger.formats import parse_tag
-    import os
 
     config = GrouperConfig()
 
@@ -324,11 +517,13 @@ def _cmd_run(args) -> int:
     else:
         out_dir = Path(_DEFAULTS.output_dir)
 
+    # Allowed roots for destructive operations
+    _allowed = [str(out_dir), str(Path(args.cache).parent)]
+
     # ── Handle --clean ──
     if args.clean:
-        if out_dir.exists():
-            shutil.rmtree(str(out_dir))
-            print(f"Cleaned {out_dir}/")
+        _safe_rmtree(str(out_dir), _allowed)
+        print(f"Cleaned {out_dir}/")
         return 0
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -336,21 +531,16 @@ def _cmd_run(args) -> int:
     # ── Handle --force-extract: clear DSP cache + outputs (NOT clap cache) ──
     if args.force_extract:
         for f in [args.cache, args.cache.replace(".pkl", "_assignment.pkl")]:
-            if Path(f).exists():
-                Path(f).unlink()
+            _safe_unlink(f, _allowed)
         for d in [args.output, args.playlists]:
-            if Path(d).exists():
-                shutil.rmtree(d)
+            _safe_rmtree(d, _allowed)
         for f in [args.csv, args.recommendations_csv]:
-            if Path(f).exists():
-                Path(f).unlink()
+            _safe_unlink(f, _allowed)
         print("Cleared DSP cache and outputs (CLAP cache preserved)")
 
     # ── Handle --force-clap: clear CLAP cache only ──
     if args.force_clap:
-        clap_path = Path(args.clap_cache)
-        if clap_path.exists():
-            clap_path.unlink()
+        _safe_unlink(args.clap_cache, _allowed)
         print("Cleared CLAP cache")
 
     import time as _time
@@ -363,135 +553,20 @@ def _cmd_run(args) -> int:
         print(" no tracks found.")
         return 0
 
-    n_tagged = sum(1 for t in tracks if t.energy is not None)
-    print(f" {len(tracks)} tracks found ({n_tagged} tagged, {len(tracks) - n_tagged} untagged) ({_fmt_elapsed(_time.perf_counter() - t_step)})")
-
-    raw_cache = load_raw_cache(args.cache)
-
-    n_cached = 0
-    n_extracted = 0
-    n_analyzed = 0
-    n_failed = 0
     total_tracks = len(tracks)
-    print(f"  Analyzing and extracting features...")
+    n_tagged = sum(1 for t in tracks if t.energy is not None)
+    print(f" {total_tracks} tracks found ({n_tagged} tagged, {total_tracks - n_tagged} untagged) ({_fmt_elapsed(_time.perf_counter() - t_step)})")
 
-    # Separate cached vs needs-extraction
-    to_extract = []  # list of (index, track, mtime, needs_analysis)
-    for i, t in enumerate(tracks):
-        mtime = os.path.getmtime(t.path)
-        cached = raw_cache.get(t.path)
-        if cached and cached.mtime == mtime:
-            cached.info = t
-            n_cached += 1
-        else:
-            needs_analysis = t.energy is None or t.key is None
-            to_extract.append((i, t, mtime, needs_analysis))
-
-    if n_cached:
-        print(f"  {n_cached} tracks loaded from cache")
-
-    def _apply_result(t, mtime, needs_analysis, result):
-        """Apply worker result to track object and cache."""
-        nonlocal n_extracted, n_analyzed
-        if needs_analysis:
-            t.energy = result["energy"]
-            t.confidences["energy"] = result["energy_conf"]
-            t.key = result["key"]
-            t.confidences["key"] = result["key_conf"]
-            t.structure = result["structure"]
-            t.intro_bars = result["intro_bars"]
-            t.flow_type = result["flow_type"]
-            t.confidences["structure"] = result["structure_conf"]
-            n_analyzed += 1
-
-        if t.bpm is None and result["tempo"] > 0:
-            t.bpm = round(result["tempo"])
-        t.vibe = result["vibe"]
-        t.vibe_scores = result["vibe_scores"]
-        t.confidences["vibe"] = result["vibe_conf"]
-        t.vocal = result["vocal"]
-        t.confidences["vocal"] = result["vocal_conf"]
-
-        if needs_analysis and args.write_tags:
-            base_tag = format_tag(
-                energy=t.energy, camelot=t.key, bpm=t.bpm,
-                structure=t.structure, vibe=t.vibe,
-                has_vocals=result["has_vocals"],
-            )
-            write_tag(t.path, base_tag, dry_run=False)
-
-        raw_cache[t.path] = RawCacheEntry(
-            mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
-        )
-        n_extracted += 1
-
-    n_todo = len(to_extract)
-    workers = getattr(args, "workers", 1) or 1
-
-    if n_todo == 0:
-        pass
-    elif workers <= 1 or n_todo == 1:
-        # Sequential extraction
-        for j, (i, t, mtime, needs_analysis) in enumerate(to_extract):
-            done = j + 1
-            print(f"  [{done:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}", end="", flush=True)
-            try:
-                result = _extract_worker(t.path, needs_analysis)
-                _apply_result(t, mtime, needs_analysis, result)
-                status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
-                print(f"  {status}")
-            except Exception as e:
-                raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
-                n_failed += 1
-                print(f"  FAILED: {e}")
-            if (j + 1) % 20 == 0:
-                save_raw_cache(raw_cache, args.cache)
-    else:
-        # Parallel extraction
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        print(f"  Using {workers} workers for {n_todo} tracks...")
-        futures = {}
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            for i, t, mtime, needs_analysis in to_extract:
-                fut = pool.submit(_extract_worker, t.path, needs_analysis)
-                futures[fut] = (i, t, mtime, needs_analysis)
-
-            done_count = 0
-            for fut in as_completed(futures):
-                i, t, mtime, needs_analysis = futures[fut]
-                done_count += 1
-                try:
-                    result = fut.result()
-                    _apply_result(t, mtime, needs_analysis, result)
-                    status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
-                    print(f"  [{done_count:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}  {status}")
-                except Exception as e:
-                    raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
-                    n_failed += 1
-                    print(f"  [{done_count:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}  FAILED: {e}")
-                if done_count % 20 == 0:
-                    save_raw_cache(raw_cache, args.cache)
-
-    # Remove deleted files
-    current_paths = {t.path for t in tracks}
-    removed = [p for p in raw_cache if p not in current_paths]
-    for p in removed:
-        del raw_cache[p]
-
-    save_raw_cache(raw_cache, args.cache)
+    print("  Analyzing and extracting features...")
+    raw_cache, ext_stats = _run_extraction(
+        tracks, args.cache,
+        force=args.force_extract,
+        workers=getattr(args, "workers", 1) or 1,
+        analyze_untagged=True,
+        write_tags=args.write_tags,
+    )
     elapsed_step = _time.perf_counter() - t_step
-    summary_parts = []
-    if n_cached:
-        summary_parts.append(f"{n_cached} cached")
-    if n_analyzed:
-        summary_parts.append(f"{n_analyzed} analyzed")
-    if n_extracted:
-        summary_parts.append(f"{n_extracted} extracted")
-    if n_failed:
-        summary_parts.append(f"{n_failed} failed")
-    if removed:
-        summary_parts.append(f"{len(removed)} removed")
-    print(f"  Done: {', '.join(summary_parts)} ({_fmt_elapsed(elapsed_step)})")
+    print(f"  Done: {', '.join(ext_stats.summary_parts())} ({_fmt_elapsed(elapsed_step)})")
 
     # ── Step 1b: CLAP audio embeddings ──
     track_order = [t.path for t in tracks]
@@ -573,7 +648,7 @@ def _cmd_run(args) -> int:
     print(f"  {n_recs} recommendations computed ({_fmt_elapsed(_time.perf_counter() - _t)})")
 
     # ── Step 5: Output ──
-    print(f"\n[5/5] Writing output files...")
+    print("\n[5/5] Writing output files...")
 
     # Atomic CSV: write to temp, then rename
     _atomic_write_csv(export_groups_csv, feature_tracks, assignment, args.csv)
@@ -584,8 +659,7 @@ def _cmd_run(args) -> int:
 
     if not args.dry_run:
         # Clean and recreate group folders (hard links are instant)
-        if Path(args.output).exists():
-            shutil.rmtree(args.output)
+        _safe_rmtree(args.output, _allowed)
         create_group_folders(
             feature_tracks, assignment, args.output,
             dry_run=False, use_copy=args.copy,
@@ -618,8 +692,7 @@ def _cmd_run(args) -> int:
 
     if args.playlists:
         # Clean and recreate playlists
-        if Path(args.playlists).exists():
-            shutil.rmtree(args.playlists)
+        _safe_rmtree(args.playlists, _allowed)
         generate_group_playlists(feature_tracks, assignment, args.playlists)
         generate_recommendation_playlists(recommendations, args.playlists)
         print(f"  Playlists: {args.playlists}/")
@@ -629,7 +702,8 @@ def _cmd_run(args) -> int:
 
 
 def _atomic_write_csv(write_fn, *write_args):
-    """Write a CSV via temp file + rename for crash safety."""
+    """Write a CSV via temp file + os.replace for crash safety."""
+    import os
     import tempfile
     from pathlib import Path
 
@@ -639,17 +713,13 @@ def _atomic_write_csv(write_fn, *write_args):
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
 
     tmp_fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, suffix=".csv.tmp")
-    import os
     os.close(tmp_fd)
     try:
         write_fn(*write_args[:-1], tmp_path)
-        # Atomic rename (same filesystem)
-        if Path(out_path).exists():
-            Path(out_path).unlink()
-        Path(tmp_path).rename(out_path)
+        os.replace(tmp_path, out_path)
     except Exception:
-        if Path(tmp_path).exists():
-            Path(tmp_path).unlink()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
         raise
 
 
@@ -658,18 +728,8 @@ def _atomic_write_csv(write_fn, *write_args):
 def _cmd_extract(args) -> int:
     from pathlib import Path
     from .scanner import scan_library
-    from .features.dsp import extract_dsp_features, extract_section_dsp
-    from .features.builder import (
-        RawCacheEntry, load_raw_cache, save_raw_cache,
-        build_features_from_raw,
-    )
-    from .features.embeddings import is_clap_available, extract_clap_embeddings, fit_pca
+    from .features.builder import build_features_from_raw
     from .config import GrouperConfig
-    from dj_tagger.audio import load_audio_features
-    from dj_tagger.analyzers.sections import analyze_sections
-    from dj_tagger.analyzers.vibe import analyze_vibe
-    from dj_tagger.analyzers.vocal import analyze_vocal
-    import os
 
     config = GrouperConfig()
     Path(_DEFAULTS.output_dir).mkdir(parents=True, exist_ok=True)
@@ -679,89 +739,14 @@ def _cmd_extract(args) -> int:
         print("No tracks found.")
         return 0
 
-    raw_cache = {} if args.force else load_raw_cache(args.cache)
-
-    n_cached = 0
-    n_extracted = 0
-    n_failed = 0
     print(f"Processing {len(tracks)} tracks...")
-
-    to_extract = []
-    for i, t in enumerate(tracks):
-        mtime = os.path.getmtime(t.path)
-        cached = raw_cache.get(t.path)
-        if cached and cached.mtime == mtime:
-            cached.info = t
-            n_cached += 1
-        else:
-            to_extract.append((i, t, mtime))
-
-    if n_cached:
-        print(f"  {n_cached} tracks loaded from cache")
-
-    def _apply_extract_result(t, mtime, result):
-        nonlocal n_extracted
-        if t.bpm is None and result["tempo"] > 0:
-            t.bpm = round(result["tempo"])
-        t.vibe_scores = result["vibe_scores"]
-        t.confidences["vibe"] = result["vibe_conf"]
-        t.confidences["vocal"] = result["vocal_conf"]
-        raw_cache[t.path] = RawCacheEntry(
-            mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
-        )
-        n_extracted += 1
-
-    n_todo = len(to_extract)
-    workers = getattr(args, "workers", 1) or 1
-
-    if n_todo == 0:
-        pass
-    elif workers <= 1 or n_todo == 1:
-        for j, (i, t, mtime) in enumerate(to_extract):
-            print(f"  [{j+1}/{n_todo}] {Path(t.path).name}", end="", flush=True)
-            try:
-                result = _extract_worker(t.path, False)
-                _apply_extract_result(t, mtime, result)
-                print(" OK")
-            except Exception as e:
-                raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
-                n_failed += 1
-                print(f" FAILED: {e}")
-    else:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        print(f"  Using {workers} workers for {n_todo} tracks...")
-        futures = {}
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            for i, t, mtime in to_extract:
-                fut = pool.submit(_extract_worker, t.path, False)
-                futures[fut] = (t, mtime)
-
-            done_count = 0
-            for fut in as_completed(futures):
-                t, mtime = futures[fut]
-                done_count += 1
-                try:
-                    result = fut.result()
-                    _apply_extract_result(t, mtime, result)
-                    print(f"  [{done_count}/{n_todo}] {Path(t.path).name} OK")
-                except Exception as e:
-                    raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
-                    n_failed += 1
-                    print(f"  [{done_count}/{n_todo}] {Path(t.path).name} FAILED: {e}")
-
-    # Remove deleted files
-    current_paths = {t.path for t in tracks}
-    removed = [p for p in raw_cache if p not in current_paths]
-    for p in removed:
-        del raw_cache[p]
-
-    save_raw_cache(raw_cache, args.cache)
-    parts = [f"{n_cached} cached", f"{n_extracted} extracted"]
-    if n_failed:
-        parts.append(f"{n_failed} failed")
-    if removed:
-        parts.append(f"{len(removed)} removed")
-    print(f"  {', '.join(parts)}")
+    raw_cache, stats = _run_extraction(
+        tracks, args.cache,
+        force=args.force,
+        workers=getattr(args, "workers", 1) or 1,
+        analyze_untagged=False,
+    )
+    print(f"  {', '.join(stats.summary_parts())}")
 
     if args.features_csv:
         track_order = [t.path for t in tracks]
@@ -777,13 +762,11 @@ def _cmd_extract(args) -> int:
 def _cmd_cluster(args) -> int:
     from .features.builder import load_raw_cache, build_features_from_raw
     from .grouping.distance import compute_distance_matrix
-    from .grouping.clustering import cluster_tracks
     from .grouping.assignment import assign_group_ids, save_assignment
     from .feedback.store import load_feedback
     from .feedback.apply import apply_feedback_to_distances
     from .output.csv_export import export_groups_csv
     from .config import GrouperConfig
-    import numpy as np
 
     config = GrouperConfig()
     raw_cache = load_raw_cache(args.cache)
@@ -818,13 +801,11 @@ def _cmd_cluster(args) -> int:
 def _cmd_review(args) -> int:
     from .features.builder import load_raw_cache, build_features_from_raw
     from .grouping.distance import compute_distance_matrix
-    from .grouping.clustering import cluster_tracks
     from .grouping.assignment import assign_group_ids
     from .feedback.store import load_feedback, add_feedback
     from .feedback.apply import apply_feedback_to_distances
     from .review import interactive_review
     from .config import GrouperConfig
-    import numpy as np
 
     config = GrouperConfig()
     raw_cache = load_raw_cache(args.cache)

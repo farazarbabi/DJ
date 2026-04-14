@@ -13,7 +13,6 @@ import mutagen
 import soundfile as sf
 
 from ..config import RegistryConfig
-from ..key_utils import parse_any_key
 from ..models import FileRecord, SourceObservation, PayloadIndexEntry, now_iso
 from ..store.csv_store import CsvStore
 from ..store.obs_cache import ObsCache
@@ -108,8 +107,8 @@ def scan_files(
     logger.debug("Found %d audio files", len(paths))
 
     existing_files = {f.path_abs: f for f in store.load_files()}
-    existing_obs = store.load_observations()
-    payload_entries = store.load_payload_index()
+    store.load_observations()
+    store.load_payload_index()
 
     new_files: list[FileRecord] = []
     new_obs: list[SourceObservation] = []

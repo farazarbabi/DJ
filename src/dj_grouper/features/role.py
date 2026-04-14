@@ -21,8 +21,8 @@ def infer_role(info: TrackInfo, dsp: dict[str, float]) -> str:
     energy = info.energy or 3
     flow = info.flow_type or "H"
     vibe = info.vibe or "HYPN"
-    onset = dsp.get("onset_density", 0.0)
-    rms = dsp.get("rms_mean", 0.0)
+    dsp.get("onset_density", 0.0)
+    dsp.get("rms_mean", 0.0)
 
     # Breakdown-heavy structure
     if flow == "B":

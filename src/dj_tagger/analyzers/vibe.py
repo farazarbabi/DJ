@@ -39,10 +39,10 @@ def analyze_vibe(track_audio: TrackAudio) -> VibeResult:
     centroid_var = float(np.var(centroid)) / (centroid_mean ** 2 + 1e-8)
 
     flatness = float(np.mean(librosa.feature.spectral_flatness(y=y)[0]))
-    bandwidth = float(np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]))
+    float(np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]))
 
     chroma = librosa.feature.chroma_cqt(y=y_h, sr=sr)
-    chroma_strength = float(np.mean(np.max(chroma, axis=0)))
+    float(np.mean(np.max(chroma, axis=0)))
 
     spectral_stability = 1.0 - min(1.0, centroid_var * 10)
 
@@ -63,7 +63,7 @@ def analyze_vibe(track_audio: TrackAudio) -> VibeResult:
     flux = float(np.mean(np.sqrt(np.mean(flux_raw ** 2, axis=0))))
 
     spec_avg = np.mean(S, axis=1)
-    peakiness = float(np.max(spec_avg)) / (float(np.mean(spec_avg)) + 1e-8)
+    float(np.max(spec_avg)) / (float(np.mean(spec_avg)) + 1e-8)
 
     # --- Helper ---
     def _clip01(v: float) -> float:

@@ -5,9 +5,8 @@ from __future__ import annotations
 import csv
 import logging
 import os
-from collections import defaultdict
 
-from ..store.csv_store import CsvStore
+from ..store.csv_store import CsvStore, _sanitize_cell
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +33,8 @@ OVERVIEW_COLUMNS = [
     "tag_bpm",
     "rekordbox_bpm",
     "songstats_bpm",
+    "canonical_bpm",
+    "bpm_confidence",
     # Metadata
     "rekordbox_genre",
     "rekordbox_label",
@@ -121,6 +122,8 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
                 "tag_bpm": tag_obs.bpm if tag_obs else "",
                 "rekordbox_bpm": rb_obs.bpm if rb_obs else "",
                 "songstats_bpm": ss_obs.bpm if ss_obs else "",
+                "canonical_bpm": t.canonical_bpm,
+                "bpm_confidence": round(t.canonical_bpm_confidence, 2) if t.canonical_bpm_confidence else "",
                 # Metadata
                 "rekordbox_genre": rb_obs.genre if rb_obs else "",
                 "rekordbox_label": rb_obs.label if rb_obs else "",
@@ -147,7 +150,7 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
                 "beatport_id": ss_obs.beatport_id if ss_obs else "",
                 "track_id": t.track_id,
             }
-            w.writerow(row)
+            w.writerow({k: _sanitize_cell(str(v)) for k, v in row.items()})
 
     logger.info("Overview: %s (%d tracks)", path, len(tracks))
     return path

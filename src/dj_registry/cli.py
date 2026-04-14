@@ -107,11 +107,15 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
+    from .resolver.bpm_resolver import resolve_all_bpms
     from .resolver.key_resolver import resolve_all_keys
     config = _build_config(args)
     store = CsvStore(config.output_dir)
-    resolved, review = resolve_all_keys(config, store, force=getattr(args, "force", False))
+    force = getattr(args, "force", False)
+    resolved, review = resolve_all_keys(config, store, force=force)
     print(f"Resolved {resolved} keys, {review} need review")
+    bpm_resolved, bpm_missing = resolve_all_bpms(config, store, force=force)
+    print(f"Resolved {bpm_resolved} BPMs, {bpm_missing} missing")
     return 0
 
 
@@ -168,7 +172,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         no_essentia=getattr(args, "no_essentia", False),
         analysis_workers=config.analysis_workers,
     )
-    print(f"\nPipeline summary:")
+    print("\nPipeline summary:")
     for k, v in summary.items():
         print(f"  {k}: {v}")
     return 0

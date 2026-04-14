@@ -6,7 +6,6 @@ import logging
 
 import librosa
 import numpy as np
-from numpy.typing import NDArray
 
 from dj_tagger.audio import TrackAudio
 

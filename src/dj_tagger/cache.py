@@ -7,7 +7,6 @@ collisions when the same filename exists in different folders).
 from __future__ import annotations
 
 import logging
-import os
 import pickle
 from dataclasses import dataclass
 from pathlib import Path

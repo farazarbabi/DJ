@@ -12,9 +12,6 @@ import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from dj_tagger.cache import (
-    ANALYZER_VERSION,
-    TaggerCache,
-    cache_key,
     get_cached,
     load_cache,
     put_cached,
@@ -160,7 +157,7 @@ def run_analysis(
     # Run analysis on cache misses
     fresh_results: list[tuple[str, str, str, dict | None]] = []
     if cache_misses:
-        paths_to_analyze = [path for _, _, path, _ in cache_misses]
+        paths_to_analyze = [path for _, _, path, _, _ in cache_misses]
 
         if config.analysis_workers <= 1:
             raw_results = [_analyze_single(p, use_essentia) for p in paths_to_analyze]

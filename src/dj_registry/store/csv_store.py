@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 from dataclasses import asdict, fields
-from datetime import datetime
 from typing import TypeVar, Type
 
 from ..models import (
@@ -50,6 +49,16 @@ def _row_to_dataclass(cls: Type[T], row: dict[str, str]) -> T:
     return cls(**kwargs)
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_cell(value: str) -> str:
+    """Prevent CSV formula injection by prefixing dangerous values with a single quote."""
+    if value and value[0] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 def _dataclass_to_row(obj: T) -> dict[str, str]:
     """Convert a dataclass instance to a CSV row dict."""
     row: dict[str, str] = {}
@@ -59,7 +68,7 @@ def _dataclass_to_row(obj: T) -> dict[str, str]:
         elif val is None:
             row[key] = ""
         else:
-            row[key] = str(val)
+            row[key] = _sanitize_cell(str(val))
     return row
 
 

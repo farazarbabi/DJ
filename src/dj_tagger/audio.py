@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,10 @@ import librosa
 import numpy as np
 from numpy.typing import NDArray
 
-from .constants import SAMPLE_RATE
+# Suppress librosa n_fft warnings for short segments (zero-padded, harmless)
+warnings.filterwarnings("ignore", message="n_fft=.*is too large", category=UserWarning)
+
+from .constants import SAMPLE_RATE  # noqa: E402 — must follow warnings filter
 
 logger = logging.getLogger(__name__)
 

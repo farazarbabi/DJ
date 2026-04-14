@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
 
-from lxml import etree
+from defusedxml.lxml import parse as _safe_parse
 
 from ..config import RegistryConfig
 from ..key_utils import parse_any_key
@@ -65,8 +64,8 @@ def ingest_rekordbox(
     shutil.copy2(xml_path, raw_copy)
     payload_ref = f"rekordbox-xml-{now_iso().replace(':', '-')}"
 
-    # Parse XML
-    tree = etree.parse(xml_path)
+    # Parse XML (defused: no entity expansion, no DTD, no XInclude)
+    tree = _safe_parse(xml_path)
     root = tree.getroot()
     collection = root.find("COLLECTION")
     if collection is None:

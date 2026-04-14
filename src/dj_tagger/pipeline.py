@@ -6,12 +6,12 @@ import logging
 from dataclasses import dataclass
 
 from .audio import load_audio_features
-from .analyzers.energy import EnergyResult, analyze_energy
-from .analyzers.key import KeyResult, analyze_key
-from .analyzers.sections import SectionMap, analyze_sections
-from .analyzers.structure import StructureResult, analyze_structure
-from .analyzers.vibe import VibeResult, analyze_vibe
-from .analyzers.vocal import VocalResult, analyze_vocal
+from .analyzers.energy import analyze_energy
+from .analyzers.key import analyze_key
+from .analyzers.sections import analyze_sections
+from .analyzers.structure import analyze_structure
+from .analyzers.vibe import analyze_vibe
+from .analyzers.vocal import analyze_vocal
 from .formats import format_tag
 from .metadata import read_existing_tag, write_tag
 

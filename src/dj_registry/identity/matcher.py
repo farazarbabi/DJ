@@ -6,7 +6,7 @@ import logging
 import uuid
 
 from ..config import RegistryConfig
-from ..models import FileRecord, LogicalTrack, now_iso
+from ..models import LogicalTrack
 from ..store.csv_store import CsvStore
 from .normalize import normalize_artist, normalize_title, normalize_mix, extract_mix_from_title
 
