@@ -47,40 +47,11 @@ RawCache = dict[str, RawCacheEntry]
 def load_raw_cache(path: str) -> RawCache:
     """Load the grouper's in-memory raw cache.
 
-    Tries the universal cache first. Falls back to legacy features_cache.pkl
-    and migrates its contents if found.
-
-    The `path` argument locates the cache directory.
+    Returns an empty dict. The actual cache lookup happens per-track
+    in _run_extraction against raw_cache.pkl via the universal cache.
+    The path argument is kept for API compat.
     """
-    from dj_tagger.universal_cache import get_cache
-    ucache_path = str(Path(path).parent / "raw_cache.pkl")
-    ucache = get_cache(ucache_path)
-
-    raw_cache: RawCache = {}
-
-    # Try loading legacy features_cache.pkl for migration
-    legacy_path = Path(path)
-    if legacy_path.exists():
-        try:
-            with open(legacy_path, "rb") as f:
-                data = pickle.load(f)
-            if isinstance(data, dict):
-                first_val = next(iter(data.values()), None) if data else None
-                if first_val is not None and hasattr(first_val, "mtime"):
-                    logger.info("Migrating %d entries from legacy features cache", len(data))
-                    raw_cache = data
-                    # Migrate DSP/section_dsp to universal cache
-                    for filepath, entry in data.items():
-                        if entry.dsp:
-                            filename = Path(filepath).name
-                            ucache.put_track(filename, None, "dsp", entry.dsp, mtime=entry.mtime)
-                            if entry.section_dsp:
-                                ucache.put_track(filename, None, "section_dsp", entry.section_dsp, mtime=entry.mtime)
-                    ucache.save()
-        except Exception:
-            pass
-
-    return raw_cache
+    return {}
 
 
 def save_raw_cache(raw_cache: RawCache, path: str) -> None:
@@ -101,11 +72,6 @@ def save_raw_cache(raw_cache: RawCache, path: str) -> None:
         if entry.section_dsp:
             ucache.put_track(filename, dur, "section_dsp", entry.section_dsp, mtime=entry.mtime)
     ucache.save()
-
-    # Also write legacy format for fast in-process reload
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(raw_cache, f)
     logger.info("Raw cache saved (%d entries)", len(raw_cache))
 
 

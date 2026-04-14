@@ -74,8 +74,8 @@ class TestRunExtraction:
         assert stats.n_extracted == 1
         assert stats.n_cached == 0
 
-    def test_deleted_file_removed_from_cache(self, tmp_path):
-        """Tracks removed from the library are evicted from cache."""
+    def test_rerun_with_fewer_tracks(self, tmp_path):
+        """Re-running with fewer tracks still works (removed tracks stay in raw cache)."""
         wav1 = str(tmp_path / "track1.wav")
         wav2 = str(tmp_path / "track2.wav")
         _make_wav(wav1)
@@ -86,14 +86,11 @@ class TestRunExtraction:
         tracks_both = [TrackInfo(path=wav1), TrackInfo(path=wav2)]
         raw_cache, stats = _run_extraction(tracks_both, cache_path, workers=1)
         assert stats.n_extracted == 2
-        assert wav1 in raw_cache
-        assert wav2 in raw_cache
 
-        # Re-run with only track1 — track2 should be evicted
+        # Re-run with only track1 — track1 should be cached, track2 not in result
         tracks_one = [TrackInfo(path=wav1)]
         raw_cache2, stats2 = _run_extraction(tracks_one, cache_path, workers=1)
         assert stats2.n_cached == 1
-        assert stats2.n_removed == 1
         assert wav1 in raw_cache2
         assert wav2 not in raw_cache2
 

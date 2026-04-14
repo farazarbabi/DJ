@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -69,25 +68,6 @@ def extract_clap_incremental(
             embedding = ucache.get_track(filename, dur, "clap")
             if embedding is not None:
                 cache[fpath] = embedding
-
-        # Migrate from legacy clap_cache.pkl if it exists
-        legacy_path = Path(cache_path)
-        if legacy_path.exists():
-            try:
-                with open(legacy_path, "rb") as f:
-                    legacy = pickle.load(f)
-                if isinstance(legacy, dict):
-                    migrated = 0
-                    for fpath, emb in legacy.items():
-                        if fpath not in cache:
-                            cache[fpath] = emb
-                            ucache.put_track(Path(fpath).name, quick_duration(fpath), "clap", emb)
-                            migrated += 1
-                    if migrated:
-                        logger.info("Migrated %d entries from legacy CLAP cache", migrated)
-                        ucache.save()
-            except Exception:
-                pass
 
     # Find which files need extraction
     to_extract: list[tuple[int, str]] = []

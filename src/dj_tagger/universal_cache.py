@@ -1,10 +1,12 @@
-"""Universal cache: single file for all analysis, features, and API data.
+"""Universal cache: two files for all analysis, features, and API data.
 
 Every module (dj-tagger, dj-grouper, dj-registry) reads and writes here.
 Once a track is analyzed, it is never re-analyzed — any module can reuse
 results from any other module.
 
-Cache file: cache/universal_cache.pkl
+Cache files:
+  - cache/raw_cache.pkl     — permanent raw data (DSP, CLAP, API results)
+  - cache/derived_cache.pkl — versioned derived data (energy, vibe, vocal, structure)
 
 Key format:
   - Track data:  "{filename}|{duration:.1f}|{layer}"
@@ -225,22 +227,13 @@ class UniversalCache:
     # ── Load / Save ──────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        loaded = False
-
         # Load raw_cache.pkl
         if os.path.exists(self.raw_path):
-            loaded |= self._load_file(self.raw_path)
+            self._load_file(self.raw_path)
 
         # Load derived_cache.pkl
         if os.path.exists(self.derived_path):
-            loaded |= self._load_file(self.derived_path)
-
-        # Fall back to legacy universal_cache.pkl
-        if not loaded and os.path.exists(self.path) and self.path != self.raw_path:
-            loaded = self._load_file(self.path)
-
-        if not loaded:
-            self._try_migrate()
+            self._load_file(self.derived_path)
 
     def _load_file(self, path: str) -> bool:
         """Load entries from a single pickle file. Returns True on success."""
@@ -307,129 +300,6 @@ class UniversalCache:
 
     def __len__(self) -> int:
         return len(self._entries)
-
-    # ── Migration from legacy cache files ────────────────────────────────
-
-    def _try_migrate(self) -> None:
-        """Auto-import data from legacy cache files."""
-        cache_dir = os.path.dirname(self.raw_path) or "cache"
-        migrated = 0
-
-        tagger_path = os.path.join(cache_dir, "tagger_cache.pkl")
-        if os.path.exists(tagger_path):
-            migrated += self._migrate_tagger(tagger_path)
-
-        features_path = os.path.join(cache_dir, "features_cache.pkl")
-        if os.path.exists(features_path):
-            migrated += self._migrate_grouper(features_path)
-
-        clap_path = os.path.join(cache_dir, "clap_cache.pkl")
-        if os.path.exists(clap_path):
-            migrated += self._migrate_clap(clap_path)
-
-        registry_path = os.path.join(cache_dir, "registry_cache.pkl")
-        if os.path.exists(registry_path):
-            migrated += self._migrate_registry(registry_path)
-
-        # Also try legacy universal_cache.pkl
-        legacy_universal = os.path.join(cache_dir, "universal_cache.pkl")
-        if os.path.exists(legacy_universal):
-            self._load_file(legacy_universal)
-            migrated += 1  # count as migrated to trigger save
-
-        if migrated > 0:
-            logger.info("Migrated %d entries from legacy caches", migrated)
-            self._dirty_raw = True
-            self._dirty_derived = True
-            self.save()
-
-    def _migrate_tagger(self, path: str) -> int:
-        try:
-            with open(path, "rb") as f:
-                cache = pickle.load(f)
-            if not isinstance(cache, dict):
-                return 0
-            count = 0
-            for key, entry in cache.items():
-                if not hasattr(entry, "result"):
-                    continue
-                tagger_key = f"{key}|tagger"
-                # Use current derived version so migrated entries aren't immediately stale
-                self._entries[tagger_key] = CacheEntry(
-                    version=DERIVED_VERSIONS.get("tagger", "5.1"),
-                    mtime=getattr(entry, "mtime", 0.0),
-                    data=entry.result,
-                )
-                count += 1
-            logger.info("Migrated %d entries from tagger cache", count)
-            return count
-        except Exception as e:
-            logger.warning("Failed to migrate tagger cache: %s", e)
-            return 0
-
-    def _migrate_grouper(self, path: str) -> int:
-        try:
-            with open(path, "rb") as f:
-                cache = pickle.load(f)
-            if not isinstance(cache, dict):
-                return 0
-            count = 0
-            for filepath, entry in cache.items():
-                if not hasattr(entry, "dsp"):
-                    continue
-                filename = Path(filepath).name
-                mtime = getattr(entry, "mtime", 0.0)
-                if entry.dsp:
-                    dsp_key = f"{filename}|dsp"
-                    self._entries[dsp_key] = CacheEntry(version="1", mtime=mtime, data=entry.dsp)
-                    count += 1
-                section_dsp = getattr(entry, "section_dsp", None)
-                if section_dsp:
-                    sdsp_key = f"{filename}|section_dsp"
-                    self._entries[sdsp_key] = CacheEntry(version="1", mtime=mtime, data=section_dsp)
-                    count += 1
-            logger.info("Migrated %d entries from grouper cache", count)
-            return count
-        except Exception as e:
-            logger.warning("Failed to migrate grouper cache: %s", e)
-            return 0
-
-    def _migrate_clap(self, path: str) -> int:
-        try:
-            with open(path, "rb") as f:
-                cache = pickle.load(f)
-            if not isinstance(cache, dict):
-                return 0
-            count = 0
-            for filepath, embedding in cache.items():
-                filename = Path(filepath).name
-                clap_key = f"{filename}|clap"
-                self._entries[clap_key] = CacheEntry(version="1", mtime=0.0, data=embedding)
-                count += 1
-            logger.info("Migrated %d entries from CLAP cache", count)
-            return count
-        except Exception as e:
-            logger.warning("Failed to migrate CLAP cache: %s", e)
-            return 0
-
-    def _migrate_registry(self, path: str) -> int:
-        try:
-            with open(path, "rb") as f:
-                raw = pickle.load(f)
-            if not isinstance(raw, dict):
-                return 0
-            entries = raw.get("entries", raw)
-            count = 0
-            for key, data in entries.items():
-                if key.startswith("_"):
-                    continue
-                self._entries[key] = CacheEntry(version="1", mtime=0.0, data=data)
-                count += 1
-            logger.info("Migrated %d entries from registry cache", count)
-            return count
-        except Exception as e:
-            logger.warning("Failed to migrate registry cache: %s", e)
-            return 0
 
 
 # ── Utility: quick duration ──────────────────────────────────────────────────

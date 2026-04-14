@@ -132,30 +132,6 @@ def test_ndarray_storage(cache):
     np.testing.assert_array_almost_equal(result, embedding)
 
 
-def test_migrate_tagger_cache(tmp_path):
-    """Should auto-import from legacy tagger_cache.pkl."""
-    import pickle
-    from dj_tagger.cache import TaggerCacheEntry
-
-    legacy_path = tmp_path / "tagger_cache.pkl"
-    legacy_data = {
-        "track.aiff|180.5": TaggerCacheEntry(
-            mtime=1000.0, version="5",
-            result={"energy": 3, "camelot": "9A", "tag": "9A_E3_HYPN_64H_NV_126"},
-        ),
-    }
-    with open(legacy_path, "wb") as f:
-        pickle.dump(legacy_data, f)
-
-    ucache_path = str(tmp_path / "universal_cache.pkl")
-    cache = UniversalCache(ucache_path)
-
-    # Should have migrated — findable via name-only fallback
-    result = cache.get_track("track.aiff", 180.5, "tagger")
-    assert result is not None
-    assert result["energy"] == 3
-
-
 def test_empty_cache(tmp_path):
     path = str(tmp_path / "empty_cache.pkl")
     cache = UniversalCache(path)
