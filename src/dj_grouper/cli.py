@@ -789,19 +789,38 @@ def _cmd_run(args) -> int:
     track_order = [t.path for t in tracks]
     clap_embeddings = None
 
-    if not args.no_clap and is_clap_available():
-        print(f"\n  Extracting CLAP audio embeddings ({total_tracks} tracks)...")
-        t_clap = _time.perf_counter()
-        try:
-            raw_clap = extract_clap_incremental(
-                track_order, cpaths["clap"], force=args.force_clap,
-            )
+    if not args.no_clap:
+        # Check if all CLAP embeddings are already cached before importing torch/laion_clap
+        from dj_tagger.universal_cache import get_cache as _get_ucache, quick_duration as _qd
+        _uc = _get_ucache(str(Path(cpaths["features"]).parent / "raw_cache.pkl"))
+        all_clap_cached = all(
+            _uc.get_track(Path(p).name, _qd(p), "clap") is not None
+            for p in track_order
+        )
+
+        if all_clap_cached:
+            # Load cached embeddings without importing CLAP/torch
+            print(f"\n  CLAP embeddings: all {total_tracks} cached")
+            import numpy as _np
+            raw_clap = _np.zeros((len(track_order), 512), dtype=_np.float32)
+            for i, p in enumerate(track_order):
+                emb = _uc.get_track(Path(p).name, _qd(p), "clap")
+                if emb is not None:
+                    raw_clap[i] = emb
             clap_embeddings, _ = fit_pca(raw_clap, config.clap_pca_dims)
-            print(f"  CLAP done ({_fmt_elapsed(_time.perf_counter() - t_clap)})")
-        except Exception as e:
-            print(f"  CLAP failed: {e} -- continuing without CLAP")
-    elif not args.no_clap:
-        print("\n  CLAP not installed -- skipping audio embeddings")
+        elif is_clap_available():
+            print(f"\n  Extracting CLAP audio embeddings ({total_tracks} tracks)...")
+            t_clap = _time.perf_counter()
+            try:
+                raw_clap = extract_clap_incremental(
+                    track_order, cpaths["clap"], force=args.force_clap,
+                )
+                clap_embeddings, _ = fit_pca(raw_clap, config.clap_pca_dims)
+                print(f"  CLAP done ({_fmt_elapsed(_time.perf_counter() - t_clap)})")
+            except Exception as e:
+                print(f"  CLAP failed: {e} -- continuing without CLAP")
+        else:
+            print("\n  CLAP not installed -- skipping audio embeddings")
 
     # ── Step 1c: Registry enrichment ──
     registry_enrichments = None
