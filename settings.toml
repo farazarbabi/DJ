@@ -3,134 +3,252 @@
 # Change any value here → derived cache auto-invalidates → recomputes on next run.
 # Raw cache (DSP, CLAP, API data) is NEVER affected by these changes.
 
-# ─── Energy Classification (E1-E5) ──────────────────────────────────────────
-[energy]
-# Features used for energy composite score: [min, range, weight]
-# composite = sum(weight * clamp01((raw - min) / range))
-beat_strength = [1.5, 2.5, 0.35]
-onset_density = [1.0, 2.0, 0.30]
-centroid_mean = [1000, 2000, 0.20]
-rms_mean      = [0.15, 0.20, 0.15]
 
-# Composite → energy level thresholds: E1 < t0, E2 < t1, E3 < t2, E4 < t3, E5 >= t3
+# ─── Energy Classification (E1-E5) ──────────────────────────────────────────
+# Tracks are scored on a composite of 4 DSP features, then mapped to E1-E5.
+# Formula per feature: weight * clamp01((raw_value - min) / range)
+# The weighted sum is compared against thresholds to assign a level.
+[energy]
+
+# Kick/percussion prominence. Higher = more percussive energy.
+# [min, range, weight] — raise min to require stronger kicks for same score.
+beat_strength = [1.5, 2.5, 0.35]
+
+# Rhythmic density (transients per second). Higher = busier groove.
+# Raise weight to make groove density matter more in energy classification.
+onset_density = [1.0, 2.0, 0.30]
+
+# Spectral brightness (Hz). Higher centroid = brighter/more aggressive.
+# Narrow the range to make brightness differences more impactful.
+centroid_mean = [1000, 2000, 0.20]
+
+# Overall loudness (RMS amplitude). Higher = louder.
+# Lowest weight because mastered electronic music has compressed dynamic range.
+rms_mean = [0.15, 0.20, 0.15]
+
+# Boundaries between energy levels. Composite score falls into:
+# E1 < 0.25, E2 < 0.42, E3 < 0.58, E4 < 0.75, E5 >= 0.75
+# Lower thresholds = more tracks classified as higher energy.
 thresholds = [0.25, 0.42, 0.58, 0.75]
 
+
 # ─── Vibe Classification (8 categories) ─────────────────────────────────────
-# Each vibe is scored from DSP features using: weight * clamp01((raw - offset) / scale)
-# Format: [[weight, offset, scale], ...] per input feature
+# Each vibe is scored from DSP features. The highest-scoring vibe wins.
+# Parameters are [weight, offset, scale] unless noted otherwise.
+# Score = weight * clamp01((raw - offset) / scale)  for positive correlation
+# Score = weight * clamp01((offset - raw) / scale)  for inverse correlation
 [vibe]
-# MEL: baseline for electronic music (high chroma_var = melodic evidence)
-mel_base = 0.38
-mel_chroma_scale = 0.065        # chroma_var / this
-mel_chroma_weight = 0.25
-mel_lowflat_center = 0.025      # (center - flatness) / scale
-mel_lowflat_scale = 0.015
-mel_lowflat_weight = 0.12
 
-# DRK: aggressive rhythmic character + noisiness + bass
-drk_onset_var = [0.25, 1.5, 2.0]     # [weight, offset, scale]
-drk_flatness  = [0.30, 0.010, 0.030]
-drk_low_ratio = [0.25, 45, 25]
-drk_flux      = [0.20, 2.0, 2.5]
+# MEL (Melodic): baseline vibe for electronic music.
+# High chroma variance = strong melodic/harmonic content.
+# Most electronic tracks score well here; other vibes need strong evidence to override.
+mel_base = 0.38                 # base score — all tracks start here
+mel_chroma_scale = 0.065        # chroma_var / this. Lower = more tracks qualify as melodic.
+mel_chroma_weight = 0.25        # how much melodic evidence contributes
+mel_lowflat_center = 0.025      # flatness below this = clean (not noisy) production
+mel_lowflat_scale = 0.015       # sensitivity to flatness difference
+mel_lowflat_weight = 0.12       # how much clean production contributes
 
-# TRIB: very high percussion ratio, clean
-trib_perc_ratio = [0.70, 0.40, 0.15]
-trib_clean      = [0.30, 0.03, 0.02]  # (center - flatness) / scale
+# DRK (Dark): aggressive rhythmic character + spectral noise + bass-heavy.
+# Typical: dark techno, industrial. High onset variance + noisy + bassy.
+drk_onset_var = [0.25, 1.5, 2.0]     # irregular rhythmic pattern. Raise offset to require more irregularity.
+drk_flatness  = [0.30, 0.010, 0.030] # spectral noisiness. Higher flatness = noisier/rawer.
+drk_low_ratio = [0.25, 45, 25]       # bass presence. Higher low_ratio = more sub-bass.
+drk_flux      = [0.20, 2.0, 2.5]     # spectral change rate. Higher = more aggressive timbral movement.
 
-# RAW: non-electronic (sparse, low bass)
-raw_nobass  = [0.45, 42, 12]    # (center - low_ratio) / scale
-raw_sparse  = [0.30, 1.5, 0.8]  # (center - onset_density) / scale
-raw_lowvar  = [0.25, 1.5, 1.0]  # (center - onset_var) / scale
+# TRIB (Tribal): very high percussion-to-harmonic ratio with clean spectrum.
+# Typical: tribal house, afro-percussion-driven tracks.
+trib_perc_ratio = [0.70, 0.40, 0.15] # percussion dominance. Raise offset to require stronger percussion.
+trib_clean      = [0.30, 0.03, 0.02] # (inverse) low flatness = clean/tonal percussion, not noise.
 
-# HYPN: high stability, low onset variance
-hypn_stability_weight = 0.50
-hypn_onset_var = [0.50, 2.0, 1.5]  # (center - onset_var) / scale
+# RAW: non-electronic character. Sparse, low bass, low rhythmic variance.
+# Typical: organic/live recordings, acoustic elements, lo-fi.
+raw_nobass  = [0.45, 42, 12]   # (inverse) low bass = not heavy electronic production.
+raw_sparse  = [0.30, 1.5, 0.8] # (inverse) low onset density = sparse arrangement.
+raw_lowvar  = [0.25, 1.5, 1.0] # (inverse) low rhythmic variation = steady/minimal.
 
-# DEEP: low centroid + quiet + bass-heavy
-deep_centroid = [0.35, 2000, 1000]  # (center - centroid_mean) / scale
-deep_rms      = [0.35, 0.22, 0.10]  # (center - rms) / scale
-deep_low      = [0.30, 50, 20]      # (low_ratio - offset) / scale
+# HYPN (Hypnotic): high spectral stability + low onset variance.
+# Typical: hypnotic techno, minimal loops, steady-state grooves.
+hypn_stability_weight = 0.50          # how much spectral stability contributes
+hypn_onset_var = [0.50, 2.0, 1.5]    # (inverse) low onset variance = repetitive/looping.
 
-# ACID: extreme spectral movement (filter sweeps)
-acid_centroid_var = [1.0, 0.75, 0.40]
+# DEEP: low spectral centroid + quiet + bass-heavy.
+# Typical: deep house, dub, low-end focused tracks.
+deep_centroid = [0.35, 2000, 1000]    # (inverse) low brightness = dark/warm tone.
+deep_rms      = [0.35, 0.22, 0.10]   # (inverse) quieter = more restrained/deep.
+deep_low      = [0.30, 50, 20]       # bass presence. High low_ratio = heavy sub.
 
-# ATM: sparse + quiet
-atm_sparse = [0.50, 1.5, 1.0]  # (center - onset_density) / scale
-atm_quiet  = [0.50, 0.20, 0.08]  # (center - rms) / scale
+# ACID: extreme spectral centroid variation (filter sweeps, resonant patterns).
+# Typical: acid techno/house with 303-style filter movements. Very rare label.
+acid_centroid_var = [1.0, 0.75, 0.40] # centroid coefficient of variation. Only extreme movement scores.
+
+# ATM (Atmospheric): sparse + quiet. Ambient textures, pad-heavy, few transients.
+# Typical: ambient techno, downtempo, breakdown-heavy tracks.
+atm_sparse = [0.50, 1.5, 1.0]  # (inverse) low onset density = few rhythmic events.
+atm_quiet  = [0.50, 0.20, 0.08] # (inverse) low loudness = quiet/ambient character.
+
 
 # ─── Vocal Detection ────────────────────────────────────────────────────────
+# Detects vocal presence (V) or absence (NV) based on spectral energy in the
+# vocal frequency band, combined with temporal consistency of vocal frames.
 [vocal]
-frame_threshold = 0.20       # vocal_score > this → V, else NV
-freq_low = 300.0             # Hz, lower bound of vocal band
-freq_high = 3400.0           # Hz, upper bound of vocal band
-energy_ratio = 0.12          # min vocal-band energy ratio per frame
-flatness_max = 0.5           # max spectral flatness in vocal band
-score_base_weight = 0.6      # vocal_score = ratio * (base + temporal * bonus)
+
+# Decision boundary: vocal_score above this = V, below = NV.
+# Lower = more tracks classified as vocal. Higher = stricter detection.
+frame_threshold = 0.20
+
+# Frequency band for vocal detection (Hz). 300-3400 covers fundamental + formants.
+# Widen to catch breathy vocals; narrow to reduce false positives from synths.
+freq_low = 300.0
+freq_high = 3400.0
+
+# Per-frame thresholds for vocal-like frames.
+energy_ratio = 0.12    # min fraction of total energy in vocal band per frame
+flatness_max = 0.5     # max spectral flatness (above = noise, not vocals)
+
+# How vocal_score is computed from vocal_fraction and temporal consistency.
+# vocal_score = vocal_fraction * (base_weight + temporal_weight * temporal_bonus)
+# Temporal bonus rewards sustained vocal runs vs. scattered transients.
+score_base_weight = 0.6
 score_temporal_weight = 0.4
-confidence_scale = 0.15      # distance_from_threshold / this
+
+# Confidence = distance_from_threshold / this. Higher scale = lower confidence.
+confidence_scale = 0.15
+
 
 # ─── Structure / Flow Type ──────────────────────────────────────────────────
+# Detects intro length (snapped to standard values) and energy flow pattern.
+# Flow types: L(inear), H(ypnotic), D(rop), B(uilder), G(roove).
 [structure]
-standard_intro_bars = [16, 32, 64]
-intro_energy_ratio = 0.80    # fraction of median bar energy
-intro_sustain_bars = 8       # consecutive bars above threshold
-n_segments = 8               # segments for flow analysis
-plateau_tolerance = 0.08     # energy diff for plateau detection
 
-# Flow type thresholds (variance, jumps, trend)
+# Intro length is snapped to the nearest of these values (in bars).
+standard_intro_bars = [16, 32, 64]
+
+# Intro detection: energy must sustain above this fraction of median bar energy
+# for intro_sustain_bars consecutive bars. Lower ratio = earlier intro end detected.
+intro_energy_ratio = 0.80
+intro_sustain_bars = 8
+
+# Track is divided into this many segments for flow type analysis.
+# More segments = finer energy contour resolution.
+n_segments = 8
+
+# Adjacent segments within this energy difference are considered a plateau.
+# Lower = stricter plateau definition.
+plateau_tolerance = 0.08
+
+# Flow type classification rules (applied in order, first match wins):
+# L (Linear): energy variance below this → flat/constant energy
 flow_variance_linear = 0.005
+
+# H (Hypnotic): low variance + small jumps → repetitive/looping energy
 flow_variance_hypnotic = 0.02
 flow_jump_hypnotic = 0.15
+
+# D (Drop): largest energy jump exceeds this → big drop/build moment
 flow_jump_drop = 0.40
+
+# B (Builder): upward trend + multiple plateaus → escalating energy
 flow_trend_builder = 0.05
-flow_trend_groove = 0.03
 flow_plateau_min = 2
 
+# G (Groove): upward trend (but no plateaus) → gradual energy rise
+flow_trend_groove = 0.03
+
+
 # ─── Key Detection ──────────────────────────────────────────────────────────
+# Ensemble voting across 4 chroma profiles with segment-based analysis.
 [key]
+
+# Confidence boost for minor keys. Electronic music skews minor.
+# Higher = stronger preference for minor when scores are close.
 minor_bias = 0.05
+
+# Gap between best and second-best key correlation, used for confidence.
+# Lower divisor = higher confidence for the same gap.
 gap_divisor = 0.15
+
+# When major and minor of the same root score similarly, prefer minor
+# if the minor score is at least this fraction of the major score.
 same_root_minor_pref = 0.8
 
+
 # ─── Grouper ────────────────────────────────────────────────────────────────
+# Controls how tracks are grouped together for DJ sets.
 [grouper]
-clustering_method = "constrained"  # "constrained" | "agglomerative"
+
+# Clustering algorithm: "constrained" (COP-KMedoids with key/BPM constraints)
+# or "agglomerative" (legacy hierarchical with post-hoc splitting).
+clustering_method = "constrained"
+
+# Group size bounds. Tracks that don't fit are merged into nearest compatible group
+# (if below min) or the group is split (if above max).
 min_group_size = 2
 max_group_size = 20
-target_group_size = [4, 12]
+target_group_size = [4, 12]   # [min_target, max_target] — k is chosen to hit this median
+
+# Max BPM spread within a group. 0.07 = 7%.
+# Tracks with BPM difference > this % of average are cannot-linked.
+# Lower = stricter BPM matching (smaller groups). Higher = looser.
 bpm_group_max_spread_pct = 0.07
+
+# Max energy level spread within a group. E1 and E4 can't be in the same group (spread=3).
 energy_group_max_spread = 3
+
+# Vocal tracks with confidence above this are separated from non-vocal during clustering.
 vocal_confidence_threshold = 0.5
+
+# CLAP embedding PCA dimensions. Lower = faster, less detail. Higher = more nuanced.
 clap_pca_dims = 32
+
+# PCA target explained variance for the unified feature vector (80 dims → ~30 dims).
 pca_target_variance = 0.90
 
-# Agglomerative (legacy) settings
+# Agglomerative linkage method (only used with --algorithm agglomerative).
 linkage = "average"
 
-# Recommendation settings
+# How many similar tracks to recommend per track.
 n_recommendations = 10
-bpm_hard_cutoff_pct = 0.08
-bpm_soft_penalty_pct = 0.04
-bpm_penalty_weight = 0.15
 
-# Feedback
+# BPM penalty in recommendations: hard cutoff rejects, soft penalty degrades score.
+bpm_hard_cutoff_pct = 0.08   # > 8% BPM difference → score = -inf
+bpm_soft_penalty_pct = 0.04  # penalty starts at 4% difference
+bpm_penalty_weight = 0.15    # max penalty contribution to score
+
+# Feedback multipliers: how much user feedback affects the distance matrix.
+# good_pair: distance *= (1 - factor), bad_pair: distance *= (1 + factor).
 good_pair_factor = 0.3
 bad_pair_factor = 0.5
 
+
 # ─── Registry ───────────────────────────────────────────────────────────────
+# Controls canonical key/BPM resolution from multiple sources.
 [registry]
+
+# Minimum confidence for a resolved key to be accepted.
+# Below this → track is flagged for manual review.
 confidence_threshold = 0.70
+
+# Minimum margin between top two candidates for auto-resolution.
+# Below this → ambiguous, flagged for review.
 margin_threshold = 0.20
+
+# Confidence boost when multiple sources agree on the same key.
 agreement_boost = 0.15
+
+# Additional boost when sources of different types agree (e.g., analysis + external).
 cross_type_boost = 0.10
 
+# Relative trust weight per source. Higher = more influence on canonical key.
+# manual > analysis > external metadata.
 [registry.source_weights]
-manual = 1.00
-analysis_essentia = 0.85
-analysis_librosa = 0.80
-rekordbox = 0.75
-tag = 0.55
-songstats = 0.40
+manual = 1.00              # user-provided key (highest trust)
+analysis_essentia = 0.85   # essentia key analysis
+analysis_librosa = 0.80    # librosa key analysis
+rekordbox = 0.75           # Rekordbox DJ software
+tag = 0.55                 # embedded file tag
+songstats = 0.40           # Songstats API (lowest trust — derived from Spotify model)
+
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 [paths]
