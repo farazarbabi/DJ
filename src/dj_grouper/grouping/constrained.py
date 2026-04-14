@@ -92,10 +92,11 @@ def _run_kmedoids(
     for iteration in range(max_iterations):
         new_labels = _assign_step(dist, medoids, constraints)
 
-        # Update medoids
-        new_medoids = _update_medoids(dist, new_labels, k)
+        # Update medoids — cluster count may have grown from constraint-driven splits
+        actual_k = int(np.max(new_labels)) + 1
+        new_medoids = _update_medoids(dist, new_labels, actual_k)
 
-        if np.array_equal(new_labels, labels) and np.array_equal(new_medoids, medoids):
+        if np.array_equal(new_labels, labels):
             break
 
         labels = new_labels
