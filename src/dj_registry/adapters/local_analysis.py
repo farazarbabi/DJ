@@ -1,7 +1,7 @@
 """Local audio analysis adapter — wraps dj_tagger key analyzers.
 
-Shares the tagger cache (outputs/tagger_cache.pkl) so files analyzed by
-dj-tagger are never re-analyzed by the registry and vice versa.
+Uses the universal cache (cache/universal_cache.pkl) so files analyzed by
+any module (dj-tagger, dj-grouper, dj-registry) are never re-analyzed.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
 
+# Legacy path — load_cache/save_cache now delegate to universal cache
 TAGGER_CACHE_PATH = os.path.join("cache", "tagger_cache.pkl")
 
 
@@ -99,9 +100,9 @@ def run_analysis(
 ) -> int:
     """Run local key analysis on tracks.
 
-    Shares the tagger cache (outputs/tagger_cache.pkl) with dj-tagger.
-    Files already analyzed by dj-tagger are read from cache instantly.
-    New analysis results are written back so dj-tagger can reuse them too.
+    Uses the universal cache (cache/universal_cache.pkl).
+    Files already analyzed by any module are read from cache instantly.
+    New analysis results are written back so all modules can reuse them.
 
     Returns number of tracks processed.
     """

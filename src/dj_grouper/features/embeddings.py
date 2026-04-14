@@ -39,32 +39,7 @@ def _get_clap_model():
     return _clap_model
 
 
-# ─── Per-file CLAP cache ────────────────────────────────────────────────────
-
-ClapCache = dict[str, NDArray]  # path -> 512-dim embedding
-
-
-def load_clap_cache(path: str) -> ClapCache:
-    p = Path(path)
-    if not p.exists():
-        return {}
-    try:
-        with open(p, "rb") as f:
-            cache = pickle.load(f)
-        if isinstance(cache, dict):
-            logger.info("Loaded CLAP cache from %s (%d entries)", path, len(cache))
-            return cache
-        return {}
-    except Exception:
-        logger.warning("Could not load CLAP cache at %s", path)
-        return {}
-
-
-def save_clap_cache(cache: ClapCache, path: str) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(cache, f)
-    logger.info("CLAP cache saved to %s (%d entries)", path, len(cache))
+# ─── CLAP cache (via universal cache) ───────────────────────────────────────
 
 
 def extract_clap_incremental(
@@ -72,14 +47,47 @@ def extract_clap_incremental(
     cache_path: str,
     force: bool = False,
 ) -> NDArray[np.floating]:
-    """Extract CLAP embeddings incrementally with per-file caching.
+    """Extract CLAP embeddings incrementally using the universal cache.
 
-    Only extracts embeddings for files not already in cache.
-    Saves cache after every batch of CLAP_BATCH_SIZE tracks.
+    Only extracts embeddings for files not already cached.
+    Saves to universal cache after every batch.
 
     Returns array of shape (n_files, 512) aligned with file_paths order.
     """
-    cache = {} if force else load_clap_cache(cache_path)
+    from dj_tagger.universal_cache import get_cache, quick_duration
+    ucache_path = str(Path(cache_path).parent / "universal_cache.pkl")
+    ucache = get_cache(ucache_path)
+
+    # Build in-memory cache from universal cache + legacy migration
+    cache: dict[str, NDArray] = {}
+
+    if not force:
+        # Load from universal cache
+        for fpath in file_paths:
+            filename = Path(fpath).name
+            dur = quick_duration(fpath)
+            embedding = ucache.get_track(filename, dur, "clap")
+            if embedding is not None:
+                cache[fpath] = embedding
+
+        # Migrate from legacy clap_cache.pkl if it exists
+        legacy_path = Path(cache_path)
+        if legacy_path.exists():
+            try:
+                with open(legacy_path, "rb") as f:
+                    legacy = pickle.load(f)
+                if isinstance(legacy, dict):
+                    migrated = 0
+                    for fpath, emb in legacy.items():
+                        if fpath not in cache:
+                            cache[fpath] = emb
+                            ucache.put_track(Path(fpath).name, quick_duration(fpath), "clap", emb)
+                            migrated += 1
+                    if migrated:
+                        logger.info("Migrated %d entries from legacy CLAP cache", migrated)
+                        ucache.save()
+            except Exception:
+                pass
 
     # Find which files need extraction
     to_extract: list[tuple[int, str]] = []
@@ -107,22 +115,14 @@ def extract_clap_incremental(
 
                 for j, (idx, path) in enumerate(batch):
                     cache[path] = embeddings[j]
+                    ucache.put_track(Path(path).name, quick_duration(path), "clap", embeddings[j])
 
-                # Save after each batch so crashes don't lose all progress
-                save_clap_cache(cache, cache_path)
+                ucache.save()
             except Exception as e:
                 logger.warning("CLAP batch failed: %s", e)
                 print(f"    CLAP batch {batch_start + 1}-{batch_end} failed: {e}")
     else:
         print(f"    All {len(file_paths)} CLAP embeddings cached")
-
-    # Remove deleted files from cache
-    current_set = set(file_paths)
-    removed = [p for p in cache if p not in current_set]
-    for p in removed:
-        del cache[p]
-    if removed:
-        save_clap_cache(cache, cache_path)
 
     # Build output array aligned with file_paths
     result = np.zeros((len(file_paths), 512), dtype=np.float32)

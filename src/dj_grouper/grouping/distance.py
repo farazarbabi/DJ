@@ -146,11 +146,46 @@ def compute_distance_matrix(
             matrix[i, j] = d
             matrix[j, i] = d
 
-    # Contrast stretch: map observed range to [0, 1]
+    return _contrast_stretch(matrix)
+
+
+def unified_distance_matrix(
+    reduced_vectors: NDArray,
+) -> NDArray[np.floating]:
+    """Compute distance matrix from PCA-reduced L2-normalized unified vectors.
+
+    Euclidean distance on L2-normalized vectors, then contrast stretched.
+    This replaces blended_distance() for the constrained clustering path.
+
+    Args:
+        reduced_vectors: (n_tracks, n_components) from fit_unified_pca()
+
+    Returns:
+        (n_tracks, n_tracks) float32 distance matrix in [0, 1]
+    """
+    from scipy.spatial.distance import pdist, squareform
+
+    n = reduced_vectors.shape[0]
+    if n <= 1:
+        return np.zeros((n, n), dtype=np.float32)
+
+    # Euclidean distance on L2-normalized vectors: max possible = 2.0
+    condensed = pdist(reduced_vectors, metric="euclidean")
+    matrix = squareform(condensed).astype(np.float32)
+
+    # Normalize by max possible distance for L2-normalized vectors
+    matrix /= 2.0
+
+    return _contrast_stretch(matrix)
+
+
+def _contrast_stretch(matrix: NDArray) -> NDArray:
+    """Contrast stretch a distance matrix to [0, 1] using 2nd-98th percentiles."""
+    n = matrix.shape[0]
     upper = matrix[np.triu_indices(n, k=1)]
     if len(upper) > 0 and np.max(upper) > np.min(upper):
-        d_min = float(np.percentile(upper, 2))   # 2nd percentile (robust floor)
-        d_max = float(np.percentile(upper, 98))   # 98th percentile (robust ceiling)
+        d_min = float(np.percentile(upper, 2))
+        d_max = float(np.percentile(upper, 98))
         if d_max > d_min:
             matrix = np.clip((matrix - d_min) / (d_max - d_min), 0.0, 1.0)
             np.fill_diagonal(matrix, 0.0)

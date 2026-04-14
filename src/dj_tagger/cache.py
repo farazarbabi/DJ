@@ -1,13 +1,13 @@
 """Analysis result cache for dj-tagger.
 
-Cache key: filename + rounded duration (stable across tag edits, avoids
-collisions when the same filename exists in different folders).
+Delegates to the universal cache (cache/universal_cache.pkl).
+All analysis results are stored once and shared across all modules
+(dj-tagger, dj-grouper, dj-registry). Once analyzed, never re-analyzed.
 """
 
 from __future__ import annotations
 
 import logging
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,29 +40,34 @@ def cache_key(filepath: str, duration: float | None = None) -> str:
 
 
 def load_cache(path: str) -> TaggerCache:
-    p = Path(path)
-    if not p.exists():
-        return {}
-    try:
-        with open(p, "rb") as f:
-            data = pickle.load(f)
-        if isinstance(data, dict):
-            first_val = next(iter(data.values()), None) if data else None
-            if first_val is None or isinstance(first_val, TaggerCacheEntry):
-                logger.info("Loaded tagger cache from %s (%d entries)", path, len(data))
-                return data
-        logger.warning("Cache at %s has unrecognized format, starting fresh", path)
-        return {}
-    except Exception:
-        logger.warning("Could not load cache at %s, starting fresh", path)
-        return {}
+    """Load tagger cache. Now reads from the universal cache."""
+    from .universal_cache import get_cache
+
+    ucache = get_cache(_universal_path(path))
+    # Build a TaggerCache dict view from universal cache entries
+    result: TaggerCache = {}
+    for key, entry in ucache._entries.items():
+        if not key.endswith("|tagger"):
+            continue
+        base_key = key[: -len("|tagger")]
+        result[base_key] = TaggerCacheEntry(
+            mtime=entry.mtime,
+            version=entry.version,
+            result=entry.data,
+        )
+    logger.info("Loaded tagger layer from universal cache (%d entries)", len(result))
+    return result
 
 
 def save_cache(cache: TaggerCache, path: str) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(cache, f)
-    logger.info("Tagger cache saved to %s (%d entries)", path, len(cache))
+    """Save tagger cache. Now writes to the universal cache."""
+    from .universal_cache import get_cache
+
+    ucache = get_cache(_universal_path(path))
+    for base_key, entry in cache.items():
+        ukey = f"{base_key}|tagger"
+        ucache.put(ukey, entry.result, version=entry.version, mtime=entry.mtime)
+    ucache.save()
 
 
 def get_cached(
@@ -98,10 +103,18 @@ def put_cached(
     result: dict,
     duration: float | None = None,
 ) -> None:
-    """Store a result in cache. Writes both key formats during migration."""
+    """Store a result in cache.
+
+    Writes duration-keyed entry when duration is available.
+    Falls back to name-only key only when duration is unknown.
+    """
     entry = TaggerCacheEntry(mtime=mtime, version=ANALYZER_VERSION, result=result)
-    # Always write duration-keyed entry if duration available
-    if duration is not None and duration > 0:
-        cache[cache_key(filepath, duration)] = entry
-    # Also write name-only key for backward compat with dj-tagger
-    cache[cache_key(filepath)] = entry
+    cache[cache_key(filepath, duration)] = entry
+
+
+def _universal_path(tagger_path: str) -> str:
+    """Derive universal cache path from tagger cache path."""
+    from .universal_cache import DEFAULT_CACHE_PATH
+    # If tagger_path is in a cache dir, use that dir for universal cache
+    parent = str(Path(tagger_path).parent)
+    return str(Path(parent) / "universal_cache.pkl")

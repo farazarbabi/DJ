@@ -41,7 +41,13 @@ class GrouperConfig:
     vocal_confidence_threshold: float = 0.5
 
     # --- CLAP ---
-    clap_pca_dims: int = 64
+    clap_pca_dims: int = 32
+
+    # --- Constrained clustering ---
+    clustering_method: str = "constrained"  # "constrained" | "agglomerative"
+    use_registry: bool = True
+    registry_dir: str = "./outputs/registry"
+    pca_target_variance: float = 0.90
 
     # --- Stable mode ---
     new_group_distance_threshold: float = 0.8
@@ -56,8 +62,7 @@ class GrouperConfig:
     # --- Default paths ---
     input_dir: str = "./files"
     output_dir: str = "./outputs"
-    cache_file: str = "./cache/features_cache.pkl"
-    clap_cache_file: str = "./cache/clap_cache.pkl"
+    cache_dir: str = "./cache"
     feedback_file: str = "./outputs/feedback.csv"
     groups_file: str = "./outputs/groups.csv"
     recommendations_file: str = "./outputs/recommendations.csv"

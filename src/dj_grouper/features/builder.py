@@ -14,6 +14,8 @@ from numpy.typing import NDArray
 from ..config import GrouperConfig
 from ..scanner import TrackInfo, VIBE_LABELS
 from .dsp import DSP_CURATED_NAMES
+from .genre_encoding import encode_genres, GENRE_DIM
+from .registry_bridge import RegistryEnrichment
 from .role import infer_role
 
 logger = logging.getLogger(__name__)
@@ -43,30 +45,68 @@ RawCache = dict[str, RawCacheEntry]
 
 
 def load_raw_cache(path: str) -> RawCache:
-    p = Path(path)
-    if not p.exists():
-        return {}
-    try:
-        with open(p, "rb") as f:
-            data = pickle.load(f)
-        if isinstance(data, dict):
-            # Check if it's the new format (RawCacheEntry) or old format
-            first_val = next(iter(data.values()), None) if data else None
-            if first_val is not None and hasattr(first_val, "mtime"):
-                logger.info("Loaded raw cache from %s (%d entries)", path, len(data))
-                return data
-        logger.warning("Cache at %s is old format, will re-extract", path)
-        return {}
-    except Exception:
-        logger.warning("Could not load cache at %s, will re-extract", path)
-        return {}
+    """Load the grouper's in-memory raw cache.
+
+    Tries the universal cache first. Falls back to legacy features_cache.pkl
+    and migrates its contents if found.
+
+    The `path` argument locates the cache directory.
+    """
+    from dj_tagger.universal_cache import get_cache
+    ucache_path = str(Path(path).parent / "universal_cache.pkl")
+    ucache = get_cache(ucache_path)
+
+    raw_cache: RawCache = {}
+
+    # Try loading legacy features_cache.pkl for migration
+    legacy_path = Path(path)
+    if legacy_path.exists():
+        try:
+            with open(legacy_path, "rb") as f:
+                data = pickle.load(f)
+            if isinstance(data, dict):
+                first_val = next(iter(data.values()), None) if data else None
+                if first_val is not None and hasattr(first_val, "mtime"):
+                    logger.info("Migrating %d entries from legacy features cache", len(data))
+                    raw_cache = data
+                    # Migrate DSP/section_dsp to universal cache
+                    for filepath, entry in data.items():
+                        if entry.dsp:
+                            filename = Path(filepath).name
+                            ucache.put_track(filename, None, "dsp", entry.dsp, mtime=entry.mtime)
+                            if entry.section_dsp:
+                                ucache.put_track(filename, None, "section_dsp", entry.section_dsp, mtime=entry.mtime)
+                    ucache.save()
+        except Exception:
+            pass
+
+    return raw_cache
 
 
 def save_raw_cache(raw_cache: RawCache, path: str) -> None:
+    """Save raw cache entries to the universal cache.
+
+    Writes both to universal cache (for cross-module sharing) and
+    to the legacy path (for fast reload by the grouper on next run).
+    """
+    from dj_tagger.universal_cache import get_cache, quick_duration
+    ucache_path = str(Path(path).parent / "universal_cache.pkl")
+    ucache = get_cache(ucache_path)
+
+    for filepath, entry in raw_cache.items():
+        filename = Path(filepath).name
+        dur = quick_duration(filepath)
+        if entry.dsp:
+            ucache.put_track(filename, dur, "dsp", entry.dsp, mtime=entry.mtime)
+        if entry.section_dsp:
+            ucache.put_track(filename, dur, "section_dsp", entry.section_dsp, mtime=entry.mtime)
+    ucache.save()
+
+    # Also write legacy format for fast in-process reload
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(raw_cache, f)
-    logger.info("Raw cache saved to %s (%d entries)", path, len(raw_cache))
+    logger.info("Raw cache saved (%d entries)", len(raw_cache))
 
 
 # ─── Final features (derived from raw cache each run) ───────────────────────
@@ -82,6 +122,10 @@ class TrackFeatures:
     section_dsp: dict[str, dict[str, float]] = field(default_factory=dict)  # per-section
     embed_vector: NDArray[np.floating] | None = None
     role: str = "DRIVER"
+    # Unified vector for constrained clustering (PCA input)
+    unified_vector: NDArray[np.floating] | None = None
+    # Registry enrichment (when available)
+    registry: RegistryEnrichment | None = None
 
 
 @dataclass
@@ -232,6 +276,54 @@ def _calibrate_energy(
     )
 
 
+# ─── Unified vector assembly ────────────────────────────────────────────────
+
+def build_unified_vector(
+    tag_vector: NDArray,
+    dsp_vector: NDArray,
+    embed_vector: NDArray | None,
+    registry: RegistryEnrichment | None,
+    clap_pca_dims: int = 32,
+) -> NDArray[np.floating]:
+    """Assemble the 80-dim unified feature vector for PCA fusion.
+
+    Layout:
+      [0:19]   tag_vector (energy, BPM, key, structure, vibe, vocal)
+      [19:40]  dsp_vector (21 curated DSP features, percentile-ranked)
+      [40:40+clap_pca_dims]  embed_vector (CLAP PCA, zero-fill if missing)
+      [40+clap_pca_dims:40+clap_pca_dims+6]  genre embedding (6-dim)
+      [...]    danceability, valence (2 dims, 0.5 if missing)
+    """
+    parts: list[NDArray] = [tag_vector, dsp_vector]
+
+    # CLAP embedding (zero-fill if missing)
+    if embed_vector is not None:
+        # Truncate or pad to clap_pca_dims
+        if len(embed_vector) >= clap_pca_dims:
+            parts.append(embed_vector[:clap_pca_dims])
+        else:
+            padded = np.zeros(clap_pca_dims, dtype=np.float32)
+            padded[:len(embed_vector)] = embed_vector
+            parts.append(padded)
+    else:
+        parts.append(np.zeros(clap_pca_dims, dtype=np.float32))
+
+    # Genre embedding (6-dim)
+    if registry and registry.all_genres:
+        parts.append(encode_genres(registry.all_genres))
+    elif registry and registry.primary_genre:
+        parts.append(encode_genres([registry.primary_genre]))
+    else:
+        parts.append(np.full(GENRE_DIM, 0.5, dtype=np.float32))
+
+    # Songstats: danceability, valence (2-dim, 0.5 neutral if missing)
+    danceability = registry.danceability if registry and registry.danceability is not None else 0.5
+    valence = registry.valence if registry and registry.valence is not None else 0.5
+    parts.append(np.array([danceability, valence], dtype=np.float32))
+
+    return np.concatenate(parts).astype(np.float32)
+
+
 # ─── Build features from raw cache ──────────────────────────────────────────
 
 def build_features_from_raw(
@@ -239,6 +331,7 @@ def build_features_from_raw(
     track_order: list[str],
     clap_embeddings: NDArray | None = None,
     config: GrouperConfig | None = None,
+    registry: dict[str, RegistryEnrichment] | None = None,
 ) -> FeatureCache:
     """Build feature bundles from the raw cache."""
     config = config or GrouperConfig()
@@ -246,6 +339,13 @@ def build_features_from_raw(
     infos = [raw_cache[p].info for p in track_order]
     dsp_dicts = [raw_cache[p].dsp for p in track_order]
     section_dsps = [raw_cache[p].section_dsp for p in track_order]
+
+    # Apply registry key/bpm upgrades before encoding tags
+    if registry:
+        from .registry_bridge import apply_registry_upgrades
+        n_upgrades = apply_registry_upgrades(infos, registry)
+        if n_upgrades:
+            logger.info("Registry upgraded %d key/bpm values before tag encoding", n_upgrades)
 
     # Encode tags (with continuous vibe + confidence weighting)
     tag_vectors = np.array([encode_tags(info) for info in infos], dtype=np.float32)
@@ -275,6 +375,9 @@ def build_features_from_raw(
     feature_list: list[TrackFeatures] = []
     for i, path in enumerate(track_order):
         infos[i].role = roles[i]
+        embed_vec = clap_embeddings[i] if clap_embeddings is not None else None
+        reg_enr = registry.get(path) if registry else None
+
         tf = TrackFeatures(
             path=path,
             info=infos[i],
@@ -282,8 +385,13 @@ def build_features_from_raw(
             dsp_vector=dsp_normalized[i],
             raw_dsp=dsp_dicts[i],
             section_dsp=section_dsps[i],
-            embed_vector=clap_embeddings[i] if clap_embeddings is not None else None,
+            embed_vector=embed_vec,
             role=roles[i],
+            unified_vector=build_unified_vector(
+                tag_vectors[i], dsp_normalized[i], embed_vec, reg_enr,
+                clap_pca_dims=config.clap_pca_dims,
+            ),
+            registry=reg_enr,
         )
         feature_list.append(tf)
 

@@ -56,14 +56,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--dry-run", action="store_true", help="Preview without writing anything")
     p_run.add_argument("--copy", action="store_true", help="Copy files instead of hard-linking")
     p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings")
+    p_run.add_argument("--algorithm", choices=["constrained", "agglomerative"], default=_DEFAULTS.clustering_method, help="Clustering algorithm (default: constrained)")
+    p_run.add_argument("--no-registry", action="store_true", help="Skip loading registry enrichment")
     p_run.add_argument("--playlists", default=_DEFAULTS.playlists_dir, help="Playlists dir")
     p_run.add_argument("--csv", default=_DEFAULTS.groups_file)
     p_run.add_argument("--recommendations-csv", default=_DEFAULTS.recommendations_file)
-    p_run.add_argument("--cache", default=_DEFAULTS.cache_file)
-    p_run.add_argument("--clap-cache", default=_DEFAULTS.clap_cache_file)
+    p_run.add_argument("--cache-dir", default=_DEFAULTS.cache_dir, help="Cache directory")
     p_run.add_argument("--feedback", default=_DEFAULTS.feedback_file)
-    p_run.add_argument("--force-extract", action="store_true", help="Clear DSP cache + outputs, re-extract")
-    p_run.add_argument("--force-clap", action="store_true", help="Clear CLAP cache, re-extract embeddings")
+    p_run.add_argument("--force-extract", action="store_true", help="Clear cache + outputs, re-extract")
+    p_run.add_argument("--force-clap", action="store_true", help="Re-extract CLAP embeddings")
     p_run.add_argument("--rebuild", action="store_true", help="Force full re-clustering (ignore existing groups)")
     p_run.add_argument("--clean", action="store_true", help="Delete all outputs and caches, then exit")
 
@@ -72,24 +73,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_extract.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help="Library paths (default: ./files)")
     p_extract.add_argument("-r", "--recursive", action="store_true")
     p_extract.add_argument("-w", "--workers", type=int, default=1, help="Parallel workers (default: 1)")
-    p_extract.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_extract.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_extract.add_argument("--features-csv", default=None)
     p_extract.add_argument("--force", action="store_true", help="Regenerate features even if cache exists")
 
     # --- cluster ---
     p_cluster = sub.add_parser("cluster", help="Cluster tracks into groups")
-    p_cluster.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_cluster.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_cluster.add_argument("--feedback", default=_DEFAULTS.feedback_file)
     p_cluster.add_argument("--output-csv", default=_DEFAULTS.groups_file)
 
     # --- review ---
     p_review = sub.add_parser("review", help="Review proposed groupings")
-    p_review.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_review.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_review.add_argument("--feedback", default=_DEFAULTS.feedback_file)
 
     # --- apply ---
     p_apply = sub.add_parser("apply", help="Write tags and create folders")
-    p_apply.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_apply.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_apply.add_argument("--output", default=_DEFAULTS.grouped_dir)
     p_apply.add_argument("--write-tags", action="store_true")
     p_apply.add_argument("--copy", action="store_true")
@@ -98,7 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- recommend ---
     p_rec = sub.add_parser("recommend", help="Compute recommendations")
-    p_rec.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_rec.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_rec.add_argument("--csv", default=_DEFAULTS.recommendations_file)
     p_rec.add_argument("--playlists", default=_DEFAULTS.playlists_dir)
 
@@ -111,13 +112,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- evaluate ---
     p_eval = sub.add_parser("evaluate", help="Evaluate recommendations against known pairs")
-    p_eval.add_argument("--cache", default=_DEFAULTS.cache_file)
+    p_eval.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_eval.add_argument("--eval-file", required=True, help="CSV with track_a, track_b, label columns")
 
     return parser
 
 
 _SUBCOMMANDS = {"run", "extract", "cluster", "review", "apply", "recommend", "feedback", "evaluate"}
+
+
+def _cache_paths(cache_dir: str) -> dict[str, str]:
+    """Derive all cache paths from the cache directory."""
+    from pathlib import Path
+    d = Path(cache_dir)
+    return {
+        "universal": str(d / "universal_cache.pkl"),
+        "features": str(d / "features_cache.pkl"),  # legacy, for migration
+        "clap": str(d / "clap_cache.pkl"),  # legacy, for migration
+        "assignment": str(d / "features_cache_assignment.pkl"),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -246,38 +259,78 @@ def _run_extraction(
 ) -> tuple[dict, _ExtractionStats]:
     """Shared extraction logic for run and extract commands.
 
-    Args:
-        tracks: scanned track list from scan_library.
-        cache_path: path to the raw features pickle cache.
-        force: clear cache and re-extract everything.
-        workers: parallel worker count.
-        analyze_untagged: if True, run full analysis (energy/key/structure)
-            on tracks missing tags. If False, only extract DSP/vibe/vocal.
-        write_tags: if True and analysis ran, write tags to file metadata.
+    Uses the universal cache so that tracks analyzed by dj-tagger or
+    dj-registry are never re-analyzed. Only extracts DSP features when
+    the tagger analysis is already cached.
 
     Returns (raw_cache, stats).
     """
     import os
     from pathlib import Path
     from .features.builder import RawCacheEntry, load_raw_cache, save_raw_cache
+    from dj_tagger.universal_cache import get_cache as get_universal_cache, quick_duration
 
     stats = _ExtractionStats()
     raw_cache = {} if force else load_raw_cache(cache_path)
 
-    # Separate cached vs needs-extraction
+    # Get universal cache for cross-module lookup
+    ucache_path = str(Path(cache_path).parent / "universal_cache.pkl")
+    ucache = get_universal_cache(ucache_path)
+
+    # Pre-compute durations for cache keys (cheap mutagen read, no audio decoding)
+    _durations: dict[str, float | None] = {}
+    for t in tracks:
+        _durations[t.path] = quick_duration(t.path)
+
+    # Separate into: fully cached, needs DSP only, needs everything
     to_extract: list[tuple[int, object, float, bool]] = []
+    to_dsp_only: list[tuple[int, object, float]] = []
+
     for i, t in enumerate(tracks):
         mtime = os.path.getmtime(t.path)
         cached = raw_cache.get(t.path)
         if cached and cached.mtime == mtime:
             cached.info = t
             stats.n_cached += 1
+            continue
+
+        filename = Path(t.path).name
+        dur = _durations.get(t.path)
+
+        # Check universal cache for DSP features
+        dsp_data = ucache.get_track(filename, dur, "dsp")
+        section_dsp_data = ucache.get_track(filename, dur, "section_dsp")
+
+        if dsp_data and isinstance(dsp_data, dict):
+            # Check universal cache for tagger analysis (vibe, vocal, etc.)
+            tagger_data = ucache.get_track(filename, None, "tagger")
+            if tagger_data and isinstance(tagger_data, dict):
+                # Fully cached in universal cache — apply and skip
+                _apply_tagger_result(t, tagger_data, analyze_untagged)
+                # (dur already set above)
+                raw_cache[t.path] = RawCacheEntry(
+                    mtime=mtime, info=t, dsp=dsp_data,
+                    section_dsp=section_dsp_data if isinstance(section_dsp_data, dict) else {},
+                )
+                stats.n_cached += 1
+                continue
+
+        # Check if tagger already analyzed (but no DSP yet)
+        tagger_data = ucache.get_track(filename, dur, "tagger")
+        if tagger_data and isinstance(tagger_data, dict):
+            # Tagger ran, but DSP not extracted — only need DSP extraction
+            _apply_tagger_result(t, tagger_data, analyze_untagged)
+            to_dsp_only.append((i, t, mtime))
         else:
+            # Need full analysis + DSP extraction
             needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
             to_extract.append((i, t, mtime, needs_analysis))
 
+    n_from_ucache = stats.n_cached - sum(1 for _ in [])  # logged below
     if stats.n_cached:
         print(f"  {stats.n_cached} tracks loaded from cache")
+    if to_dsp_only:
+        print(f"  {len(to_dsp_only)} tracks need DSP extraction only (analysis cached)")
 
     # Tag writing imports (only when needed)
     _format_tag = None
@@ -318,9 +371,28 @@ def _run_extraction(
         raw_cache[t.path] = RawCacheEntry(
             mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
         )
+        # Store DSP in universal cache so other modules can reuse
+        filename = Path(t.path).name
+        dur = _durations.get(t.path)
+        ucache.put_track(filename, dur, "dsp", result["dsp"], mtime=mtime)
+        ucache.put_track(filename, dur, "section_dsp", result["section_dsp"], mtime=mtime)
         stats.n_extracted += 1
 
-    # Run extraction
+    # ── Phase 1: DSP-only extraction (tagger analysis already cached) ──
+    if to_dsp_only:
+        for j, (i, t, mtime) in enumerate(to_dsp_only):
+            done = j + 1
+            print(f"  [{done:>{len(str(len(to_dsp_only)))}}/{len(to_dsp_only)}] {Path(t.path).name}", end="", flush=True)
+            try:
+                result = _extract_worker(t.path, needs_analysis=False)
+                _apply_result(t, mtime, False, result)
+                print("  [DSP only]")
+            except Exception as e:
+                raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
+                stats.n_failed += 1
+                print(f"  FAILED: {e}")
+
+    # ── Phase 2: Full analysis + extraction ──
     n_todo = len(to_extract)
     actual_workers = workers if workers > 0 else 1
 
@@ -374,7 +446,42 @@ def _run_extraction(
     stats.n_removed = len(removed)
 
     save_raw_cache(raw_cache, cache_path)
+    ucache.save()
     return raw_cache, stats
+
+
+def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
+    """Apply cached tagger analysis result to a TrackInfo object."""
+    if analyze_untagged and (t.energy is None or t.key is None):
+        if "energy" in tagger_data:
+            t.energy = tagger_data.get("energy")
+        if "camelot" in tagger_data:
+            t.key = tagger_data.get("camelot")
+        if "bpm" in tagger_data and t.bpm is None:
+            bpm = tagger_data.get("bpm")
+            if bpm and bpm > 0:
+                t.bpm = round(bpm) if isinstance(bpm, float) else bpm
+        if "structure" in tagger_data:
+            t.structure = tagger_data.get("structure")
+            if t.structure and len(t.structure) >= 2:
+                try:
+                    t.intro_bars = int(t.structure[:-1])
+                    t.flow_type = t.structure[-1]
+                except (ValueError, IndexError):
+                    pass
+    if "vibe" in tagger_data:
+        t.vibe = tagger_data.get("vibe")
+    if "vibe_scores" in tagger_data:
+        t.vibe_scores = tagger_data.get("vibe_scores", {})
+    if "vocal" in tagger_data:
+        vocal = tagger_data.get("vocal")
+        if vocal in ("V", "NV"):
+            t.vocal = vocal
+    # Confidences from tagger
+    for conf_key in ("energy", "key", "structure", "vibe", "vocal"):
+        conf_val = tagger_data.get(f"{conf_key}_confidence") or tagger_data.get(f"key_confidence" if conf_key == "key" else "")
+        if conf_val is not None:
+            t.confidences[conf_key] = conf_val
 
 
 # ─── Soft vocal partitioning helper ──────────────────────────────────────────
@@ -476,7 +583,7 @@ def _cmd_run(args) -> int:
     from .features.embeddings import (
         is_clap_available, extract_clap_incremental, fit_pca,
     )
-    from .grouping.distance import compute_distance_matrix
+    from .grouping.distance import compute_distance_matrix, unified_distance_matrix
     from .grouping.assignment import (
         assign_group_ids, save_assignment, load_assignment, assign_new_tracks,
     )
@@ -505,8 +612,7 @@ def _cmd_run(args) -> int:
 
     if is_external:
         ext_out = str(input_path / "outputs")
-        args.cache = str(input_path / "cache" / "features_cache.pkl")
-        args.clap_cache = str(input_path / "cache" / "clap_cache.pkl")
+        args.cache_dir = str(input_path / "cache")
         args.csv = str(input_path / "outputs" / "groups.csv")
         args.recommendations_csv = str(input_path / "outputs" / "recommendations.csv")
         args.output = str(input_path / "outputs" / "Grouped")
@@ -517,8 +623,10 @@ def _cmd_run(args) -> int:
     else:
         out_dir = Path(_DEFAULTS.output_dir)
 
+    cpaths = _cache_paths(args.cache_dir)
+
     # Allowed roots for destructive operations
-    _allowed = [str(out_dir), str(Path(args.cache).parent)]
+    _allowed = [str(out_dir), args.cache_dir]
 
     # ── Handle --clean ──
     if args.clean:
@@ -530,18 +638,21 @@ def _cmd_run(args) -> int:
 
     # ── Handle --force-extract: clear DSP cache + outputs (NOT clap cache) ──
     if args.force_extract:
-        for f in [args.cache, args.cache.replace(".pkl", "_assignment.pkl")]:
+        for f in [cpaths["features"], cpaths["assignment"], cpaths["universal"]]:
             _safe_unlink(f, _allowed)
         for d in [args.output, args.playlists]:
             _safe_rmtree(d, _allowed)
         for f in [args.csv, args.recommendations_csv]:
             _safe_unlink(f, _allowed)
-        print("Cleared DSP cache and outputs (CLAP cache preserved)")
+        # Reset universal cache singleton so it reloads fresh
+        from dj_tagger.universal_cache import reset_cache
+        reset_cache()
+        print("Cleared cache and outputs")
 
-    # ── Handle --force-clap: clear CLAP cache only ──
+    # ── Handle --force-clap: clear CLAP entries from universal cache ──
     if args.force_clap:
-        _safe_unlink(args.clap_cache, _allowed)
-        print("Cleared CLAP cache")
+        _safe_unlink(cpaths["clap"], _allowed)
+        print("Cleared legacy CLAP cache")
 
     import time as _time
 
@@ -559,7 +670,7 @@ def _cmd_run(args) -> int:
 
     print("  Analyzing and extracting features...")
     raw_cache, ext_stats = _run_extraction(
-        tracks, args.cache,
+        tracks, cpaths["features"],
         force=args.force_extract,
         workers=getattr(args, "workers", 1) or 1,
         analyze_untagged=True,
@@ -577,7 +688,7 @@ def _cmd_run(args) -> int:
         t_clap = _time.perf_counter()
         try:
             raw_clap = extract_clap_incremental(
-                track_order, args.clap_cache, force=args.force_clap,
+                track_order, cpaths["clap"], force=args.force_clap,
             )
             clap_embeddings, _ = fit_pca(raw_clap, config.clap_pca_dims)
             print(f"  CLAP done ({_fmt_elapsed(_time.perf_counter() - t_clap)})")
@@ -586,11 +697,23 @@ def _cmd_run(args) -> int:
     elif not args.no_clap:
         print("\n  CLAP not installed -- skipping audio embeddings")
 
-    cache = build_features_from_raw(raw_cache, track_order, clap_embeddings, config)
+    # ── Step 1c: Registry enrichment ──
+    registry_enrichments = None
+    algorithm = getattr(args, "algorithm", config.clustering_method)
+    if config.use_registry and not getattr(args, "no_registry", False):
+        from .features.registry_bridge import RegistryBridge, match_enrichments
+        bridge = RegistryBridge(config.registry_dir)
+        raw_enrichments = bridge.load()
+        if raw_enrichments:
+            registry_enrichments = match_enrichments(track_order, raw_enrichments)
+            n_matched = len(registry_enrichments)
+            print(f"  Registry: {n_matched}/{total_tracks} tracks enriched")
+
+    cache = build_features_from_raw(raw_cache, track_order, clap_embeddings, config, registry=registry_enrichments)
     feature_tracks = cache.tracks
 
     # ── Step 2: Cluster or incrementally assign ──
-    assignment_path = args.cache.replace(".pkl", "_assignment.pkl")
+    assignment_path = cpaths["assignment"]
     existing_assignment = None
 
     if not args.rebuild and not args.force_extract and Path(assignment_path).exists():
@@ -615,18 +738,42 @@ def _cmd_run(args) -> int:
     else:
         # Full re-clustering
         n_ft = len(feature_tracks)
-        print(f"\n[2/5] Grouping {n_ft} tracks by similarity...")
-        _t = _time.perf_counter()
-        distance_matrix = compute_distance_matrix(feature_tracks, config)
-        print(f"  Computing {n_ft}x{n_ft} distance matrix... ({_fmt_elapsed(_time.perf_counter() - _t)})")
-
+        print(f"\n[2/5] Grouping {n_ft} tracks by similarity (algorithm={algorithm})...")
         feedback = load_feedback(args.feedback)
-        if feedback:
-            distance_matrix = apply_feedback_to_distances(distance_matrix, feature_tracks, feedback, config)
 
-        _t = _time.perf_counter()
-        labels = _cluster_with_soft_vocal(feature_tracks, distance_matrix, config)
-        print(f"  Clustering + validation done ({_fmt_elapsed(_time.perf_counter() - _t)})")
+        if algorithm == "constrained":
+            from .features.fusion import fit_unified_pca
+            from .grouping.constraints import build_constraints
+            from .grouping.constrained import cop_kmedoids
+
+            _t = _time.perf_counter()
+            reduced_vectors, pca_params = fit_unified_pca(feature_tracks, config.pca_target_variance)
+            n_dims = reduced_vectors.shape[1]
+            print(f"  PCA fusion: {feature_tracks[0].unified_vector.shape[0]} -> {n_dims} dims ({_fmt_elapsed(_time.perf_counter() - _t)})")
+
+            _t = _time.perf_counter()
+            distance_matrix = unified_distance_matrix(reduced_vectors)
+            print(f"  Computing {n_ft}x{n_ft} distance matrix... ({_fmt_elapsed(_time.perf_counter() - _t)})")
+
+            if feedback:
+                distance_matrix = apply_feedback_to_distances(distance_matrix, feature_tracks, feedback, config)
+
+            constraints = build_constraints(feature_tracks, config, feedback)
+
+            _t = _time.perf_counter()
+            labels = cop_kmedoids(distance_matrix, constraints, config)
+            print(f"  Clustering done ({_fmt_elapsed(_time.perf_counter() - _t)})")
+        else:
+            _t = _time.perf_counter()
+            distance_matrix = compute_distance_matrix(feature_tracks, config)
+            print(f"  Computing {n_ft}x{n_ft} distance matrix... ({_fmt_elapsed(_time.perf_counter() - _t)})")
+
+            if feedback:
+                distance_matrix = apply_feedback_to_distances(distance_matrix, feature_tracks, feedback, config)
+
+            _t = _time.perf_counter()
+            labels = _cluster_with_soft_vocal(feature_tracks, distance_matrix, config)
+            print(f"  Clustering + validation done ({_fmt_elapsed(_time.perf_counter() - _t)})")
 
         _t = _time.perf_counter()
         assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
@@ -740,8 +887,9 @@ def _cmd_extract(args) -> int:
         return 0
 
     print(f"Processing {len(tracks)} tracks...")
+    cpaths = _cache_paths(args.cache_dir)
     raw_cache, stats = _run_extraction(
-        tracks, args.cache,
+        tracks, cpaths["features"],
         force=args.force,
         workers=getattr(args, "workers", 1) or 1,
         analyze_untagged=False,
@@ -769,7 +917,8 @@ def _cmd_cluster(args) -> int:
     from .config import GrouperConfig
 
     config = GrouperConfig()
-    raw_cache = load_raw_cache(args.cache)
+    cpaths = _cache_paths(args.cache_dir)
+    raw_cache = load_raw_cache(cpaths["features"])
     if not raw_cache:
         print("No feature cache found. Run 'extract' first.")
         return 1
@@ -787,7 +936,7 @@ def _cmd_cluster(args) -> int:
     labels = _cluster_with_soft_vocal(tracks, distance_matrix, config)
 
     assignment = assign_group_ids(tracks, labels, distance_matrix)
-    save_assignment(assignment, args.cache.replace(".pkl", "_assignment.pkl"))
+    save_assignment(assignment, cpaths["assignment"])
 
     export_groups_csv(tracks, assignment, args.output_csv)
     print(f"Groups exported to {args.output_csv}")
@@ -808,7 +957,8 @@ def _cmd_review(args) -> int:
     from .config import GrouperConfig
 
     config = GrouperConfig()
-    raw_cache = load_raw_cache(args.cache)
+    cpaths = _cache_paths(args.cache_dir)
+    raw_cache = load_raw_cache(cpaths["features"])
     if not raw_cache:
         print("No feature cache found. Run 'extract' first.")
         return 1
@@ -845,14 +995,15 @@ def _cmd_apply(args) -> int:
     from dj_tagger.metadata import write_tag
     from .config import GrouperConfig
 
-    raw_cache = load_raw_cache(args.cache)
+    cpaths = _cache_paths(args.cache_dir)
+    raw_cache = load_raw_cache(cpaths["features"])
     if not raw_cache:
         print("No feature cache found. Run 'extract' first.")
         return 1
     track_order = list(raw_cache.keys())
     cache = build_features_from_raw(raw_cache, track_order, config=GrouperConfig())
     tracks = cache.tracks
-    assignment = load_assignment(args.cache.replace(".pkl", "_assignment.pkl"))
+    assignment = load_assignment(cpaths["assignment"])
 
     print(f"Creating group folders in {args.output}...")
     create_group_folders(
@@ -890,7 +1041,8 @@ def _cmd_recommend(args) -> int:
     from .config import GrouperConfig
 
     config = GrouperConfig()
-    raw_cache = load_raw_cache(args.cache)
+    cpaths = _cache_paths(args.cache_dir)
+    raw_cache = load_raw_cache(cpaths["features"])
     if not raw_cache:
         print("No feature cache found. Run 'extract' first.")
         return 1
@@ -939,7 +1091,8 @@ def _cmd_evaluate(args) -> int:
     from .config import GrouperConfig
 
     config = GrouperConfig()
-    raw_cache = load_raw_cache(args.cache)
+    cpaths = _cache_paths(args.cache_dir)
+    raw_cache = load_raw_cache(cpaths["features"])
     if not raw_cache:
         print("No feature cache found. Run 'extract' first.")
         return 1

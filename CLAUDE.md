@@ -58,12 +58,17 @@ dj-grouper depends on dj-tagger. dj-registry depends on dj-tagger (reuses key an
 
 ## Cache architecture
 
-All caches live in `./cache/` (project root, survives `rm -rf outputs/`):
+Single universal cache at `./cache/universal_cache.pkl` (project root, survives `rm -rf outputs/`). All modules (dj-tagger, dj-grouper, dj-registry) read and write to this one file. Once a track is analyzed by any module, it is never re-analyzed.
 
-- **`cache/tagger_cache.pkl`** — shared between dj-tagger and dj-registry. Per-track analysis results + ISRCs. Keyed by `filename|duration` (path-independent). Version-gated by `ANALYZER_VERSION` in `cache.py`. Falls back to filename-only key for backward compat.
-- **`cache/registry_cache.pkl`** — all source observations (tags, Rekordbox, Songstats). Keyed by `filename|duration|source` for file-based data, `isrc:XXX|source` for API-based data. Survives registry resets.
-- **`cache/features_cache.pkl`** — dj-grouper DSP features. Keyed by path+mtime.
-- **`cache/clap_cache.pkl`** — dj-grouper CLAP embeddings.
+Key format: `{filename}|{layer}` or `{filename}|{duration}|{layer}`. Layers:
+- **tagger** — per-track analysis results (energy, key, vibe, vocal, structure). Version-gated by `ANALYZER_VERSION`.
+- **dsp** — ~45 DSP features dict (from dj-grouper extraction).
+- **section_dsp** — per-section DSP features.
+- **clap** — 512-dim CLAP audio embeddings.
+- **songstats**, **rekordbox**, **tag**, **spotify**, etc. — registry source observations.
+- **isrc:{isrc}|{source}** — ISRC-based API results.
+
+Auto-migrates from legacy files (`tagger_cache.pkl`, `features_cache.pkl`, `clap_cache.pkl`, `registry_cache.pkl`) on first load.
 
 ## Key design decisions
 
