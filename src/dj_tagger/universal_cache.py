@@ -37,13 +37,31 @@ logger = logging.getLogger(__name__)
 CACHE_VERSION = "1"
 DEFAULT_CACHE_PATH = os.path.join("cache", "universal_cache.pkl")
 
-# Per-layer version constants. Bump these when extraction logic changes
-# to automatically invalidate stale cached data for that layer only.
+# Raw layers: permanent, never invalidated. No version checks.
+# These contain fixed algorithm outputs or external data.
+RAW_LAYERS = frozenset({
+    "dsp",            # ~45 DSP features (librosa fixed algorithms)
+    "section_dsp",    # per-section DSP features
+    "clap",           # 512-dim CLAP embedding (fixed model)
+    "raw_analysis",   # intermediate features for re-derivation (bar_energies, vocal_ratio, etc.)
+    "tag",            # file embedded tags
+    "rekordbox",      # Rekordbox XML data
+    "songstats",      # Songstats API response
+    "spotify",        # Spotify lookup
+    "analysis_librosa",   # registry librosa key analysis
+    "analysis_essentia",  # registry essentia key analysis
+})
+
+# Derived layers: versioned, auto-recomputed from raw when stale.
+# Bump version when classification logic changes.
+DERIVED_VERSIONS: dict[str, str] = {
+    "tagger": "5.1",     # energy/vibe/vocal/structure classification logic
+}
+
+# Combined for backward compat with code that checks LAYER_VERSIONS
 LAYER_VERSIONS: dict[str, str] = {
-    "tagger": "5",       # matches ANALYZER_VERSION in cache.py
-    "dsp": "1",          # bump when DSP extraction changes
-    "section_dsp": "1",  # bump when section DSP changes
-    "clap": "1",         # bump when CLAP model changes
+    **{layer: "1" for layer in RAW_LAYERS},  # raw layers: version "1" always
+    **DERIVED_VERSIONS,
 }
 
 
@@ -112,11 +130,11 @@ class UniversalCache:
         Tries duration-keyed first. Falls back to name-only for backward
         compat with entries written before duration was required.
 
-        Auto-checks layer version from LAYER_VERSIONS if version is not
-        explicitly provided.
+        Raw layers (dsp, clap, raw_analysis, etc.) are never version-checked
+        — they are permanent. Derived layers auto-check against DERIVED_VERSIONS.
         """
-        if version is None:
-            version = LAYER_VERSIONS.get(layer)
+        if version is None and layer not in RAW_LAYERS:
+            version = DERIVED_VERSIONS.get(layer)
 
         # Try with duration
         if duration is not None and duration > 0:
@@ -146,10 +164,14 @@ class UniversalCache:
         Writes only the duration-keyed entry when duration is available.
         Falls back to name-only key only when duration is unknown.
 
-        Auto-sets version from LAYER_VERSIONS if not explicitly provided.
+        Auto-sets version: raw layers get "1" (permanent), derived layers
+        get their version from DERIVED_VERSIONS.
         """
         if version is None:
-            version = LAYER_VERSIONS.get(layer, "1")
+            if layer in RAW_LAYERS:
+                version = "1"
+            else:
+                version = DERIVED_VERSIONS.get(layer, "1")
 
         key = self.track_key(filename, duration, layer)
         self.put(key, data, version, mtime)
@@ -265,8 +287,9 @@ class UniversalCache:
                 if not hasattr(entry, "result"):
                     continue
                 tagger_key = f"{key}|tagger"
+                # Use current derived version so migrated entries aren't immediately stale
                 self._entries[tagger_key] = CacheEntry(
-                    version=getattr(entry, "version", "5"),
+                    version=DERIVED_VERSIONS.get("tagger", "5.1"),
                     mtime=getattr(entry, "mtime", 0.0),
                     data=entry.result,
                 )

@@ -217,7 +217,69 @@ def _extract_worker(track_path: str, needs_analysis: bool) -> dict:
     result["vocal_conf"] = vocal_result.confidence
     result["has_vocals"] = vocal_result.has_vocals
 
+    # Extract raw_analysis features for future re-derivation without audio loading
+    result["raw_analysis"] = _extract_raw_analysis(audio, vocal_result, section_map)
+
     return result
+
+
+def _extract_raw_analysis(audio, vocal_result, section_map) -> dict:
+    """Extract raw intermediate features needed to re-derive analysis values.
+
+    These are cached permanently. When classification logic changes,
+    derived values are recomputed from these without loading audio.
+    """
+    import librosa
+    import numpy as np
+
+    raw: dict = {}
+
+    # Bar energies (for structure + sections re-derivation)
+    onset_env = librosa.onset.onset_strength(y=audio.y, sr=audio.sr)
+    beat_frames = audio.beat_frames
+    beat_energies = []
+    for i in range(len(beat_frames) - 1):
+        seg = onset_env[beat_frames[i]: beat_frames[i + 1]]
+        beat_energies.append(float(np.mean(seg)) if len(seg) > 0 else 0.0)
+    n_bars = len(beat_energies) // 4
+    bar_energies = []
+    for i in range(n_bars):
+        chunk = beat_energies[i * 4: (i + 1) * 4]
+        bar_energies.append(float(np.mean(chunk)))
+    raw["bar_energies"] = bar_energies
+    raw["n_bars"] = n_bars
+    raw["tempo"] = float(audio.tempo)
+
+    # Vocal raw features (for vocal V/NV re-derivation)
+    raw["vocal_ratio"] = float(vocal_result.vocal_ratio)
+    # Recompute temporal_bonus from vocal frames
+    S = np.abs(librosa.stft(audio.y_harmonic, n_fft=2048, hop_length=512))
+    freqs = librosa.fft_frequencies(sr=audio.sr, n_fft=2048)
+    vocal_mask = (freqs >= 300) & (freqs <= 3400)
+    vocal_energy = np.mean(S[vocal_mask, :] ** 2, axis=0)
+    total_energy = np.mean(S ** 2, axis=0)
+    vocal_ratio_per_frame = vocal_energy / (total_energy + 1e-8)
+    vocal_S = S[vocal_mask, :]
+    log_mean = np.mean(np.log(vocal_S + 1e-8), axis=0)
+    flatness_per_frame = np.exp(log_mean) / (np.mean(vocal_S, axis=0) + 1e-8)
+    hi_mask = freqs > 5000
+    hi_energy = np.mean(S[hi_mask, :] ** 2, axis=0) if np.any(hi_mask) else np.ones_like(vocal_energy)
+    vocal_vs_hi = vocal_energy / (hi_energy + 1e-8)
+    vocal_frames = (vocal_ratio_per_frame > 0.12) & (flatness_per_frame < 0.5) & (vocal_vs_hi > 1.5)
+    if np.any(vocal_frames):
+        diffs = np.diff(vocal_frames.astype(int))
+        n_runs = max(1, np.sum(diffs == 1))
+        avg_run_len = np.sum(vocal_frames) / n_runs
+        raw["vocal_temporal_bonus"] = float(min(1.0, avg_run_len / 20.0))
+    else:
+        raw["vocal_temporal_bonus"] = 0.0
+
+    # Onset rate (for energy — different from onset_density)
+    onsets = librosa.onset.onset_detect(y=audio.y, sr=audio.sr)
+    duration = len(audio.y) / audio.sr
+    raw["onset_rate"] = len(onsets) / duration if duration > 0 else 0.0
+
+    return raw
 
 
 # ─── Shared extraction service ──────────────────────────────────────────────
@@ -303,21 +365,31 @@ def _run_extraction(
             to_extract.append((i, t, mtime, needs_analysis))
             continue
 
-        # Check universal cache for DSP features
+        # Check raw layers in universal cache (permanent, never invalidated)
         dsp_data = ucache.get_track(filename, dur, "dsp")
         section_dsp_data = ucache.get_track(filename, dur, "section_dsp")
+        raw_analysis = ucache.get_track(filename, dur, "raw_analysis")
 
-        # Check universal cache for tagger + DSP
+        # Check derived layer (versioned — returns None if stale)
         tagger_data = ucache.get_track(filename, dur, "tagger")
+
+        # Auto-recompute: if raw is cached but derived is stale, re-derive
+        if dsp_data and isinstance(dsp_data, dict) and raw_analysis and isinstance(raw_analysis, dict):
+            if tagger_data is None:
+                # Raw available, derived stale → re-derive without loading audio
+                from dj_tagger.derive import derive_all
+                tagger_data = derive_all(dsp_data, raw_analysis)
+                ucache.put_track(filename, dur, "tagger", tagger_data)
+                logger.info("Auto-recomputed derived analysis for %s from cached raw", filename)
+
         if tagger_data and isinstance(tagger_data, dict):
             _apply_tagger_result(t, tagger_data, analyze_untagged)
 
-        # Check if critical fields are still missing after tagger cache apply.
-        # _extract_worker always runs vibe/vocal analysis, so route there.
+        # Check if critical fields are still set
         missing_analysis = t.vibe is None or t.vocal is None
 
         if dsp_data and isinstance(dsp_data, dict) and not missing_analysis:
-            # Fully cached — both DSP and tagger analysis are complete
+            # Fully cached — both raw DSP and derived analysis are complete
             raw_cache[t.path] = RawCacheEntry(
                 mtime=mtime, info=t, dsp=dsp_data,
                 section_dsp=section_dsp_data if isinstance(section_dsp_data, dict) else {},
@@ -325,16 +397,13 @@ def _run_extraction(
             stats.n_cached += 1
             continue
 
-        # Need at least DSP extraction (and maybe vibe/vocal re-analysis)
+        # Need extraction — at least DSP, possibly full analysis
         needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
         if dsp_data and isinstance(dsp_data, dict):
-            # DSP cached but vibe/vocal missing — need extraction for vibe/vocal
             to_dsp_only.append((i, t, mtime))
         elif tagger_data and isinstance(tagger_data, dict):
-            # Tagger ran, but no DSP — need DSP extraction
             to_dsp_only.append((i, t, mtime))
         else:
-            # Need full analysis + DSP extraction
             to_extract.append((i, t, mtime, needs_analysis))
 
     n_from_ucache = stats.n_cached - sum(1 for _ in [])  # logged below
@@ -382,11 +451,23 @@ def _run_extraction(
         raw_cache[t.path] = RawCacheEntry(
             mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
         )
-        # Store DSP in universal cache so other modules can reuse
+        # Store in universal cache: raw layers (permanent) + derived layer (versioned)
         filename = Path(t.path).name
         dur = _durations.get(t.path)
         ucache.put_track(filename, dur, "dsp", result["dsp"], mtime=mtime)
         ucache.put_track(filename, dur, "section_dsp", result["section_dsp"], mtime=mtime)
+        if "raw_analysis" in result:
+            ucache.put_track(filename, dur, "raw_analysis", result["raw_analysis"], mtime=mtime)
+        # Store derived tagger result (versioned — will be auto-recomputed if logic changes)
+        tagger_derived = {
+            "energy": t.energy, "vibe": t.vibe, "vocal": t.vocal,
+            "has_vocals": result.get("has_vocals"), "vocal_ratio": result.get("vocal_ratio", 0.0),
+            "vibe_scores": t.vibe_scores, "structure": t.structure,
+            "intro_bars": t.intro_bars, "flow_type": t.flow_type,
+            "bpm": t.bpm, "camelot": t.key,
+            "confidences": dict(t.confidences),
+        }
+        ucache.put_track(filename, dur, "tagger", tagger_derived)
         stats.n_extracted += 1
 
     # ── Phase 1: DSP-only extraction (tagger analysis already cached) ──

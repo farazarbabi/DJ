@@ -14,7 +14,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Bump this when any analyzer logic changes to invalidate all cached results.
-ANALYZER_VERSION = "5"
+# Must match DERIVED_VERSIONS["tagger"] in universal_cache.py.
+ANALYZER_VERSION = "5.1"
 
 
 @dataclass
@@ -61,12 +62,13 @@ def load_cache(path: str) -> TaggerCache:
 
 def save_cache(cache: TaggerCache, path: str) -> None:
     """Save tagger cache. Now writes to the universal cache."""
-    from .universal_cache import get_cache
+    from .universal_cache import get_cache, DERIVED_VERSIONS
 
     ucache = get_cache(_universal_path(path))
+    derived_ver = DERIVED_VERSIONS.get("tagger", "5.1")
     for base_key, entry in cache.items():
         ukey = f"{base_key}|tagger"
-        ucache.put(ukey, entry.result, version=entry.version, mtime=entry.mtime)
+        ucache.put(ukey, entry.result, version=derived_ver, mtime=entry.mtime)
     ucache.save()
 
 

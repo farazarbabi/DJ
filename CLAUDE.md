@@ -58,17 +58,22 @@ dj-grouper depends on dj-tagger. dj-registry depends on dj-tagger (reuses key an
 
 ## Cache architecture
 
-Single universal cache at `./cache/universal_cache.pkl` (project root, survives `rm -rf outputs/`). All modules (dj-tagger, dj-grouper, dj-registry) read and write to this one file. Once a track is analyzed by any module, it is never re-analyzed.
+Single universal cache at `./cache/universal_cache.pkl` (project root, survives `rm -rf outputs/`). All modules (dj-tagger, dj-grouper, dj-registry) read and write to this one file. Key format: `{filename}|{duration}|{layer}`.
 
-Key format: `{filename}|{layer}` or `{filename}|{duration}|{layer}`. Layers:
-- **tagger** — per-track analysis results (energy, key, vibe, vocal, structure). Version-gated by `ANALYZER_VERSION`.
-- **dsp** — ~45 DSP features dict (from dj-grouper extraction).
-- **section_dsp** — per-section DSP features.
-- **clap** — 512-dim CLAP audio embeddings.
-- **songstats**, **rekordbox**, **tag**, **spotify**, etc. — registry source observations.
-- **isrc:{isrc}|{source}** — ISRC-based API results.
+**Raw layers** (permanent, never invalidated — change only if the audio file or external API changes):
+- **dsp** — ~45 DSP features dict (librosa fixed algorithms)
+- **section_dsp** — per-section DSP features
+- **clap** — 512-dim CLAP audio embeddings (fixed model)
+- **raw_analysis** — intermediate features for re-derivation: bar_energies, vocal_ratio, vocal_temporal_bonus, onset_rate
+- **tag**, **rekordbox**, **songstats**, **spotify** — external data sources
+- **isrc:{isrc}|{source}** — ISRC-based API results
 
-Auto-migrates from legacy files (`tagger_cache.pkl`, `features_cache.pkl`, `clap_cache.pkl`, `registry_cache.pkl`) on first load.
+**Derived layers** (versioned, auto-recomputed from raw when logic changes):
+- **tagger** — energy (E1-E5), vibe, vocal (V/NV), structure, confidences. Version-gated by `DERIVED_VERSIONS["tagger"]` in `universal_cache.py`.
+
+When derived logic changes (vibe formulas, energy thresholds, etc.): bump `DERIVED_VERSIONS["tagger"]` → next run auto-recomputes from cached raw data, no audio loading needed. Re-derivation functions live in `src/dj_tagger/derive.py`.
+
+Auto-migrates from legacy files (`tagger_cache.pkl`, `features_cache.pkl`, `clap_cache.pkl`, `registry_cache.pkl`) on first load. Atomic writes (temp file + os.replace) prevent corruption.
 
 ## Key design decisions
 
