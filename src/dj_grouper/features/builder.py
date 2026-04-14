@@ -55,24 +55,11 @@ def load_raw_cache(path: str) -> RawCache:
 
 
 def save_raw_cache(raw_cache: RawCache, path: str) -> None:
-    """Save raw cache entries to the universal cache.
-
-    Writes both to universal cache (for cross-module sharing) and
-    to the legacy path (for fast reload by the grouper on next run).
-    """
-    from dj_tagger.universal_cache import get_cache, quick_duration
+    """Flush the universal cache to disk (only writes if dirty)."""
+    from dj_tagger.universal_cache import get_cache
     ucache_path = str(Path(path).parent / "raw_cache.pkl")
     ucache = get_cache(ucache_path)
-
-    for filepath, entry in raw_cache.items():
-        filename = Path(filepath).name
-        dur = quick_duration(filepath)
-        if entry.dsp:
-            ucache.put_track(filename, dur, "dsp", entry.dsp, mtime=entry.mtime)
-        if entry.section_dsp:
-            ucache.put_track(filename, dur, "section_dsp", entry.section_dsp, mtime=entry.mtime)
     ucache.save()
-    logger.info("Raw cache saved (%d entries)", len(raw_cache))
 
 
 # ─── Final features (derived from raw cache each run) ───────────────────────

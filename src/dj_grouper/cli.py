@@ -537,8 +537,9 @@ def _run_extraction(
         del raw_cache[p]
     stats.n_removed = len(removed)
 
-    save_raw_cache(raw_cache, cache_path)
-    ucache.save()
+    if stats.n_extracted > 0 or stats.n_removed > 0:
+        save_raw_cache(raw_cache, cache_path)
+        ucache.save()
     return raw_cache, stats
 
 
