@@ -1,6 +1,6 @@
 """Persistent observation cache — delegates to universal cache.
 
-All data is stored in cache/universal_cache.pkl alongside tagger and
+All data is stored in cache/raw_cache.pkl alongside tagger and
 grouper data. This ensures one single cache file for everything.
 """
 
@@ -52,7 +52,7 @@ class ObsCache:
             try:
                 from dj_tagger.universal_cache import get_cache
                 cache_dir = os.path.dirname(self.path) or "cache"
-                ucache_path = os.path.join(cache_dir, "universal_cache.pkl")
+                ucache_path = os.path.join(cache_dir, "raw_cache.pkl")
                 self._ucache = get_cache(ucache_path)
             except ImportError:
                 pass

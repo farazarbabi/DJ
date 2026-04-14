@@ -126,7 +126,7 @@ def _cache_paths(cache_dir: str) -> dict[str, str]:
     from pathlib import Path
     d = Path(cache_dir)
     return {
-        "universal": str(d / "universal_cache.pkl"),
+        "raw": str(d / "raw_cache.pkl"),
         "features": str(d / "features_cache.pkl"),  # legacy, for migration
         "clap": str(d / "clap_cache.pkl"),  # legacy, for migration
         "assignment": str(d / "features_cache_assignment.pkl"),
@@ -336,7 +336,7 @@ def _run_extraction(
     raw_cache = {} if force else load_raw_cache(cache_path)
 
     # Get universal cache for cross-module lookup
-    ucache_path = str(Path(cache_path).parent / "universal_cache.pkl")
+    ucache_path = str(Path(cache_path).parent / "raw_cache.pkl")
     ucache = get_universal_cache(ucache_path)
 
     # Pre-compute durations for cache keys (cheap mutagen read, no audio decoding)
@@ -744,7 +744,7 @@ def _cmd_run(args) -> int:
 
     # ── Handle --force-extract: clear DSP cache + outputs (NOT clap cache) ──
     if args.force_extract:
-        for f in [cpaths["features"], cpaths["assignment"], cpaths["universal"]]:
+        for f in [cpaths["features"], cpaths["assignment"], cpaths["raw"]]:
             _safe_unlink(f, _allowed)
         for d in [args.output, args.playlists]:
             _safe_rmtree(d, _allowed)

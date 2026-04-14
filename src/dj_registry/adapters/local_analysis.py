@@ -1,6 +1,6 @@
 """Local audio analysis adapter — wraps dj_tagger key analyzers.
 
-Uses the universal cache (cache/universal_cache.pkl) so files analyzed by
+Uses the cache (cache/raw_cache.pkl + cache/derived_cache.pkl) so files analyzed by
 any module (dj-tagger, dj-grouper, dj-registry) are never re-analyzed.
 """
 
@@ -100,7 +100,7 @@ def run_analysis(
 ) -> int:
     """Run local key analysis on tracks.
 
-    Uses the universal cache (cache/universal_cache.pkl).
+    Uses the universal cache (cache/raw_cache.pkl + cache/derived_cache.pkl).
     Files already analyzed by any module are read from cache instantly.
     New analysis results are written back so all modules can reuse them.
 

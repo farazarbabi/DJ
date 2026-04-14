@@ -195,20 +195,22 @@ def test_layer_version_auto_set(cache):
     assert entry.version == LAYER_VERSIONS["tagger"]
 
 
-def test_atomic_save_creates_file(tmp_path):
-    """Atomic save should create the file."""
-    path = str(tmp_path / "atomic_test.pkl")
+def test_atomic_save_creates_files(tmp_path):
+    """Atomic save should create raw and/or derived files."""
+    path = str(tmp_path / "raw_cache.pkl")
     cache = UniversalCache(path)
-    cache.put("key", "value")
+    cache.put_track("track.aiff", 180.0, "dsp", {"rms": 0.3})  # raw
+    cache.put_track("track.aiff", 180.0, "tagger", {"energy": 3})  # derived
     cache.save()
-    assert os.path.exists(path)
+    assert os.path.exists(str(tmp_path / "raw_cache.pkl"))
+    assert os.path.exists(str(tmp_path / "derived_cache.pkl"))
 
 
 def test_atomic_save_no_temp_files(tmp_path):
     """After save, no .pkl.tmp files should remain."""
-    path = str(tmp_path / "atomic_test.pkl")
+    path = str(tmp_path / "raw_cache.pkl")
     cache = UniversalCache(path)
-    cache.put("key", "value")
+    cache.put_track("track.aiff", 180.0, "dsp", {"rms": 0.3})
     cache.save()
     tmp_files = list(tmp_path.glob("*.pkl.tmp"))
     assert len(tmp_files) == 0

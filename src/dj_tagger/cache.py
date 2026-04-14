@@ -115,8 +115,6 @@ def put_cached(
 
 
 def _universal_path(tagger_path: str) -> str:
-    """Derive universal cache path from tagger cache path."""
-    from .universal_cache import DEFAULT_CACHE_PATH
-    # If tagger_path is in a cache dir, use that dir for universal cache
+    """Derive cache path from tagger cache path (used to find the cache directory)."""
     parent = str(Path(tagger_path).parent)
-    return str(Path(parent) / "universal_cache.pkl")
+    return str(Path(parent) / "raw_cache.pkl")

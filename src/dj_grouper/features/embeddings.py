@@ -55,7 +55,7 @@ def extract_clap_incremental(
     Returns array of shape (n_files, 512) aligned with file_paths order.
     """
     from dj_tagger.universal_cache import get_cache, quick_duration
-    ucache_path = str(Path(cache_path).parent / "universal_cache.pkl")
+    ucache_path = str(Path(cache_path).parent / "raw_cache.pkl")
     ucache = get_cache(ucache_path)
 
     # Build in-memory cache from universal cache + legacy migration

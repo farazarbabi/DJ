@@ -53,7 +53,7 @@ def load_raw_cache(path: str) -> RawCache:
     The `path` argument locates the cache directory.
     """
     from dj_tagger.universal_cache import get_cache
-    ucache_path = str(Path(path).parent / "universal_cache.pkl")
+    ucache_path = str(Path(path).parent / "raw_cache.pkl")
     ucache = get_cache(ucache_path)
 
     raw_cache: RawCache = {}
@@ -90,7 +90,7 @@ def save_raw_cache(raw_cache: RawCache, path: str) -> None:
     to the legacy path (for fast reload by the grouper on next run).
     """
     from dj_tagger.universal_cache import get_cache, quick_duration
-    ucache_path = str(Path(path).parent / "universal_cache.pkl")
+    ucache_path = str(Path(path).parent / "raw_cache.pkl")
     ucache = get_cache(ucache_path)
 
     for filepath, entry in raw_cache.items():

@@ -35,6 +35,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 CACHE_VERSION = "1"
+DEFAULT_RAW_PATH = os.path.join("cache", "raw_cache.pkl")
+DEFAULT_DERIVED_PATH = os.path.join("cache", "derived_cache.pkl")
+# Legacy — kept for migration only
 DEFAULT_CACHE_PATH = os.path.join("cache", "universal_cache.pkl")
 
 # Raw layers: permanent, never invalidated. No version checks.
@@ -74,12 +77,20 @@ class CacheEntry:
 
 
 class UniversalCache:
-    """Single-file cache for all DJ toolkit data."""
+    """Two-file cache: raw_cache.pkl (permanent) + derived_cache.pkl (versioned).
+
+    Externally behaves as one cache. Internally splits reads/writes by layer type.
+    """
 
     def __init__(self, path: str = DEFAULT_CACHE_PATH) -> None:
-        self.path = path
+        # path is kept for API compat — used to derive the cache directory
+        cache_dir = os.path.dirname(path) or "cache"
+        self.raw_path = os.path.join(cache_dir, "raw_cache.pkl")
+        self.derived_path = os.path.join(cache_dir, "derived_cache.pkl")
+        self.path = path  # legacy, for callers that reference it
         self._entries: dict[str, CacheEntry] = {}
-        self._dirty = False
+        self._dirty_raw = False
+        self._dirty_derived = False
         self._load()
 
     # ── Key construction ─────────────────────────────────────────────────
@@ -111,7 +122,20 @@ class UniversalCache:
     def put(self, key: str, data: object, version: str = "1", mtime: float = 0.0) -> None:
         """Store data in cache."""
         self._entries[key] = CacheEntry(version=version, mtime=mtime, data=data)
-        self._dirty = True
+        layer = self._layer_from_key(key)
+        if layer in RAW_LAYERS:
+            self._dirty_raw = True
+        else:
+            self._dirty_derived = True
+
+    @staticmethod
+    def _layer_from_key(key: str) -> str | None:
+        """Extract layer name from a cache key."""
+        if key.startswith("isrc:"):
+            parts = key.split("|")
+            return parts[-1] if len(parts) >= 2 else None
+        parts = key.split("|")
+        return parts[-1] if len(parts) >= 2 else None
 
     def has(self, key: str) -> bool:
         return key in self._entries
@@ -192,16 +216,30 @@ class UniversalCache:
     # ── Load / Save ──────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        if not os.path.exists(self.path):
+        loaded = False
+
+        # Load raw_cache.pkl
+        if os.path.exists(self.raw_path):
+            loaded |= self._load_file(self.raw_path)
+
+        # Load derived_cache.pkl
+        if os.path.exists(self.derived_path):
+            loaded |= self._load_file(self.derived_path)
+
+        # Fall back to legacy universal_cache.pkl
+        if not loaded and os.path.exists(self.path) and self.path != self.raw_path:
+            loaded = self._load_file(self.path)
+
+        if not loaded:
             self._try_migrate()
-            return
+
+    def _load_file(self, path: str) -> bool:
+        """Load entries from a single pickle file. Returns True on success."""
         try:
-            with open(self.path, "rb") as f:
+            with open(path, "rb") as f:
                 raw = pickle.load(f)
             if not isinstance(raw, dict) or raw.get("_version") != CACHE_VERSION:
-                logger.info("Universal cache version mismatch, migrating...")
-                self._try_migrate()
-                return
+                return False
             entries = raw.get("entries", {})
             for k, v in entries.items():
                 if isinstance(v, CacheEntry):
@@ -212,25 +250,37 @@ class UniversalCache:
                         mtime=v.get("mtime", 0.0),
                         data=v["data"],
                     )
-            logger.info("Universal cache loaded: %d entries from %s", len(self._entries), self.path)
+            logger.info("Loaded %d entries from %s", len(entries), path)
+            return bool(entries)
         except Exception as e:
-            logger.warning("Could not load universal cache: %s — migrating from legacy", e)
-            self._try_migrate()
+            logger.warning("Could not load %s: %s", path, e)
+            return False
 
     def save(self) -> None:
-        """Save cache to disk atomically (temp file + os.replace)."""
-        if not self._dirty:
-            return
-        cache_dir = os.path.dirname(self.path) or "."
+        """Save cache to disk atomically. Writes two files: raw + derived."""
+        if self._dirty_raw:
+            raw_entries = {k: v for k, v in self._entries.items()
+                          if self._layer_from_key(k) in RAW_LAYERS}
+            self._save_file(self.raw_path, raw_entries)
+            self._dirty_raw = False
+
+        if self._dirty_derived:
+            derived_entries = {k: v for k, v in self._entries.items()
+                              if self._layer_from_key(k) not in RAW_LAYERS}
+            self._save_file(self.derived_path, derived_entries)
+            self._dirty_derived = False
+
+    def _save_file(self, path: str, entries: dict) -> None:
+        """Atomically write entries to a single pickle file."""
+        cache_dir = os.path.dirname(path) or "."
         os.makedirs(cache_dir, exist_ok=True)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=cache_dir, suffix=".pkl.tmp")
         os.close(tmp_fd)
         try:
             with open(tmp_path, "wb") as f:
-                pickle.dump({"_version": CACHE_VERSION, "entries": self._entries}, f)
-            os.replace(tmp_path, self.path)
-            self._dirty = False
-            logger.info("Universal cache saved: %d entries to %s", len(self._entries), self.path)
+                pickle.dump({"_version": CACHE_VERSION, "entries": entries}, f)
+            os.replace(tmp_path, path)
+            logger.info("Cache saved: %d entries to %s", len(entries), path)
         except Exception:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -238,12 +288,13 @@ class UniversalCache:
 
     def force_save(self) -> None:
         """Save even if not dirty."""
-        self._dirty = True
+        self._dirty_raw = True
+        self._dirty_derived = True
         self.save()
 
     @property
     def dirty(self) -> bool:
-        return self._dirty
+        return self._dirty_raw or self._dirty_derived
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -252,7 +303,7 @@ class UniversalCache:
 
     def _try_migrate(self) -> None:
         """Auto-import data from legacy cache files."""
-        cache_dir = os.path.dirname(self.path) or "cache"
+        cache_dir = os.path.dirname(self.raw_path) or "cache"
         migrated = 0
 
         tagger_path = os.path.join(cache_dir, "tagger_cache.pkl")
@@ -271,9 +322,16 @@ class UniversalCache:
         if os.path.exists(registry_path):
             migrated += self._migrate_registry(registry_path)
 
+        # Also try legacy universal_cache.pkl
+        legacy_universal = os.path.join(cache_dir, "universal_cache.pkl")
+        if os.path.exists(legacy_universal):
+            self._load_file(legacy_universal)
+            migrated += 1  # count as migrated to trigger save
+
         if migrated > 0:
             logger.info("Migrated %d entries from legacy caches", migrated)
-            self._dirty = True
+            self._dirty_raw = True
+            self._dirty_derived = True
             self.save()
 
     def _migrate_tagger(self, path: str) -> int:
