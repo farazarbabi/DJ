@@ -140,28 +140,31 @@ def _assign_step(
       3. New cluster: if no cluster passes even relaxed, create a new one
     """
     n = dist.shape[0]
-    k = len(medoids)
     labels = np.full(n, -1, dtype=np.intp)
 
+    # Mutable medoid list — grows when new clusters are created
+    med_list: list[int] = list(medoids)
+
     # First assign medoids to their own clusters
-    for cluster_id, med_idx in enumerate(medoids):
+    for cluster_id, med_idx in enumerate(med_list):
         labels[med_idx] = cluster_id
 
     # Build cluster membership sets for constraint checking
-    cluster_members: list[set[int]] = [set() for _ in range(k)]
-    for cluster_id, med_idx in enumerate(medoids):
+    cluster_members: list[set[int]] = [set() for _ in range(len(med_list))]
+    for cluster_id, med_idx in enumerate(med_list):
         cluster_members[cluster_id].add(int(med_idx))
 
     # Sort non-medoid points by distance to nearest medoid (closest first)
-    non_medoid_indices = [i for i in range(n) if i not in set(medoids)]
+    medoid_arr = np.array(med_list, dtype=np.intp)
+    non_medoid_indices = [i for i in range(n) if i not in set(med_list)]
     if not non_medoid_indices:
         return labels
-    min_dists = np.min(dist[non_medoid_indices][:, medoids], axis=1)
+    min_dists = np.min(dist[non_medoid_indices][:, medoid_arr], axis=1)
     sorted_order = [non_medoid_indices[j] for j in np.argsort(min_dists)]
 
     for i in sorted_order:
         # Rank clusters by distance to their medoid
-        cluster_dists = [(float(dist[i, medoids[c]]), c) for c in range(len(cluster_members))]
+        cluster_dists = [(float(dist[i, med_list[c]]), c) for c in range(len(cluster_members))]
         cluster_dists.sort()
 
         # Tier 1: strict — no hard or relaxed violations
@@ -183,7 +186,6 @@ def _assign_step(
         for _, cluster_id in cluster_dists:
             if _violates_hard(i, cluster_members[cluster_id], constraints):
                 continue
-            # Relaxed violations ok here
             labels[i] = cluster_id
             cluster_members[cluster_id].add(i)
             assigned = True
@@ -193,10 +195,11 @@ def _assign_step(
             logger.debug("Track %d: assigned via relaxed fallback (key +-2 neighbor)", i)
             continue
 
-        # Tier 3: no cluster works — create a new one
+        # Tier 3: no cluster works — create a new one (track becomes its own medoid)
         new_cluster_id = len(cluster_members)
         labels[i] = new_cluster_id
         cluster_members.append({i})
+        med_list.append(i)
         logger.debug("Track %d: created new cluster %d (no compatible cluster)", i, new_cluster_id)
 
     return labels

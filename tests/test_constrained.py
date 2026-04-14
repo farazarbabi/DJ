@@ -126,3 +126,50 @@ def test_many_cannot_links_still_converges():
     assert len(labels) == n
     # Should produce at least 2 groups
     assert len(np.unique(labels)) >= 2
+
+
+def test_high_constraint_density_no_index_error():
+    """With >70% of pairs cannot-linked, new clusters are created mid-assignment.
+
+    Regression test: _assign_step must handle growing cluster count without
+    index-out-of-bounds on the medoids array.
+    """
+    n = 40
+    data, _ = _make_clusterable_data(n=n, n_clusters=5)
+    dist = unified_distance_matrix(data)
+
+    constraints = Constraints()
+    # Create dense constraints: ~70% of pairs are cannot-linked
+    rng = np.random.RandomState(99)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if rng.random() < 0.70:
+                constraints.cannot_link.add((i, j))
+
+    config = GrouperConfig(target_group_size=(4, 12), min_group_size=2, max_group_size=20)
+    labels = cop_kmedoids(dist, constraints, config)
+    assert len(labels) == n
+    assert len(np.unique(labels)) >= 2
+
+    # Verify no hard cannot-link is violated
+    for i, j in constraints.cannot_link:
+        if i < n and j < n:
+            assert labels[i] != labels[j], f"Cannot-linked ({i},{j}) in same cluster"
+
+
+def test_relaxed_constraints_with_new_clusters():
+    """Relaxed constraints should be used before creating new clusters."""
+    n = 15
+    data, _ = _make_clusterable_data(n=n, n_clusters=3)
+    dist = unified_distance_matrix(data)
+
+    constraints = Constraints()
+    # Make most pairs relaxed (not hard) cannot-link
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(i - j) > 3:
+                constraints.relaxed_cannot_link.add((i, j))
+
+    config = GrouperConfig(target_group_size=(3, 8), min_group_size=2, max_group_size=15)
+    labels = cop_kmedoids(dist, constraints, config)
+    assert len(labels) == n
