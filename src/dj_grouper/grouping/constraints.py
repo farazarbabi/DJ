@@ -15,12 +15,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Constraints:
-    """Symmetric constraint pairs for constrained clustering."""
+    """Symmetric constraint pairs for constrained clustering.
+
+    Three tiers:
+      - cannot_link: hard — never place in same cluster (key distance > 2, BPM too far)
+      - relaxed_cannot_link: soft — avoid if possible, allow as fallback (key distance == 2)
+      - must_link: force into same cluster (user feedback)
+    """
     cannot_link: set[tuple[int, int]] = field(default_factory=set)
+    relaxed_cannot_link: set[tuple[int, int]] = field(default_factory=set)
     must_link: set[tuple[int, int]] = field(default_factory=set)
 
     def is_cannot_link(self, i: int, j: int) -> bool:
         return (min(i, j), max(i, j)) in self.cannot_link
+
+    def is_relaxed_cannot_link(self, i: int, j: int) -> bool:
+        return (min(i, j), max(i, j)) in self.relaxed_cannot_link
 
     def is_must_link(self, i: int, j: int) -> bool:
         return (min(i, j), max(i, j)) in self.must_link
@@ -33,18 +43,21 @@ def build_constraints(
 ) -> Constraints:
     """Build constraint sets from track key/BPM compatibility and feedback.
 
-    Cannot-link:
-      - Camelot key distance > 1 (both keys known and not "??")
-      - BPM spread > config.bpm_group_max_spread_pct (both BPMs known)
+    Key constraints (three tiers based on Camelot distance):
+      - distance <= 1: no constraint (same key or direct neighbor)
+      - distance == 2: relaxed cannot-link (neighbor-of-neighbor, fallback ok)
+      - distance > 2: hard cannot-link (never in same group)
 
-    Must-link / cannot-link from feedback.csv good_pair / bad_pair entries.
+    BPM constraints:
+      - spread > threshold: hard cannot-link
 
     Unknown keys generate no key constraints (float freely).
     """
     constraints = Constraints()
     n = len(tracks)
 
-    n_key_cl = 0
+    n_key_hard = 0
+    n_key_relaxed = 0
     n_bpm_cl = 0
 
     for i in range(n):
@@ -55,17 +68,23 @@ def build_constraints(
             key_j = tracks[j].info.key
             bpm_j = tracks[j].info.bpm
 
-            # Key constraint: cannot-link if Camelot distance > 1
+            # Key constraint: tiered by Camelot distance
             if (key_i and key_i != "??" and key_j and key_j != "??"):
                 try:
-                    if camelot_distance(key_i, key_j) > 1:
+                    kd = camelot_distance(key_i, key_j)
+                    if kd > 2:
+                        # Hard: too far, never group together
                         constraints.cannot_link.add(pair)
-                        n_key_cl += 1
-                        continue  # already cannot-link, skip BPM check
+                        n_key_hard += 1
+                        continue
+                    elif kd == 2:
+                        # Relaxed: neighbor-of-neighbor, allow as fallback
+                        constraints.relaxed_cannot_link.add(pair)
+                        n_key_relaxed += 1
                 except (ValueError, IndexError):
-                    pass  # malformed key, skip constraint
+                    pass
 
-            # BPM constraint: cannot-link if spread too wide
+            # BPM constraint: hard cannot-link if spread too wide
             if bpm_i and bpm_j and bpm_i > 0 and bpm_j > 0:
                 avg_bpm = (bpm_i + bpm_j) / 2.0
                 spread = abs(bpm_i - bpm_j) / avg_bpm
@@ -91,20 +110,19 @@ def build_constraints(
 
             if entry.type == "good_pair":
                 constraints.must_link.add(pair)
-                # Remove from cannot-link if present (must-link overrides)
                 constraints.cannot_link.discard(pair)
+                constraints.relaxed_cannot_link.discard(pair)
                 n_feedback_ml += 1
             elif entry.type == "bad_pair":
                 constraints.cannot_link.add(pair)
                 n_feedback_cl += 1
 
     total_pairs = n * (n - 1) // 2
-    total_cl = len(constraints.cannot_link)
-    total_ml = len(constraints.must_link)
     logger.info(
-        "Constraints built: %d cannot-link (%d key, %d bpm, %d feedback), "
-        "%d must-link (%d feedback) out of %d pairs",
-        total_cl, n_key_cl, n_bpm_cl, n_feedback_cl,
-        total_ml, n_feedback_ml, total_pairs,
+        "Constraints built: %d hard cannot-link (%d key>2, %d bpm, %d feedback), "
+        "%d relaxed (key==2), %d must-link out of %d pairs",
+        len(constraints.cannot_link), n_key_hard, n_bpm_cl, n_feedback_cl,
+        len(constraints.relaxed_cannot_link),
+        len(constraints.must_link), total_pairs,
     )
     return constraints

@@ -131,7 +131,13 @@ def _assign_step(
     medoids: NDArray,
     constraints: Constraints,
 ) -> NDArray[np.intp]:
-    """Assign each track to nearest medoid respecting cannot-link constraints."""
+    """Assign each track to nearest medoid respecting constraints.
+
+    Three-tier assignment:
+      1. Strict: no hard or relaxed constraint violations (same key / +-1 neighbor)
+      2. Relaxed: allow relaxed violations (+-2 neighbors), still reject hard
+      3. New cluster: if no cluster passes even relaxed, create a new one
+    """
     n = dist.shape[0]
     k = len(medoids)
     labels = np.full(n, -1, dtype=np.intp)
@@ -147,45 +153,74 @@ def _assign_step(
 
     # Sort non-medoid points by distance to nearest medoid (closest first)
     non_medoid_indices = [i for i in range(n) if i not in set(medoids)]
+    if not non_medoid_indices:
+        return labels
     min_dists = np.min(dist[non_medoid_indices][:, medoids], axis=1)
     sorted_order = [non_medoid_indices[j] for j in np.argsort(min_dists)]
 
     for i in sorted_order:
         # Rank clusters by distance to their medoid
-        cluster_dists = [(float(dist[i, medoids[c]]), c) for c in range(k)]
+        cluster_dists = [(float(dist[i, medoids[c]]), c) for c in range(len(cluster_members))]
         cluster_dists.sort()
 
+        # Tier 1: strict — no hard or relaxed violations
         assigned = False
         for _, cluster_id in cluster_dists:
-            # Check cannot-link: does i conflict with any member of this cluster?
-            if _violates_cannot_link(i, cluster_members[cluster_id], constraints):
+            if _violates_hard(i, cluster_members[cluster_id], constraints):
                 continue
-            # Check must-link: are all must-link partners of i in this cluster?
-            # (soft enforcement — we try, but don't fail if impossible)
+            if _violates_relaxed(i, cluster_members[cluster_id], constraints):
+                continue
             labels[i] = cluster_id
             cluster_members[cluster_id].add(i)
             assigned = True
             break
 
-        if not assigned:
-            # No existing cluster can accept this track without violating constraints.
-            # Create a new cluster for it (never violate constraints).
-            new_cluster_id = len(cluster_members)
-            labels[i] = new_cluster_id
-            cluster_members.append({i})
-            logger.debug("Track %d: no constraint-valid cluster, created new cluster %d", i, new_cluster_id)
+        if assigned:
+            continue
+
+        # Tier 2: relaxed — allow relaxed violations (key +-2), reject hard
+        for _, cluster_id in cluster_dists:
+            if _violates_hard(i, cluster_members[cluster_id], constraints):
+                continue
+            # Relaxed violations ok here
+            labels[i] = cluster_id
+            cluster_members[cluster_id].add(i)
+            assigned = True
+            break
+
+        if assigned:
+            logger.debug("Track %d: assigned via relaxed fallback (key +-2 neighbor)", i)
+            continue
+
+        # Tier 3: no cluster works — create a new one
+        new_cluster_id = len(cluster_members)
+        labels[i] = new_cluster_id
+        cluster_members.append({i})
+        logger.debug("Track %d: created new cluster %d (no compatible cluster)", i, new_cluster_id)
 
     return labels
 
 
-def _violates_cannot_link(
+def _violates_hard(
     track_idx: int,
     cluster_members: set[int],
     constraints: Constraints,
 ) -> bool:
-    """Check if adding track_idx to a cluster would violate any cannot-link."""
+    """Check if adding track_idx would violate any hard cannot-link."""
     for member in cluster_members:
         if constraints.is_cannot_link(track_idx, member):
+            return True
+    return False
+
+
+def _violates_relaxed(
+    track_idx: int,
+    cluster_members: set[int],
+    constraints: Constraints,
+) -> bool:
+    """Check if adding track_idx would violate any relaxed cannot-link."""
+    for member in cluster_members:
+        if constraints.is_relaxed_cannot_link(track_idx, member):
             return True
     return False
 
@@ -310,6 +345,9 @@ def _extract_sub_constraints(
     for i, j in constraints.cannot_link:
         if i in idx_map and j in idx_map:
             sub.cannot_link.add((idx_map[i], idx_map[j]))
+    for i, j in constraints.relaxed_cannot_link:
+        if i in idx_map and j in idx_map:
+            sub.relaxed_cannot_link.add((idx_map[i], idx_map[j]))
     for i, j in constraints.must_link:
         if i in idx_map and j in idx_map:
             sub.must_link.add((idx_map[i], idx_map[j]))

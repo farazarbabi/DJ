@@ -31,8 +31,8 @@ def test_compatible_keys_no_constraint():
     assert not constraints.is_cannot_link(0, 1)
 
 
-def test_incompatible_keys_generate_cannot_link():
-    """Camelot distance > 1 should generate cannot-link."""
+def test_incompatible_keys_generate_hard_cannot_link():
+    """Camelot distance > 2 should generate hard cannot-link."""
     config = GrouperConfig()
     tracks = [
         _make_track(key="1A", bpm=128, path="a.aiff"),
@@ -40,6 +40,19 @@ def test_incompatible_keys_generate_cannot_link():
     ]
     constraints = build_constraints(tracks, config)
     assert constraints.is_cannot_link(0, 1)
+    assert not constraints.is_relaxed_cannot_link(0, 1)
+
+
+def test_neighbor_of_neighbor_generates_relaxed():
+    """Camelot distance == 2 should generate relaxed cannot-link."""
+    config = GrouperConfig()
+    tracks = [
+        _make_track(key="5A", bpm=128, path="a.aiff"),
+        _make_track(key="7A", bpm=128, path="b.aiff"),  # distance 2
+    ]
+    constraints = build_constraints(tracks, config)
+    assert not constraints.is_cannot_link(0, 1)
+    assert constraints.is_relaxed_cannot_link(0, 1)
 
 
 def test_unknown_key_floats_free():
@@ -90,13 +103,14 @@ def test_feedback_good_pair_creates_must_link():
     config = GrouperConfig()
     tracks = [
         _make_track(key="1A", bpm=128, path="a.aiff"),
-        _make_track(key="5A", bpm=128, path="b.aiff"),  # normally cannot-link by key
+        _make_track(key="5A", bpm=128, path="b.aiff"),  # normally hard cannot-link by key (distance 4)
     ]
     feedback = [FeedbackEntry(track_a="a.aiff", track_b="b.aiff", type="good_pair", strength="1.0")]
     constraints = build_constraints(tracks, config, feedback)
-    # good_pair overrides cannot-link
+    # good_pair overrides both hard and relaxed cannot-link
     assert constraints.is_must_link(0, 1)
     assert not constraints.is_cannot_link(0, 1)
+    assert not constraints.is_relaxed_cannot_link(0, 1)
 
 
 def test_feedback_bad_pair_creates_cannot_link():
