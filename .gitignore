@@ -204,11 +204,13 @@ cython_debug/
 # DJ Tools — runtime data
 outputs/
 files/
+cache/
 grouped/
 playlists/
 *.pkl
 *.csv
 *.m3u8
+config
 
 # Marimo
 marimo/_static/

@@ -4,15 +4,15 @@ Project-specific guidance for AI-assisted development.
 
 ## Project overview
 
-DJ music library toolkit: `dj-tagger` (per-track audio analysis) + `dj-grouper` (grouping and recommendations). Python 3.10+, Windows-first, Rekordbox-compatible.
+DJ music library toolkit with three modules: `dj-tagger` (per-track audio analysis), `dj-grouper` (grouping and recommendations), and `dj-registry` (metadata collection, enrichment, and canonical key resolution). Python 3.10+, Windows-first, Rekordbox-compatible.
 
 ## Commands
 
 ```bash
 # Install
-pip install -e ".[dev]"
+pip install -e ".[dev,registry]"
 
-# Run tests (84 tests)
+# Run tests (145 tests)
 pytest tests/ -v
 
 # Tag tracks (defaults to ./files)
@@ -25,6 +25,25 @@ dj-grouper "E:\Music" --write-tags
 
 # Force re-extract (after changing analyzers or adding tracks)
 dj-grouper --force-extract --write-tags
+
+# Registry: collect metadata from all sources and resolve canonical key
+dj-registry run ./files --rekordbox-xml ./files/export.xml --songstats --no-essentia -w 4
+
+# Registry: write resolved keys to file tags
+dj-registry run ./files --rekordbox-xml ./files/export.xml --songstats --no-essentia -w 4 --write-tags
+
+# Registry: individual steps
+dj-registry scan ./files
+dj-registry link
+dj-registry ingest-rekordbox --xml ./files/export.xml
+dj-registry enrich-isrcs
+dj-registry ingest-songstats
+dj-registry analyze --no-essentia -w 4
+dj-registry resolve --force
+dj-registry review-queue
+dj-registry import-reviews
+dj-registry sync-tags --write
+dj-registry export
 ```
 
 ## Architecture
@@ -32,15 +51,23 @@ dj-grouper --force-extract --write-tags
 ```
 src/dj_tagger/     per-track audio analysis (librosa + mutagen)
 src/dj_grouper/    library-level grouping (scipy clustering + custom scoring)
+src/dj_registry/   metadata collection, enrichment, canonical key resolution
 ```
 
-dj-grouper depends on dj-tagger. Both are CLI entry points from one pyproject.toml.
+dj-grouper depends on dj-tagger. dj-registry depends on dj-tagger (reuses key analysis, metadata I/O, file scanning). All three are CLI entry points from one pyproject.toml.
+
+## Cache architecture
+
+All caches live in `./cache/` (project root, survives `rm -rf outputs/`):
+
+- **`cache/tagger_cache.pkl`** — shared between dj-tagger and dj-registry. Per-track analysis results + ISRCs. Keyed by `filename|duration` (path-independent). Version-gated by `ANALYZER_VERSION` in `cache.py`. Falls back to filename-only key for backward compat.
+- **`cache/registry_cache.pkl`** — all source observations (tags, Rekordbox, Songstats). Keyed by `filename|duration|source` for file-based data, `isrc:XXX|source` for API-based data. Survives registry resets.
+- **`cache/features_cache.pkl`** — dj-grouper DSP features. Keyed by path+mtime.
+- **`cache/clap_cache.pkl`** — dj-grouper CLAP embeddings.
 
 ## Key design decisions
 
-- **Input**: `./files/` — **Output**: `./outputs/` — nothing generated in project root
-- **Tagger cache**: `outputs/tagger_cache.pkl` — per-track analysis results keyed by filename+mtime. Skips audio loading and all analyzers for unchanged files. Flags: `--no-cache` (force re-analysis), `--clear-cache` (delete and re-analyze). Version-gated by `ANALYZER_VERSION` in `cache.py`.
-- **Grouper cache**: `outputs/features_cache.pkl` — incremental per-file DSP extraction keyed by path+mtime. Only audio extraction is cached; clustering and recommendations always recompute.
+- **Input**: `./files/` — **Output**: `./outputs/` — **Cache**: `./cache/`
 - **Tag format**: `KEY_ENERGY_VIBE_STRUCT_VOC_BPM` (e.g. `9A_E3_HYPN_64H_NV_126`) — backward-compatible parser handles legacy v1 (pipe-separated, no BPM) and v2 (pipe-separated with BPM)
 - **Metadata**: written to COMMENT field via mutagen — both generic (for DJ software) and tagged (desc="DJTAGGER" for self-detection)
 - **Group folders**: hard-linked files on NTFS (zero extra space), fall back to copy
@@ -52,6 +79,26 @@ dj-grouper depends on dj-tagger. Both are CLI entry points from one pyproject.to
 - **DSP scaling**: percentile-rank normalized to [0,1] across the library (not z-score). Distance: L2-normalized Euclidean (not cosine). Contrast stretching maps 2nd-98th percentile to [0,1] after blending.
 - **Confidence**: every analyzer reports confidence (0-1). Low-confidence tags are softened toward neutral in feature encoding.
 
+## Registry design decisions
+
+- **Single source of truth**: canonical registry, not file tags or any single external source
+- **Sources**: file tags, Rekordbox XML, Songstats API (via ISRC), Spotify (for ISRC enrichment), local librosa key analysis
+- **Key resolution**: weighted vote share confidence (all agree = 1.0, any disagreement < 1.0). Tie-breaking priority: tag > rekordbox > songstats > analysis. Majority always wins.
+- **Source weights** (for ranking): manual=1.00, analysis_essentia=0.85, analysis_librosa=0.80, rekordbox=0.75, tag=0.55, songstats=0.40
+- **ISRC enrichment**: Spotify search by artist+title with duration matching. Handles artist-in-title (MP3s), multi-artist, featuring syntax.
+- **Tag write-back**: writes canonical key to both TKEY field (for DJ software) and key portion of dj-tagger COMMENT tag
+- **CSV backend**: atomic writes via temp file + os.replace(). Observations rebuilt fresh from pkl cache every run.
+- **Output**: `outputs/registry/registry_overview.csv` — one row per track, all sources as columns, canonical key, confidence, review status
+
+## Registry output files
+
+- `outputs/registry/registry_overview.csv` — main review file (one row per track, all data)
+- `outputs/registry/tracks_master.csv` — canonical track registry
+- `outputs/registry/files_master.csv` — file inventory
+- `outputs/registry/source_observations.csv` — all observations (wide format, one row per source per track)
+- `outputs/registry/review_queue.csv` — unresolved tracks for manual review
+- `outputs/registry/raw/` — raw API payloads (Songstats JSON, Rekordbox XML, analysis results, tag snapshots)
+
 ## Calibration-sensitive code
 
 These files contain tunable thresholds that directly affect output quality. Changes require re-tagging and re-extracting.
@@ -60,6 +107,8 @@ These files contain tunable thresholds that directly affect output quality. Chan
 - `src/dj_tagger/analyzers/vibe.py` — vibe scoring formulas (inline weights, not in constants)
 - `src/dj_grouper/config.py` — layer weights (0.45/0.55 without CLAP, 0.25/0.30/0.45 with CLAP), tag sub-weights (energy d^1.5), BPM filtering, clustering params, group size targets
 - `src/dj_grouper/grouping/distance.py` — tag distance sub-weights (inline), contrast stretching (2nd-98th percentile), DSP L2-normalized Euclidean
+- `src/dj_registry/config.py` — source weights, confidence threshold (0.70), margin threshold (0.20), agreement/cross-type boosts
+- `src/dj_registry/resolver/key_resolver.py` — tie-breaking priority, majority/score/tie-break resolution logic
 
 ## Common calibration issues
 
@@ -69,14 +118,17 @@ These files contain tunable thresholds that directly affect output quality. Chan
 - **Bad groupings by BPM**: check bpm_group_max_spread_pct, BPM tag weight in distance.py, and BPM normalization range in builder.py.
 - **Groups too large/homogeneous**: lower target_group_size, switch to complete linkage, or increase tag layer weight.
 - **Groups too fragmented**: raise target_group_size, lower BPM spread threshold, increase DSP weight.
+- **Registry key conflicts**: adjust source_weights in RegistryConfig. Check registry_overview.csv to compare sources.
 
 ## Testing
 
+- 145 tests total: 85 tagger/grouper + 60 registry
 - Tests use synthetic audio (numpy-generated WAVs via soundfile) — no real music files needed
 - `conftest.py` provides fixtures: sine waves, noise, silence, chords, etc.
 - Tag format tests cover current v3 (underscore-separated) and legacy v1/v2 (pipe-separated) parsing
 - Distance/scoring tests use `_make_track()` helper that builds TrackFeatures from parameters
 - TrackFeatures DSP vector is 21 dimensions (10 curated spectral/rhythmic + 5 MFCCs + 6 tonnetz)
+- Registry tests cover key normalization, CSV round-trips, text normalization, resolver scoring
 
 ## File conventions
 
@@ -85,7 +137,7 @@ These files contain tunable thresholds that directly affect output quality. Chan
 - Dataclasses for results and config
 - Constants centralized where possible, inline where formula-specific
 - No emojis in code or output
-- Git: runtime data (outputs/, files/, *.pkl, *.csv, *.m3u8) in .gitignore
+- Git: runtime data (outputs/, files/, cache/, *.pkl, *.csv, *.m3u8) in .gitignore
 
 ## When changing analyzers
 
@@ -102,3 +154,10 @@ These files contain tunable thresholds that directly affect output quality. Chan
 2. Run tests
 3. No need to re-extract — just re-run: `dj-grouper --dry-run`
 4. Cache is reused; only clustering/recommendations recompute
+
+## When changing registry resolution
+
+1. Update resolver/key_resolver.py or config.py source_weights
+2. Run `pytest tests/test_registry_resolver.py -v`
+3. Re-run: `dj-registry resolve --force` (no re-scanning or API calls needed)
+4. Check `outputs/registry/registry_overview.csv` for results
