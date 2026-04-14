@@ -1,0 +1,140 @@
+# DJ Toolkit Settings
+# All tunable parameters in one place.
+# Change any value here → derived cache auto-invalidates → recomputes on next run.
+# Raw cache (DSP, CLAP, API data) is NEVER affected by these changes.
+
+# ─── Energy Classification (E1-E5) ──────────────────────────────────────────
+[energy]
+# Features used for energy composite score: [min, range, weight]
+# composite = sum(weight * clamp01((raw - min) / range))
+beat_strength = [1.5, 2.5, 0.35]
+onset_density = [1.0, 2.0, 0.30]
+centroid_mean = [1000, 2000, 0.20]
+rms_mean      = [0.15, 0.20, 0.15]
+
+# Composite → energy level thresholds: E1 < t0, E2 < t1, E3 < t2, E4 < t3, E5 >= t3
+thresholds = [0.25, 0.42, 0.58, 0.75]
+
+# ─── Vibe Classification (8 categories) ─────────────────────────────────────
+# Each vibe is scored from DSP features using: weight * clamp01((raw - offset) / scale)
+# Format: [[weight, offset, scale], ...] per input feature
+[vibe]
+# MEL: baseline for electronic music (high chroma_var = melodic evidence)
+mel_base = 0.38
+mel_chroma_scale = 0.065        # chroma_var / this
+mel_chroma_weight = 0.25
+mel_lowflat_center = 0.025      # (center - flatness) / scale
+mel_lowflat_scale = 0.015
+mel_lowflat_weight = 0.12
+
+# DRK: aggressive rhythmic character + noisiness + bass
+drk_onset_var = [0.25, 1.5, 2.0]     # [weight, offset, scale]
+drk_flatness  = [0.30, 0.010, 0.030]
+drk_low_ratio = [0.25, 45, 25]
+drk_flux      = [0.20, 2.0, 2.5]
+
+# TRIB: very high percussion ratio, clean
+trib_perc_ratio = [0.70, 0.40, 0.15]
+trib_clean      = [0.30, 0.03, 0.02]  # (center - flatness) / scale
+
+# RAW: non-electronic (sparse, low bass)
+raw_nobass  = [0.45, 42, 12]    # (center - low_ratio) / scale
+raw_sparse  = [0.30, 1.5, 0.8]  # (center - onset_density) / scale
+raw_lowvar  = [0.25, 1.5, 1.0]  # (center - onset_var) / scale
+
+# HYPN: high stability, low onset variance
+hypn_stability_weight = 0.50
+hypn_onset_var = [0.50, 2.0, 1.5]  # (center - onset_var) / scale
+
+# DEEP: low centroid + quiet + bass-heavy
+deep_centroid = [0.35, 2000, 1000]  # (center - centroid_mean) / scale
+deep_rms      = [0.35, 0.22, 0.10]  # (center - rms) / scale
+deep_low      = [0.30, 50, 20]      # (low_ratio - offset) / scale
+
+# ACID: extreme spectral movement (filter sweeps)
+acid_centroid_var = [1.0, 0.75, 0.40]
+
+# ATM: sparse + quiet
+atm_sparse = [0.50, 1.5, 1.0]  # (center - onset_density) / scale
+atm_quiet  = [0.50, 0.20, 0.08]  # (center - rms) / scale
+
+# ─── Vocal Detection ────────────────────────────────────────────────────────
+[vocal]
+frame_threshold = 0.20       # vocal_score > this → V, else NV
+freq_low = 300.0             # Hz, lower bound of vocal band
+freq_high = 3400.0           # Hz, upper bound of vocal band
+energy_ratio = 0.12          # min vocal-band energy ratio per frame
+flatness_max = 0.5           # max spectral flatness in vocal band
+score_base_weight = 0.6      # vocal_score = ratio * (base + temporal * bonus)
+score_temporal_weight = 0.4
+confidence_scale = 0.15      # distance_from_threshold / this
+
+# ─── Structure / Flow Type ──────────────────────────────────────────────────
+[structure]
+standard_intro_bars = [16, 32, 64]
+intro_energy_ratio = 0.80    # fraction of median bar energy
+intro_sustain_bars = 8       # consecutive bars above threshold
+n_segments = 8               # segments for flow analysis
+plateau_tolerance = 0.08     # energy diff for plateau detection
+
+# Flow type thresholds (variance, jumps, trend)
+flow_variance_linear = 0.005
+flow_variance_hypnotic = 0.02
+flow_jump_hypnotic = 0.15
+flow_jump_drop = 0.40
+flow_trend_builder = 0.05
+flow_trend_groove = 0.03
+flow_plateau_min = 2
+
+# ─── Key Detection ──────────────────────────────────────────────────────────
+[key]
+minor_bias = 0.05
+gap_divisor = 0.15
+same_root_minor_pref = 0.8
+
+# ─── Grouper ────────────────────────────────────────────────────────────────
+[grouper]
+clustering_method = "constrained"  # "constrained" | "agglomerative"
+min_group_size = 2
+max_group_size = 20
+target_group_size = [4, 12]
+bpm_group_max_spread_pct = 0.07
+energy_group_max_spread = 3
+vocal_confidence_threshold = 0.5
+clap_pca_dims = 32
+pca_target_variance = 0.90
+
+# Agglomerative (legacy) settings
+linkage = "average"
+
+# Recommendation settings
+n_recommendations = 10
+bpm_hard_cutoff_pct = 0.08
+bpm_soft_penalty_pct = 0.04
+bpm_penalty_weight = 0.15
+
+# Feedback
+good_pair_factor = 0.3
+bad_pair_factor = 0.5
+
+# ─── Registry ───────────────────────────────────────────────────────────────
+[registry]
+confidence_threshold = 0.70
+margin_threshold = 0.20
+agreement_boost = 0.15
+cross_type_boost = 0.10
+
+[registry.source_weights]
+manual = 1.00
+analysis_essentia = 0.85
+analysis_librosa = 0.80
+rekordbox = 0.75
+tag = 0.55
+songstats = 0.40
+
+# ─── Paths ──────────────────────────────────────────────────────────────────
+[paths]
+input_dir = "./files"
+output_dir = "./outputs"
+cache_dir = "./cache"
+registry_dir = "./outputs/registry"

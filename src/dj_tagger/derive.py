@@ -1,13 +1,12 @@
 """Recompute derived analysis values from cached raw features.
 
-This module lets you change classification logic (vibe formulas, energy
-thresholds, vocal decision boundary, structure flow rules) and recompute
-results instantly from cached raw data — no audio loading needed.
+All parameters are read from settings.toml. Change any value there and
+the derived cache auto-invalidates on next run — no manual version bumping.
 
 Raw inputs:
   - dsp: dict with ~45 DSP features (from grouper extraction)
   - raw_analysis: dict with additional features not in DSP
-    (bar_energies, vocal_ratio, vocal_temporal_bonus, onset_rate, segment_chroma)
+    (bar_energies, vocal_ratio, vocal_temporal_bonus, onset_rate)
 
 Derived outputs:
   - energy: level (E1-E5), confidence
@@ -19,22 +18,68 @@ Derived outputs:
 from __future__ import annotations
 
 import logging
-import math
 
 import numpy as np
 
+from .settings import get, get_section
+
 logger = logging.getLogger(__name__)
 
-# ── Vibe derivation ──────────────────────────────────────────────────────────
-# Mirrors the formulas in analyzers/vibe.py.
-# Change these formulas → bump DERIVED_VERSIONS["tagger"] → auto-recomputes.
 
+def _clip01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+def _scored(raw: float, params: list) -> float:
+    """Compute weight * clamp01((raw - offset) / scale) from [weight, offset, scale]."""
+    weight, offset, scale = params
+    return weight * _clip01((raw - offset) / scale)
+
+
+def _scored_inv(raw: float, params: list) -> float:
+    """Inverted: weight * clamp01((offset - raw) / scale)."""
+    weight, center, scale = params
+    return weight * _clip01((center - raw) / scale)
+
+
+# ── Energy derivation ────────────────────────────────────────────────────────
+
+def derive_energy(dsp: dict) -> dict:
+    """Recompute energy level from cached DSP features."""
+    s = get_section("energy")
+
+    features = {
+        "beat_strength": s.get("beat_strength", [1.5, 2.5, 0.35]),
+        "onset_density": s.get("onset_density", [1.0, 2.0, 0.30]),
+        "centroid_mean": s.get("centroid_mean", [1000, 2000, 0.20]),
+        "rms_mean": s.get("rms_mean", [0.15, 0.20, 0.15]),
+    }
+    thresholds = s.get("thresholds", [0.25, 0.42, 0.58, 0.75])
+
+    composite = 0.0
+    for key, (lo, rng, weight) in features.items():
+        raw = dsp.get(key, 0.0)
+        normalized = _clip01((raw - lo) / rng)
+        composite += weight * normalized
+
+    level = 1
+    for t in thresholds:
+        if composite >= t:
+            level += 1
+    level = min(level, 5)
+
+    distances = [abs(composite - t) for t in thresholds]
+    confidence = min(1.0, min(distances) / 0.10) if distances else 1.0
+
+    return {"energy": level, "energy_confidence": confidence}
+
+
+# ── Vibe derivation ──────────────────────────────────────────────────────────
 
 def derive_vibe(dsp: dict) -> dict:
-    """Recompute vibe from cached DSP features.
+    """Recompute vibe from cached DSP features."""
+    s = get_section("vibe")
 
-    Returns dict with: vibe, vibe_scores, vibe_confidence
-    """
     rms = dsp.get("rms_mean", 0.0)
     centroid_mean = dsp.get("centroid_mean", 0.0)
     centroid_var = dsp.get("centroid_var", 0.0)
@@ -46,65 +91,62 @@ def derive_vibe(dsp: dict) -> dict:
     flux = dsp.get("flux_mean", 0.0)
     chroma_var = dsp.get("chroma_var", 0.0)
 
-    # Normalize onset_var and centroid_var to coefficient of variation
+    # Normalize to coefficient of variation
     onset_var = onset_variance / (onset_density ** 2 + 1e-8)
     centroid_cv = centroid_var / (centroid_mean ** 2 + 1e-8)
     spectral_stability = 1.0 - min(1.0, centroid_cv * 10)
 
-    def _clip01(v: float) -> float:
-        return max(0.0, min(1.0, v))
-
     scores: dict[str, float] = {}
 
-    # MEL: baseline
-    mel_chroma = min(1.0, chroma_var / 0.065)
-    mel_lowflat = _clip01((0.025 - flatness) / 0.015)
-    scores["MEL"] = 0.38 + 0.25 * mel_chroma + 0.12 * mel_lowflat
+    # MEL
+    mel_base = s.get("mel_base", 0.38)
+    mel_chroma = min(1.0, chroma_var / s.get("mel_chroma_scale", 0.065))
+    mel_lowflat = _clip01((s.get("mel_lowflat_center", 0.025) - flatness) / s.get("mel_lowflat_scale", 0.015))
+    scores["MEL"] = mel_base + s.get("mel_chroma_weight", 0.25) * mel_chroma + s.get("mel_lowflat_weight", 0.12) * mel_lowflat
 
-    # DRK: aggressive + noisy + bass-heavy
+    # DRK
     scores["DRK"] = (
-        0.25 * _clip01((onset_var - 1.5) / 2.0)
-        + 0.30 * _clip01((flatness - 0.010) / 0.030)
-        + 0.25 * _clip01((low_ratio - 45) / 25)
-        + 0.20 * _clip01((flux - 2.0) / 2.5)
+        _scored(onset_var, s.get("drk_onset_var", [0.25, 1.5, 2.0]))
+        + _scored(flatness, s.get("drk_flatness", [0.30, 0.010, 0.030]))
+        + _scored(low_ratio, s.get("drk_low_ratio", [0.25, 45, 25]))
+        + _scored(flux, s.get("drk_flux", [0.20, 2.0, 2.5]))
     )
 
-    # TRIB: very high percussion ratio, clean
+    # TRIB
     scores["TRIB"] = (
-        0.70 * _clip01((perc_ratio - 0.40) / 0.15)
-        + 0.30 * _clip01((0.03 - flatness) / 0.02)
+        _scored(perc_ratio, s.get("trib_perc_ratio", [0.70, 0.40, 0.15]))
+        + _scored_inv(flatness, s.get("trib_clean", [0.30, 0.03, 0.02]))
     )
 
-    # RAW: non-electronic (sparse, low bass)
+    # RAW
     scores["RAW"] = (
-        0.45 * _clip01((42 - low_ratio) / 12)
-        + 0.30 * _clip01((1.5 - onset_density) / 0.8)
-        + 0.25 * _clip01((1.5 - onset_var) / 1.0)
+        _scored_inv(low_ratio, s.get("raw_nobass", [0.45, 42, 12]))
+        + _scored_inv(onset_density, s.get("raw_sparse", [0.30, 1.5, 0.8]))
+        + _scored_inv(onset_var, s.get("raw_lowvar", [0.25, 1.5, 1.0]))
     )
 
-    # HYPN: high stability, low onset variance
-    scores["HYPN"] = (
-        0.50 * spectral_stability
-        + 0.50 * _clip01((2.0 - onset_var) / 1.5)
-    )
+    # HYPN
+    hypn_stab_w = s.get("hypn_stability_weight", 0.50)
+    hypn_onset = s.get("hypn_onset_var", [0.50, 2.0, 1.5])
+    scores["HYPN"] = hypn_stab_w * spectral_stability + _scored_inv(onset_var, hypn_onset)
 
-    # DEEP: low centroid + quiet + bass-heavy
+    # DEEP
     scores["DEEP"] = (
-        0.35 * _clip01((2000 - centroid_mean) / 1000)
-        + 0.35 * _clip01((0.22 - rms) / 0.10)
-        + 0.30 * _clip01((low_ratio - 50) / 20)
+        _scored_inv(centroid_mean, s.get("deep_centroid", [0.35, 2000, 1000]))
+        + _scored_inv(rms, s.get("deep_rms", [0.35, 0.22, 0.10]))
+        + _scored(low_ratio, s.get("deep_low", [0.30, 50, 20]))
     )
 
-    # ACID: extreme spectral movement
-    scores["ACID"] = _clip01((centroid_cv - 0.75) / 0.40)
+    # ACID
+    scores["ACID"] = _scored(centroid_cv, s.get("acid_centroid_var", [1.0, 0.75, 0.40]))
 
-    # ATM: sparse + quiet
+    # ATM
     scores["ATM"] = (
-        0.50 * _clip01((1.5 - onset_density) / 1.0)
-        + 0.50 * _clip01((0.20 - rms) / 0.08)
+        _scored_inv(onset_density, s.get("atm_sparse", [0.50, 1.5, 1.0]))
+        + _scored_inv(rms, s.get("atm_quiet", [0.50, 0.20, 0.08]))
     )
 
-    scores = {k: max(0.0, min(1.0, v)) for k, v in scores.items()}
+    scores = {k: _clip01(v) for k, v in scores.items()}
     label = max(scores, key=scores.get)  # type: ignore[arg-type]
     sorted_scores = sorted(scores.values(), reverse=True)
     confidence = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) >= 2 else 1.0
@@ -112,60 +154,22 @@ def derive_vibe(dsp: dict) -> dict:
     return {"vibe": label, "vibe_scores": scores, "vibe_confidence": confidence}
 
 
-# ── Energy derivation ────────────────────────────────────────────────────────
-# Mirrors _compute_track_energy in features/builder.py.
-
-_ENERGY_FEATURES = {
-    "beat_strength": (1.5, 2.5, 0.35),
-    "onset_density": (1.0, 2.0, 0.30),
-    "centroid_mean": (1000, 2000, 0.20),
-    "rms_mean": (0.15, 0.20, 0.15),
-}
-_ENERGY_THRESHOLDS = [0.25, 0.42, 0.58, 0.75]
-
-
-def derive_energy(dsp: dict) -> dict:
-    """Recompute energy level from cached DSP features.
-
-    Returns dict with: energy, energy_confidence
-    """
-    composite = 0.0
-    for key, (lo, rng, weight) in _ENERGY_FEATURES.items():
-        raw = dsp.get(key, 0.0)
-        normalized = max(0.0, min(1.0, (raw - lo) / rng))
-        composite += weight * normalized
-
-    level = 1
-    for threshold in _ENERGY_THRESHOLDS:
-        if composite >= threshold:
-            level += 1
-    level = min(level, 5)
-
-    # Confidence: distance from nearest threshold
-    distances = [abs(composite - t) for t in _ENERGY_THRESHOLDS]
-    confidence = min(1.0, min(distances) / 0.10) if distances else 1.0
-
-    return {"energy": level, "energy_confidence": confidence}
-
-
 # ── Vocal derivation ─────────────────────────────────────────────────────────
-# Mirrors analyze_vocal decision logic.
-
-VOCAL_FRAME_THRESHOLD = 0.20
-
 
 def derive_vocal(raw_analysis: dict) -> dict:
-    """Recompute vocal V/NV from cached raw analysis features.
+    """Recompute vocal V/NV from cached raw analysis features."""
+    s = get_section("vocal")
 
-    Returns dict with: vocal, vocal_confidence
-    """
     vocal_ratio = raw_analysis.get("vocal_ratio", 0.0)
     temporal_bonus = raw_analysis.get("vocal_temporal_bonus", 0.0)
-    vocal_score = vocal_ratio * (0.6 + 0.4 * temporal_bonus)
+    base_w = s.get("score_base_weight", 0.6)
+    temp_w = s.get("score_temporal_weight", 0.4)
+    threshold = s.get("frame_threshold", 0.20)
+    conf_scale = s.get("confidence_scale", 0.15)
 
-    has_vocals = vocal_score > VOCAL_FRAME_THRESHOLD
-    distance_from_threshold = abs(vocal_score - VOCAL_FRAME_THRESHOLD)
-    confidence = min(1.0, distance_from_threshold / 0.15)
+    vocal_score = vocal_ratio * (base_w + temp_w * temporal_bonus)
+    has_vocals = vocal_score > threshold
+    confidence = min(1.0, abs(vocal_score - threshold) / conf_scale)
 
     return {
         "vocal": "V" if has_vocals else "NV",
@@ -176,106 +180,82 @@ def derive_vocal(raw_analysis: dict) -> dict:
 
 
 # ── Structure derivation ─────────────────────────────────────────────────────
-# Mirrors analyze_structure logic.
-
-from .constants import (
-    FLOW_JUMP_DROP,
-    FLOW_JUMP_HYPNOTIC,
-    FLOW_PLATEAU_MIN,
-    FLOW_TREND_BUILDER,
-    FLOW_TREND_GROOVE,
-    FLOW_VARIANCE_HYPNOTIC,
-    FLOW_VARIANCE_LINEAR,
-    INTRO_ENERGY_RATIO,
-    INTRO_SUSTAIN_BARS,
-    STANDARD_INTRO_BARS,
-)
-
-N_SEGMENTS = 8
-
 
 def derive_structure(raw_analysis: dict) -> dict:
-    """Recompute structure from cached bar energies.
+    """Recompute structure from cached bar energies."""
+    s = get_section("structure")
 
-    Returns dict with: structure, intro_bars, flow_type, structure_confidence
-    """
     bar_energies = raw_analysis.get("bar_energies", [])
-    if not bar_energies or len(bar_energies) == 0:
-        return {
-            "structure": "16H", "intro_bars": 16, "flow_type": "H",
-            "structure_confidence": 0.2,
-        }
+    if not bar_energies:
+        return {"structure": "16H", "intro_bars": 16, "flow_type": "H", "structure_confidence": 0.2}
 
     bar_e = np.array(bar_energies)
+    std_bars = s.get("standard_intro_bars", [16, 32, 64])
+    sustain = s.get("intro_sustain_bars", 8)
+    energy_ratio = s.get("intro_energy_ratio", 0.80)
+    n_seg = s.get("n_segments", 8)
 
     # Detect intro
-    intro_bars = STANDARD_INTRO_BARS[0]
+    intro_bars = std_bars[0]
     intro_conf = 0.3
-    if len(bar_e) >= INTRO_SUSTAIN_BARS:
+    if len(bar_e) >= sustain:
         median_energy = float(np.median(bar_e))
-        threshold = INTRO_ENERGY_RATIO * median_energy
+        threshold = energy_ratio * median_energy
         intro_end = 0
-        for i in range(len(bar_e) - INTRO_SUSTAIN_BARS + 1):
-            window = bar_e[i: i + INTRO_SUSTAIN_BARS]
-            if np.all(window > threshold):
+        for i in range(len(bar_e) - sustain + 1):
+            if np.all(bar_e[i: i + sustain] > threshold):
                 intro_end = i
                 break
-        intro_bars = min(STANDARD_INTRO_BARS, key=lambda x: abs(x - intro_end))
-        snap_error = abs(intro_end - intro_bars)
-        intro_conf = max(0.2, 1.0 - snap_error / 16.0)
+        intro_bars = min(std_bars, key=lambda x: abs(x - intro_end))
+        intro_conf = max(0.2, 1.0 - abs(intro_end - intro_bars) / 16.0)
 
     # Detect flow type
     flow_type = "H"
-    if len(bar_e) >= N_SEGMENTS:
-        seg_len = len(bar_e) // N_SEGMENTS
-        seg_energies = np.array([
-            float(np.mean(bar_e[i * seg_len: (i + 1) * seg_len]))
-            for i in range(N_SEGMENTS)
-        ])
-        seg_max = float(np.max(seg_energies))
-        seg_norm = seg_energies / seg_max if seg_max > 0 else seg_energies
+    if len(bar_e) >= n_seg:
+        seg_len = len(bar_e) // n_seg
+        seg_e = np.array([float(np.mean(bar_e[i * seg_len: (i + 1) * seg_len])) for i in range(n_seg)])
+        seg_max = float(np.max(seg_e))
+        seg_norm = seg_e / seg_max if seg_max > 0 else seg_e
 
         variance = float(np.var(seg_norm))
-        energy_diff = np.diff(seg_norm)
-        max_jump = float(np.max(np.abs(energy_diff))) if len(energy_diff) > 0 else 0.0
+        diffs = np.diff(seg_norm)
+        max_jump = float(np.max(np.abs(diffs))) if len(diffs) > 0 else 0.0
         trend = float(np.polyfit(np.arange(len(seg_norm)), seg_norm, 1)[0])
 
-        # Count plateaus
+        tol = s.get("plateau_tolerance", 0.08)
         n_plateaus = 1
         in_plateau = True
         for i in range(1, len(seg_norm)):
-            if abs(seg_norm[i] - seg_norm[i - 1]) <= 0.08:
+            if abs(seg_norm[i] - seg_norm[i - 1]) <= tol:
                 if not in_plateau:
                     n_plateaus += 1
                     in_plateau = True
             else:
                 in_plateau = False
 
-        if variance < FLOW_VARIANCE_LINEAR:
+        if variance < s.get("flow_variance_linear", 0.005):
             flow_type = "L"
-        elif variance < FLOW_VARIANCE_HYPNOTIC and max_jump < FLOW_JUMP_HYPNOTIC:
+        elif variance < s.get("flow_variance_hypnotic", 0.02) and max_jump < s.get("flow_jump_hypnotic", 0.15):
             flow_type = "H"
-        elif max_jump > FLOW_JUMP_DROP:
+        elif max_jump > s.get("flow_jump_drop", 0.40):
             flow_type = "D"
-        elif trend > FLOW_TREND_BUILDER and n_plateaus >= FLOW_PLATEAU_MIN:
+        elif trend > s.get("flow_trend_builder", 0.05) and n_plateaus >= s.get("flow_plateau_min", 2):
             flow_type = "B"
-        elif trend > FLOW_TREND_GROOVE:
+        elif trend > s.get("flow_trend_groove", 0.03):
             flow_type = "G"
 
-    formatted = f"{intro_bars}{flow_type}"
     return {
-        "structure": formatted, "intro_bars": intro_bars,
-        "flow_type": flow_type, "structure_confidence": intro_conf,
+        "structure": f"{intro_bars}{flow_type}",
+        "intro_bars": intro_bars,
+        "flow_type": flow_type,
+        "structure_confidence": intro_conf,
     }
 
 
 # ── Derive all ───────────────────────────────────────────────────────────────
 
 def derive_all(dsp: dict, raw_analysis: dict) -> dict:
-    """Recompute all derived analysis values from cached raw data.
-
-    Returns a tagger-compatible result dict.
-    """
+    """Recompute all derived values from cached raw data."""
     energy = derive_energy(dsp)
     vibe = derive_vibe(dsp)
     vocal = derive_vocal(raw_analysis)

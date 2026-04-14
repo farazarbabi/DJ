@@ -13,9 +13,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Bump this when any analyzer logic changes to invalidate all cached results.
-# Must match DERIVED_VERSIONS["tagger"] in universal_cache.py.
-ANALYZER_VERSION = "5.1"
+# Auto-computed from settings.toml — no manual bumping needed.
+def _get_analyzer_version() -> str:
+    try:
+        from .settings import derived_version
+        return derived_version()
+    except Exception:
+        return "5.1"
+
+
+ANALYZER_VERSION = _get_analyzer_version()
 
 
 @dataclass

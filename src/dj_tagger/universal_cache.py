@@ -55,15 +55,24 @@ RAW_LAYERS = frozenset({
     "analysis_essentia",  # registry essentia key analysis
 })
 
-# Derived layers: versioned, auto-recomputed from raw when stale.
-# Bump version when classification logic changes.
-DERIVED_VERSIONS: dict[str, str] = {
-    "tagger": "5.1",     # energy/vibe/vocal/structure classification logic
-}
+def _get_derived_versions() -> dict[str, str]:
+    """Get derived layer versions — auto-computed from settings.toml hash."""
+    try:
+        from .settings import derived_version
+        ver = derived_version()
+    except Exception:
+        ver = "5.1"  # fallback if settings.toml not found
+    return {"tagger": ver}
+
+
+# Derived layer versions — auto-recomputed from settings.toml hash.
+# No manual bumping needed: change any parameter in settings.toml and
+# the hash changes, invalidating the derived cache.
+DERIVED_VERSIONS: dict[str, str] = _get_derived_versions()
 
 # Combined for backward compat with code that checks LAYER_VERSIONS
 LAYER_VERSIONS: dict[str, str] = {
-    **{layer: "1" for layer in RAW_LAYERS},  # raw layers: version "1" always
+    **{layer: "1" for layer in RAW_LAYERS},
     **DERIVED_VERSIONS,
 }
 

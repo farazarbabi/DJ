@@ -71,7 +71,11 @@ Two cache files in `./cache/` (project root, survives `rm -rf outputs/`). All mo
 **`cache/derived_cache.pkl`** — versioned, auto-recomputed from raw when logic changes:
 - **tagger** — energy (E1-E5), vibe, vocal (V/NV), structure, confidences. Version-gated by `DERIVED_VERSIONS["tagger"]` in `universal_cache.py`.
 
-When derived logic changes (vibe formulas, energy thresholds, etc.): bump `DERIVED_VERSIONS["tagger"]` → next run auto-recomputes from cached raw data, no audio loading needed. Re-derivation functions live in `src/dj_tagger/derive.py`. Atomic writes (temp file + os.replace) prevent corruption.
+When derived logic changes: edit `settings.toml` → derived version hash auto-changes → next run recomputes from cached raw data, no audio loading needed. Re-derivation functions live in `src/dj_tagger/derive.py`. Atomic writes (temp file + os.replace) prevent corruption.
+
+## Settings
+
+All tunable parameters live in `settings.toml` at the project root. Sections: `[energy]`, `[vibe]`, `[vocal]`, `[structure]`, `[key]`, `[grouper]`, `[registry]`, `[paths]`. Change any value in the derived sections (energy/vibe/vocal/structure/key) and the derived cache auto-invalidates — no manual version bumping needed. The version is a SHA-256 hash of the settings content, computed by `src/dj_tagger/settings.py`.
 
 ## Key design decisions
 
