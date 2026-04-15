@@ -24,6 +24,28 @@ from ..store.csv_store import CsvStore
 logger = logging.getLogger(__name__)
 
 
+def _lookup_audio_features(ucache, isrc: str) -> dict[str, float] | None:
+    """Look up Songstats audio features from cache by ISRC.
+
+    Returns dict with float values for valence, instrumentalness, energy,
+    liveness, acousticness — or None if no Songstats data is cached.
+    """
+    if not isrc:
+        return None
+    data = ucache.get(f"isrc:{isrc}|songstats")
+    if not data or not isinstance(data, dict):
+        return None
+    features: dict[str, float] = {}
+    for key in ("valence", "instrumentalness", "energy", "liveness", "acousticness"):
+        val = data.get(key, "")
+        if val != "" and val is not None:
+            try:
+                features[key] = float(val)
+            except (ValueError, TypeError):
+                pass
+    return features if features else None
+
+
 def _analyze_full(path: str, use_essentia: bool) -> dict:
     """Run full tagger analysis + optional essentia key. Top-level for pickling."""
     from dj_tagger.pipeline import analyze_track, AnalysisConfig
@@ -258,7 +280,10 @@ def run_analysis(
             raw_analysis = ucache.get_track(filename, cache_dur, "raw_analysis")
             if dsp_data and isinstance(dsp_data, dict) and raw_analysis and isinstance(raw_analysis, dict):
                 from dj_tagger.derive import derive_all
-                derived = derive_all(dsp_data, raw_analysis)
+                isrc = track_by_id[track_id].isrc_canonical if track_id in track_by_id else ""
+                af = _lookup_audio_features(ucache, isrc)
+                derived = derive_all(dsp_data, raw_analysis, audio_features=af)
+                ucache.put_track(filename, cache_dur, "tagger", derived)
                 derived_features = _extract_tagger_features(derived)
                 # Merge: derived fills gaps, existing features take precedence
                 for k, v in derived_features.items():

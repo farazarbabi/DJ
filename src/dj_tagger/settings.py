@@ -22,6 +22,11 @@ _settings_path: str | None = None
 # A change in any of these triggers derived cache invalidation.
 _DERIVED_SECTIONS = ("energy", "vibe", "vocal", "structure", "key")
 
+# Bump this when derive.py or analyzer code changes in a way that
+# affects output even without settings.toml changes (e.g., new features,
+# formula restructuring).  Included in the derived version hash.
+_CODE_VERSION = "2"  # bumped: vibe.py rewritten to read from settings.toml + songstats integration
+
 
 def _find_settings_path() -> str:
     """Find settings.toml by walking up from cwd or this file's location."""
@@ -86,6 +91,7 @@ def derived_version() -> str:
         section_data = s.get(section, {})
         parts.append(f"{section}={_stable_repr(section_data)}")
     combined = "|".join(parts)
+    combined = f"v{_CODE_VERSION}|{combined}"
     return hashlib.sha256(combined.encode()).hexdigest()[:12]
 
 

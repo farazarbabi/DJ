@@ -39,15 +39,15 @@ thresholds = [0.25, 0.42, 0.58, 0.75]
 # Score = weight * clamp01((offset - raw) / scale)  for inverse correlation
 [vibe]
 
-# MEL (Melodic): baseline vibe for electronic music.
+# MEL (Melodic): must earn its score from features — no free baseline.
 # High chroma variance = strong melodic/harmonic content.
-# Most electronic tracks score well here; other vibes need strong evidence to override.
-mel_base = 0.38                 # base score — all tracks start here
-mel_chroma_scale = 0.065        # chroma_var / this. Lower = more tracks qualify as melodic.
-mel_chroma_weight = 0.25        # how much melodic evidence contributes
+# chroma_scale raised to 0.10 so only genuinely melodic tracks saturate.
+mel_base = 0.0                  # no free baseline — MEL competes on features like all vibes
+mel_chroma_scale = 0.10         # chroma_var / this. At 0.065 most electronic music saturated; 0.10 spreads it out.
+mel_chroma_weight = 0.55        # melodic content is the primary MEL driver
 mel_lowflat_center = 0.025      # flatness below this = clean (not noisy) production
 mel_lowflat_scale = 0.015       # sensitivity to flatness difference
-mel_lowflat_weight = 0.12       # how much clean production contributes
+mel_lowflat_weight = 0.20       # how much clean production contributes
 
 # DRK (Dark): aggressive rhythmic character + spectral noise + bass-heavy.
 # Typical: dark techno, industrial. High onset variance + noisy + bassy.
@@ -86,6 +86,40 @@ acid_centroid_var = [1.0, 0.75, 0.40] # centroid coefficient of variation. Only 
 # Typical: ambient techno, downtempo, breakdown-heavy tracks.
 atm_sparse = [0.50, 1.5, 1.0]  # (inverse) low onset density = few rhythmic events.
 atm_quiet  = [0.50, 0.20, 0.08] # (inverse) low loudness = quiet/ambient character.
+
+# Songstats audio feature contributions to vibe scores.
+# Only applied when Songstats/Spotify audio features are available for the track.
+# Tracks without API data fall back to DSP-only scoring (unaffected).
+# Format: [weight, threshold, scale] — same as DSP params above.
+# _scored: weight * clip01((value - threshold) / scale)     (positive correlation)
+# _scored_inv: weight * clip01((threshold - value) / scale)  (inverse correlation)
+[vibe.songstats]
+
+# DRK: low valence (dark mood) + high energy (intense)
+drk_valence = [0.15, 0.35, 0.25]     # (inverse) valence < 0.35 → dark mood
+drk_energy  = [0.10, 0.60, 0.30]     # energy > 0.60 → intense
+
+# HYPN: high instrumentalness (no vocals) + low valence (detached)
+hypn_instrumentalness = [0.15, 0.70, 0.25]  # instrumentalness > 0.70 → instrumental/looping
+hypn_valence          = [0.10, 0.40, 0.30]  # (inverse) valence < 0.40 → emotionally detached
+
+# TRIB: high instrumentalness + high energy (driving percussion)
+trib_instrumentalness = [0.10, 0.70, 0.25]  # instrumentalness > 0.70
+trib_energy           = [0.10, 0.60, 0.30]  # energy > 0.60 → driving
+
+# DEEP: low energy (subdued) + low valence (introspective)
+deep_energy  = [0.15, 0.40, 0.25]    # (inverse) energy < 0.40 → subdued
+deep_valence = [0.10, 0.35, 0.25]    # (inverse) valence < 0.35 → introspective
+
+# ATM: low energy + high acousticness (organic textures)
+atm_energy       = [0.15, 0.35, 0.25]  # (inverse) energy < 0.35 → calm
+atm_acousticness = [0.10, 0.40, 0.30]  # acousticness > 0.40 → organic
+
+# RAW: high liveness (live/organic character)
+raw_liveness = [0.15, 0.40, 0.30]    # liveness > 0.40 → live feel
+
+# MEL: high valence (positive/emotive — earned evidence, not free baseline)
+mel_valence = [0.15, 0.50, 0.30]     # valence > 0.50 → positive/melodic
 
 
 # ─── Vocal Detection ────────────────────────────────────────────────────────

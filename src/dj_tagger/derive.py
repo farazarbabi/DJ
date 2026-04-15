@@ -76,8 +76,13 @@ def derive_energy(dsp: dict) -> dict:
 
 # ── Vibe derivation ──────────────────────────────────────────────────────────
 
-def derive_vibe(dsp: dict) -> dict:
-    """Recompute vibe from cached DSP features."""
+def derive_vibe(dsp: dict, audio_features: dict[str, float] | None = None) -> dict:
+    """Recompute vibe from cached DSP features + optional API audio features.
+
+    audio_features: optional dict with keys like 'valence', 'instrumentalness',
+    'liveness', 'energy', 'acousticness' (0-1 scale). When provided, these
+    contribute additional scoring signals per vibe via [vibe.songstats] settings.
+    """
     s = get_section("vibe")
 
     rms = dsp.get("rms_mean", 0.0)
@@ -145,6 +150,54 @@ def derive_vibe(dsp: dict) -> dict:
         _scored_inv(onset_density, s.get("atm_sparse", [0.50, 1.5, 1.0]))
         + _scored_inv(rms, s.get("atm_quiet", [0.50, 0.20, 0.08]))
     )
+
+    # Add Songstats audio feature contributions (when available)
+    if audio_features:
+        ss = s.get("songstats", {})
+
+        af_valence = audio_features.get("valence")
+        af_energy = audio_features.get("energy")
+        af_instrumentalness = audio_features.get("instrumentalness")
+        af_liveness = audio_features.get("liveness")
+        af_acousticness = audio_features.get("acousticness")
+
+        # DRK: low valence + high energy
+        if af_valence is not None:
+            scores["DRK"] += _scored_inv(af_valence, ss.get("drk_valence", [0.15, 0.35, 0.25]))
+        if af_energy is not None:
+            scores["DRK"] += _scored(af_energy, ss.get("drk_energy", [0.10, 0.60, 0.30]))
+
+        # HYPN: high instrumentalness + low valence
+        if af_instrumentalness is not None:
+            scores["HYPN"] += _scored(af_instrumentalness, ss.get("hypn_instrumentalness", [0.15, 0.70, 0.25]))
+        if af_valence is not None:
+            scores["HYPN"] += _scored_inv(af_valence, ss.get("hypn_valence", [0.10, 0.40, 0.30]))
+
+        # TRIB: high instrumentalness + high energy
+        if af_instrumentalness is not None:
+            scores["TRIB"] += _scored(af_instrumentalness, ss.get("trib_instrumentalness", [0.10, 0.70, 0.25]))
+        if af_energy is not None:
+            scores["TRIB"] += _scored(af_energy, ss.get("trib_energy", [0.10, 0.60, 0.30]))
+
+        # DEEP: low energy + low valence
+        if af_energy is not None:
+            scores["DEEP"] += _scored_inv(af_energy, ss.get("deep_energy", [0.15, 0.40, 0.25]))
+        if af_valence is not None:
+            scores["DEEP"] += _scored_inv(af_valence, ss.get("deep_valence", [0.10, 0.35, 0.25]))
+
+        # ATM: low energy + high acousticness
+        if af_energy is not None:
+            scores["ATM"] += _scored_inv(af_energy, ss.get("atm_energy", [0.15, 0.35, 0.25]))
+        if af_acousticness is not None:
+            scores["ATM"] += _scored(af_acousticness, ss.get("atm_acousticness", [0.10, 0.40, 0.30]))
+
+        # RAW: high liveness
+        if af_liveness is not None:
+            scores["RAW"] += _scored(af_liveness, ss.get("raw_liveness", [0.15, 0.40, 0.30]))
+
+        # MEL: high valence (earned evidence)
+        if af_valence is not None:
+            scores["MEL"] += _scored(af_valence, ss.get("mel_valence", [0.15, 0.50, 0.30]))
 
     scores = {k: _clip01(v) for k, v in scores.items()}
     label = max(scores, key=scores.get)  # type: ignore[arg-type]
@@ -254,10 +307,10 @@ def derive_structure(raw_analysis: dict) -> dict:
 
 # ── Derive all ───────────────────────────────────────────────────────────────
 
-def derive_all(dsp: dict, raw_analysis: dict) -> dict:
+def derive_all(dsp: dict, raw_analysis: dict, audio_features: dict[str, float] | None = None) -> dict:
     """Recompute all derived values from cached raw data."""
     energy = derive_energy(dsp)
-    vibe = derive_vibe(dsp)
+    vibe = derive_vibe(dsp, audio_features=audio_features)
     vocal = derive_vocal(raw_analysis)
     structure = derive_structure(raw_analysis)
 
