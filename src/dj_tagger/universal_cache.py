@@ -1,10 +1,10 @@
-"""Universal cache: two files for all analysis, features, and API data.
+"""Cache manager: two files (raw + derived) for all analysis, features, and API data.
 
 Every module (dj-tagger, dj-grouper, dj-registry) reads and writes here.
 Once a track is analyzed, it is never re-analyzed — any module can reuse
 results from any other module.
 
-Cache files:
+Two cache files:
   - cache/raw_cache.pkl     — permanent raw data (DSP, CLAP, API results)
   - cache/derived_cache.pkl — versioned derived data (energy, vibe, vocal, structure)
 
@@ -131,10 +131,17 @@ class UniversalCache:
         return entry.data
 
     def put(self, key: str, data: object, version: str = "1", mtime: float = 0.0) -> None:
-        """Store data in cache. Skips write if entry already exists with same version."""
+        """Store data in cache. Overwrites if new data is richer or version differs."""
         existing = self._entries.get(key)
         if existing is not None and existing.version == version:
-            return  # already cached with same version, no change needed
+            # Same version — skip only if new data is not richer.
+            # A dict with more keys (e.g. full tagger result) should overwrite
+            # a partial entry (e.g. key-only result).
+            if isinstance(existing.data, dict) and isinstance(data, dict):
+                if len(data) <= len(existing.data):
+                    return
+            elif not isinstance(data, dict):
+                return
         self._entries[key] = CacheEntry(version=version, mtime=mtime, data=data)
         layer = self._layer_from_key(key)
         if layer in RAW_LAYERS:
@@ -163,10 +170,7 @@ class UniversalCache:
         layer: str,
         version: str | None = None,
     ) -> object | None:
-        """Look up track data.
-
-        Tries duration-keyed first. Falls back to name-only for backward
-        compat with entries written before duration was required.
+        """Look up track data by filename + duration + layer.
 
         Raw layers (dsp, clap, raw_analysis, etc.) are never version-checked
         — they are permanent. Derived layers auto-check against DERIVED_VERSIONS.
@@ -174,19 +178,8 @@ class UniversalCache:
         if version is None and layer not in RAW_LAYERS:
             version = DERIVED_VERSIONS.get(layer)
 
-        # Try with duration
-        if duration is not None and duration > 0:
-            key = self.track_key(filename, duration, layer)
-            result = self.get(key, version)
-            if result is not None:
-                return result
-
-        # Fall back to name-only (legacy entries)
-        key = self.track_key(filename, None, layer)
-        result = self.get(key, version)
-        if result is not None:
-            logger.debug("Cache hit on name-only key for %s|%s (legacy entry)", Path(filename).name, layer)
-        return result
+        key = self.track_key(filename, duration, layer)
+        return self.get(key, version)
 
     def put_track(
         self,
@@ -198,9 +191,6 @@ class UniversalCache:
         mtime: float = 0.0,
     ) -> None:
         """Store track data.
-
-        Writes only the duration-keyed entry when duration is available.
-        Falls back to name-only key only when duration is unknown.
 
         Auto-sets version: raw layers get "1" (permanent), derived layers
         get their version from DERIVED_VERSIONS.

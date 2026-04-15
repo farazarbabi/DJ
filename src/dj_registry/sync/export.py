@@ -52,9 +52,11 @@ OVERVIEW_COLUMNS = [
     "loudness",
     "speechiness",
     "valence",
-    # Rekordbox DJ data
-    "rekordbox_rating",
-    "rekordbox_play_count",
+    # Tagger analysis features
+    "tagger_energy",
+    "tagger_vibe",
+    "tagger_vocal",
+    "tagger_structure",
     # IDs
     "isrc",
     "spotify_id",
@@ -141,9 +143,11 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
                 "loudness": ss_obs.loudness if ss_obs else "",
                 "speechiness": ss_obs.speechiness if ss_obs else "",
                 "valence": ss_obs.valence if ss_obs else "",
-                # Rekordbox DJ data
-                "rekordbox_rating": rb_obs.rating if rb_obs else "",
-                "rekordbox_play_count": rb_obs.play_count if rb_obs else "",
+                # Tagger analysis features
+                "tagger_energy": t.tagger_energy,
+                "tagger_vibe": t.tagger_vibe,
+                "tagger_vocal": t.tagger_vocal,
+                "tagger_structure": t.tagger_structure,
                 # IDs
                 "isrc": t.isrc_canonical,
                 "spotify_id": ss_obs.spotify_id if ss_obs else "",
@@ -157,7 +161,18 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
 
 
 def generate_reports(store: CsvStore, reports_dir: str) -> None:
-    """Generate all reports including the overview."""
+    """Generate all reports including the overview.
+
+    Writes registry_overview.csv both in the registry dir and in the
+    top-level outputs/ dir for easy access.
+    """
     # Always generate the overview in the registry root
     output_dir = os.path.dirname(reports_dir) if reports_dir.endswith("reports") else reports_dir
-    generate_overview(store, output_dir)
+    overview_path = generate_overview(store, output_dir)
+
+    # Copy to top-level outputs/ for easy access
+    top_outputs = os.path.dirname(output_dir)
+    if top_outputs and top_outputs != output_dir:
+        import shutil
+        dest = os.path.join(top_outputs, "registry_overview.csv")
+        shutil.copy2(overview_path, dest)

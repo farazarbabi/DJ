@@ -1,7 +1,10 @@
-"""Local audio analysis adapter — wraps dj_tagger key analyzers.
+"""Local audio analysis adapter — runs the full tagger pipeline.
 
-Uses the cache (cache/raw_cache.pkl + cache/derived_cache.pkl) so files analyzed by
-any module (dj-tagger, dj-grouper, dj-registry) are never re-analyzed.
+Uses raw cache (cache/raw_cache.pkl) and derived cache (cache/derived_cache.pkl)
+so files analyzed by any module are never re-analyzed.
+
+Runs the full tagger analysis (energy, vibe, vocal, structure, key) and stores
+all results in the registry as SourceObservations + LogicalTrack tagger fields.
 """
 
 from __future__ import annotations
@@ -11,51 +14,37 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from dj_tagger.cache import (
-    get_cached,
-    load_cache,
-    put_cached,
-    save_cache,
-)
+from dj_tagger.universal_cache import quick_duration
 
 from ..config import RegistryConfig
 from ..key_utils import parse_any_key
-from ..models import SourceObservation, PayloadIndexEntry, now_iso
+from ..models import LogicalTrack, SourceObservation, PayloadIndexEntry, now_iso
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
 
-# Legacy path — load_cache/save_cache now delegate to universal cache
-TAGGER_CACHE_PATH = os.path.join("cache", "tagger_cache.pkl")
 
+def _analyze_full(path: str, use_essentia: bool) -> dict:
+    """Run full tagger analysis + optional essentia key. Top-level for pickling."""
+    from dj_tagger.pipeline import analyze_track, AnalysisConfig
 
-def _analyze_single(path: str, use_essentia: bool) -> dict:
-    """Run key analysis on a single file. Top-level for pickling."""
-    from dj_tagger.audio import load_audio_features
-    from dj_tagger.analyzers.key import analyze_key
+    result: dict = {"path": path, "tagger_result": None, "essentia": None}
 
-    result: dict = {"path": path, "librosa": None, "essentia": None}
-
+    # Full tagger pipeline (librosa key + energy + vibe + vocal + structure)
     try:
-        audio = load_audio_features(path)
+        config = AnalysisConfig(dry_run=True, overwrite=True, use_essentia=False)
+        result["tagger_result"] = analyze_track(path, config)
     except Exception as e:
         result["error"] = str(e)
         return result
 
-    # Librosa analysis (always)
-    try:
-        kr = analyze_key(audio, use_essentia=False)
-        result["librosa"] = {
-            "camelot": kr.camelot,
-            "key_name": kr.key_name,
-            "confidence": kr.confidence,
-        }
-    except Exception as e:
-        result["librosa_error"] = str(e)
-
-    # Essentia analysis (optional)
+    # Optional essentia key analysis (separate run)
     if use_essentia:
         try:
+            from dj_tagger.audio import load_audio_features
+            from dj_tagger.analyzers.key import analyze_key
+
+            audio = load_audio_features(path)
             kr = analyze_key(audio, use_essentia=True)
             result["essentia"] = {
                 "camelot": kr.camelot,
@@ -77,18 +66,120 @@ def _essentia_available() -> bool:
         return False
 
 
-def _extract_key_from_tagger_result(result: dict) -> dict | None:
-    """Extract key analysis data from a tagger cache result dict."""
+def _extract_tagger_features(result: dict) -> dict:
+    """Extract tagger features from a cache result dict.
+
+    Handles multiple cache entry formats (analyze_track, derive_all, grouper inline).
+    Returns a dict with normalized field names, or empty dict on failure.
+    """
+    features: dict = {}
+
+    # Energy
+    energy = result.get("energy")
+    if energy is not None:
+        features["energy"] = str(energy)
+
+    # Vibe
+    vibe = result.get("vibe")
+    if vibe:
+        features["vibe"] = vibe
+
+    # Vocal — handle both formats
+    vocal = result.get("vocal")
+    if vocal in ("V", "NV"):
+        features["vocal"] = vocal
+    else:
+        has_vocals = result.get("has_vocals")
+        if has_vocals is True:
+            features["vocal"] = "V"
+        elif has_vocals is False:
+            features["vocal"] = "NV"
+
+    # Structure
+    structure = result.get("structure")
+    if structure:
+        features["structure"] = structure
+
+    # BPM
+    bpm = result.get("bpm")
+    if bpm is not None:
+        features["bpm"] = str(round(float(bpm)))
+
+    # Key
     camelot = result.get("camelot")
-    key_name = result.get("key")
-    confidence = result.get("key_confidence", 0.0)
+    if camelot:
+        features["camelot"] = camelot
+        features["key_name"] = result.get("key", "")
+        features["key_confidence"] = result.get("key_confidence", 0.0)
+
+    # Vibe scores
+    vibe_scores = result.get("vibe_scores")
+    if vibe_scores and isinstance(vibe_scores, dict):
+        features["vibe_scores"] = json.dumps({k: round(v, 4) for k, v in vibe_scores.items()})
+
+    # Confidences
+    confidences = result.get("confidences")
+    if confidences and isinstance(confidences, dict):
+        features["confidences"] = json.dumps({k: round(v, 3) for k, v in confidences.items()})
+
+    return features
+
+
+def _apply_tagger_to_track(track: LogicalTrack, features: dict) -> None:
+    """Write tagger features onto a LogicalTrack."""
+    if "energy" in features:
+        track.tagger_energy = features["energy"]
+    if "vibe" in features:
+        track.tagger_vibe = features["vibe"]
+    if "vocal" in features:
+        track.tagger_vocal = features["vocal"]
+    if "structure" in features:
+        track.tagger_structure = features["structure"]
+    if "bpm" in features:
+        track.tagger_bpm = features["bpm"]
+    if "vibe_scores" in features:
+        track.tagger_vibe_scores = features["vibe_scores"]
+    if "confidences" in features:
+        track.tagger_confidences = features["confidences"]
+
+
+def _build_observation(
+    track_id: str,
+    file_id: str,
+    source_system: str,
+    features: dict,
+) -> SourceObservation | None:
+    """Build a SourceObservation from extracted features."""
+    camelot = features.get("camelot")
     if not camelot:
         return None
-    return {
-        "camelot": camelot,
-        "key_name": key_name or "",
-        "confidence": confidence if confidence else 0.0,
-    }
+
+    parsed = parse_any_key(camelot)
+    if not parsed:
+        return None
+
+    std, cam = parsed
+    obs = SourceObservation(
+        observation_id=f"OBS-{source_system.replace('analysis_', '')}-{file_id}",
+        track_id=track_id,
+        file_id=file_id,
+        source_system=source_system,
+        key_standard=std,
+        key_camelot=cam,
+        key_confidence=features.get("key_confidence", 0.0),
+        bpm=features.get("bpm", ""),
+        observed_at=now_iso(),
+    )
+
+    # Attach tagger fields to the observation
+    obs.tagger_energy = features.get("energy", "")
+    obs.tagger_vibe = features.get("vibe", "")
+    obs.tagger_vocal = features.get("vocal", "")
+    obs.tagger_structure = features.get("structure", "")
+    obs.tagger_vibe_scores = features.get("vibe_scores", "")
+    obs.tagger_confidences = features.get("confidences", "")
+
+    return obs
 
 
 def run_analysis(
@@ -97,14 +188,16 @@ def run_analysis(
     *,
     track_ids: list[str] | None = None,
     no_essentia: bool = False,
-) -> int:
-    """Run local key analysis on tracks.
+) -> dict:
+    """Run full tagger analysis on tracks (energy, vibe, vocal, structure, key).
 
-    Uses the universal cache (cache/raw_cache.pkl + cache/derived_cache.pkl).
-    Files already analyzed by any module are read from cache instantly.
+    Uses raw cache + derived cache. Files already analyzed by any module
+    are read from cache instantly — no audio loading needed.
     New analysis results are written back so all modules can reuse them.
 
-    Returns number of tracks processed.
+    Stores results as SourceObservations and writes tagger features to LogicalTrack.
+
+    Returns stats dict: {"total", "cached", "analyzed", "failed"}.
     """
     use_essentia = config.run_essentia and not no_essentia and _essentia_available()
     if config.run_essentia and not no_essentia and not _essentia_available():
@@ -114,6 +207,7 @@ def run_analysis(
     tracks = store.load_tracks()
 
     file_by_id = {f.file_id: f for f in files}
+    track_by_id = {t.track_id: t for t in tracks}
 
     candidates: list[tuple[str, str, str, float, float]] = []  # (track_id, file_id, path, mtime, duration)
     for t in tracks:
@@ -131,71 +225,114 @@ def run_analysis(
         candidates.append((t.track_id, frec.file_id, frec.path_abs, mtime, frec.audio_duration_sec))
 
     if not candidates:
-        logger.info("Analysis: all tracks cached")
-        return 0
+        logger.info("Analysis: no candidates to process")
+        return {"total": 0, "cached": 0, "analyzed": 0, "failed": 0}
 
-    # Load shared tagger cache
-    tagger_cache = load_cache(TAGGER_CACHE_PATH)
+    # Load shared caches
+    from dj_tagger.universal_cache import get_cache as get_ucache
+    ucache = get_ucache(os.path.join("cache", "raw_cache.pkl"))
 
-    # Split into cache hits and misses
-    cache_hits: list[tuple[str, str, str, dict]] = []
+    # Split into cache hits and misses.
+    # Uses universal cache directly (version-checked, no mtime check) so that
+    # entries survive tag write-back (which changes mtime but not audio content).
+    # Fallback: dsp + raw_analysis → derive_all.
+    cache_hits: list[tuple[str, str, str, dict]] = []  # (track_id, file_id, path, features)
     cache_misses: list[tuple[str, str, str, float, float]] = []
 
     for track_id, file_id, path, mtime, duration in candidates:
-        cached_result = get_cached(tagger_cache, path, mtime, duration=duration)
-        if cached_result:
-            key_data = _extract_key_from_tagger_result(cached_result)
-            if key_data:
-                cache_hits.append((track_id, file_id, path, key_data))
-                continue
-        cache_misses.append((track_id, file_id, path, mtime, duration))
+        filename = os.path.basename(path)
+        features: dict = {}
+
+        # Use mutagen duration for cache lookups — matches how tagger/grouper store entries.
+        # FileRecord.audio_duration_sec comes from soundfile which can differ slightly.
+        cache_dur = quick_duration(path) or duration
+
+        # Try tagger layer in universal cache (version-checked, no mtime check).
+        tagger_data = ucache.get_track(filename, cache_dur, "tagger")
+        if tagger_data and isinstance(tagger_data, dict):
+            features = _extract_tagger_features(tagger_data)
+
+        # Fill in missing tagger features from raw cache via derive_all
+        if not (features.get("energy") and features.get("vibe")):
+            dsp_data = ucache.get_track(filename, cache_dur, "dsp")
+            raw_analysis = ucache.get_track(filename, cache_dur, "raw_analysis")
+            if dsp_data and isinstance(dsp_data, dict) and raw_analysis and isinstance(raw_analysis, dict):
+                from dj_tagger.derive import derive_all
+                derived = derive_all(dsp_data, raw_analysis)
+                derived_features = _extract_tagger_features(derived)
+                # Merge: derived fills gaps, existing features take precedence
+                for k, v in derived_features.items():
+                    if k not in features or not features[k]:
+                        features[k] = v
+
+        has_key = bool(features.get("camelot"))
+        has_tagger = bool(features.get("energy") and features.get("vibe"))
+
+        if has_key and has_tagger:
+            cache_hits.append((track_id, file_id, path, features))
+        elif has_tagger:
+            # Have tagger features but no key — still a hit, key will be blank
+            cache_hits.append((track_id, file_id, path, features))
+        else:
+            cache_misses.append((track_id, file_id, path, mtime, duration))
 
     if cache_misses:
         logger.info("Analysis: %d tracks (%d cached, %d to analyze)", len(candidates), len(cache_hits), len(cache_misses))
     else:
         logger.info("Analysis: %d tracks (all cached)", len(candidates))
 
-    # Run analysis on cache misses
-    fresh_results: list[tuple[str, str, str, dict | None]] = []
+    # Run full analysis on cache misses
+    import time as _time
+    fresh_results: list[tuple[str, str, str, dict]] = []  # (track_id, file_id, path, raw_result)
     if cache_misses:
         paths_to_analyze = [path for _, _, path, _, _ in cache_misses]
+        n_total = len(paths_to_analyze)
+        t_analysis_start = _time.perf_counter()
 
         if config.analysis_workers <= 1:
-            raw_results = [_analyze_single(p, use_essentia) for p in paths_to_analyze]
+            raw_results = []
+            for i, p in enumerate(paths_to_analyze):
+                t0 = _time.perf_counter()
+                result = _analyze_full(p, use_essentia)
+                elapsed = _time.perf_counter() - t0
+                raw_results.append(result)
+                fname = os.path.basename(p)
+                logger.info("  [%d/%d] %s (%.0fs)", i + 1, n_total, fname, elapsed)
         else:
-            raw_results = [None] * len(cache_misses)
+            raw_results = [None] * n_total
+            done = 0
             with ProcessPoolExecutor(max_workers=config.analysis_workers) as pool:
                 futures = {
-                    pool.submit(_analyze_single, p, use_essentia): i
+                    pool.submit(_analyze_full, p, use_essentia): i
                     for i, p in enumerate(paths_to_analyze)
                 }
                 for future in as_completed(futures):
                     idx = futures[future]
+                    done += 1
                     try:
                         raw_results[idx] = future.result()
+                        fname = os.path.basename(paths_to_analyze[idx])
+                        logger.info("  [%d/%d] %s", done, n_total, fname)
                     except Exception as e:
                         raw_results[idx] = {"path": paths_to_analyze[idx], "error": str(e)}
+                        fname = os.path.basename(paths_to_analyze[idx])
+                        logger.info("  [%d/%d] %s FAILED", done, n_total, fname)
 
-        # Store new results in tagger cache
+        # Store results directly in universal cache with duration key.
+        # This ensures results survive across runs — no mtime dependency.
         for (track_id, file_id, path, mtime, duration), result in zip(cache_misses, raw_results):
-            if result and "error" not in result:
-                # Build a tagger-compatible result dict for the cache
-                lr = result.get("librosa")
-                if lr:
-                    tagger_result = {
-                        "camelot": lr["camelot"],
-                        "key": lr["key_name"],
-                        "key_confidence": lr["confidence"],
-                    }
-                    put_cached(tagger_cache, path, mtime, tagger_result, duration=duration)
+            if result and "error" not in result and result.get("tagger_result"):
+                tagger_result = result["tagger_result"]
+                store_dur = quick_duration(path) or duration
+                ucache.put_track(os.path.basename(path), store_dur, "tagger", tagger_result)
                 fresh_results.append((track_id, file_id, path, result))
             else:
                 err = result.get("error", "unknown") if result else "unknown"
                 logger.warning("Analysis failed for %s: %s", path, err)
 
-        save_cache(tagger_cache, TAGGER_CACHE_PATH)
+        ucache.save()
 
-    # Build observations from all results
+    # Build observations and update tracks
     raw_dir = os.path.join(config.raw_dir, "analysis")
     os.makedirs(raw_dir, exist_ok=True)
 
@@ -203,60 +340,48 @@ def run_analysis(
     new_payloads: list[PayloadIndexEntry] = []
     processed = 0
 
-    # Process cache hits (librosa only — tagger cache is librosa-based)
-    for track_id, file_id, path, key_data in cache_hits:
-        parsed = parse_any_key(key_data["camelot"])
-        if parsed:
-            std, cam = parsed
-            new_obs.append(SourceObservation(
-                observation_id=f"OBS-librosa-{file_id}",
-                track_id=track_id,
-                file_id=file_id,
-                source_system="analysis_librosa",
-                key_standard=std,
-                key_camelot=cam,
-                key_confidence=key_data["confidence"],
-                payload_ref=f"analysis-librosa-{file_id}",
-                observed_at=now_iso(),
-            ))
+    # Process cache hits
+    for track_id, file_id, path, features in cache_hits:
+        obs = _build_observation(track_id, file_id, "analysis_librosa", features)
+        if obs:
+            new_obs.append(obs)
+
+        # Update LogicalTrack with tagger features
+        track = track_by_id.get(track_id)
+        if track:
+            _apply_tagger_to_track(track, features)
+
         processed += 1
 
     # Process fresh results
     for track_id, file_id, path, result in fresh_results:
+        tagger_result = result["tagger_result"]
+        features = _extract_tagger_features(tagger_result)
+
+        # Save raw payload
         payload_path = os.path.join(raw_dir, f"{file_id}_analysis.json")
         with open(payload_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
+            json.dump(result, f, indent=2, default=str)
 
-        lr = result.get("librosa")
-        if lr:
-            payload_ref = f"analysis-librosa-{file_id}"
-            parsed = parse_any_key(lr["camelot"])
-            if parsed:
-                std, cam = parsed
-                new_obs.append(SourceObservation(
-                    observation_id=f"OBS-librosa-{file_id}",
-                    track_id=track_id,
-                    file_id=file_id,
-                    source_system="analysis_librosa",
-                    key_standard=std,
-                    key_camelot=cam,
-                    key_confidence=lr["confidence"],
-                    payload_ref=payload_ref,
-                    observed_at=now_iso(),
-                ))
-            new_payloads.append(PayloadIndexEntry(
-                payload_ref=payload_ref,
-                source_system="analysis_librosa",
-                source_type="json",
-                track_id=track_id,
-                file_id=file_id,
-                payload_path=os.path.relpath(payload_path, config.output_dir),
-                fetched_at=now_iso(),
-            ))
+        # Librosa observation (from full tagger result)
+        obs = _build_observation(track_id, file_id, "analysis_librosa", features)
+        if obs:
+            obs.payload_ref = f"analysis-librosa-{file_id}"
+            new_obs.append(obs)
 
+        new_payloads.append(PayloadIndexEntry(
+            payload_ref=f"analysis-librosa-{file_id}",
+            source_system="analysis_librosa",
+            source_type="json",
+            track_id=track_id,
+            file_id=file_id,
+            payload_path=os.path.relpath(payload_path, config.output_dir),
+            fetched_at=now_iso(),
+        ))
+
+        # Essentia observation (if available)
         er = result.get("essentia")
         if er:
-            payload_ref = f"analysis-essentia-{file_id}"
             parsed = parse_any_key(er["camelot"])
             if parsed:
                 std, cam = parsed
@@ -268,11 +393,11 @@ def run_analysis(
                     key_standard=std,
                     key_camelot=cam,
                     key_confidence=er["confidence"],
-                    payload_ref=payload_ref,
+                    payload_ref=f"analysis-essentia-{file_id}",
                     observed_at=now_iso(),
                 ))
             new_payloads.append(PayloadIndexEntry(
-                payload_ref=payload_ref,
+                payload_ref=f"analysis-essentia-{file_id}",
                 source_system="analysis_essentia",
                 source_type="json",
                 track_id=track_id,
@@ -281,11 +406,15 @@ def run_analysis(
                 fetched_at=now_iso(),
             ))
 
+        # Update LogicalTrack with tagger features
+        track = track_by_id.get(track_id)
+        if track:
+            _apply_tagger_to_track(track, features)
+
         processed += 1
 
-    # Save observations
+    # Save observations (replace old analysis obs to avoid duplicates)
     if new_obs:
-        # Remove old analysis observations first to avoid duplicates on re-run
         all_obs = store.load_observations()
         track_ids_processed = {o.track_id for o in new_obs}
         all_obs = [
@@ -300,5 +429,15 @@ def run_analysis(
         all_payloads.extend(new_payloads)
         store.save_payload_index(all_payloads)
 
-    logger.debug("Analysis done: %d processed (%d cached, %d fresh)", processed, len(cache_hits), len(fresh_results))
-    return processed
+    # Save tracks with tagger features
+    store.save_tracks(tracks)
+
+    n_failed = len(cache_misses) - len(fresh_results)
+    logger.info("Analysis: %d processed (%d cached, %d analyzed, %d failed)",
+                processed, len(cache_hits), len(fresh_results), n_failed)
+    return {
+        "total": processed,
+        "cached": len(cache_hits),
+        "analyzed": len(fresh_results),
+        "failed": n_failed,
+    }

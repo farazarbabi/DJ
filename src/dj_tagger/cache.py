@@ -1,8 +1,8 @@
 """Analysis result cache for dj-tagger.
 
-Delegates to the universal cache (cache/universal_cache.pkl).
-All analysis results are stored once and shared across all modules
-(dj-tagger, dj-grouper, dj-registry). Once analyzed, never re-analyzed.
+Delegates to raw cache (cache/raw_cache.pkl) and derived cache
+(cache/derived_cache.pkl). All analysis results are stored once and
+shared across all modules. Once analyzed, never re-analyzed.
 """
 
 from __future__ import annotations
@@ -36,11 +36,7 @@ TaggerCache = dict[str, TaggerCacheEntry]
 
 
 def cache_key(filepath: str, duration: float | None = None) -> str:
-    """Return the cache key for a file.
-
-    Uses filename + rounded duration for robust matching.
-    Falls back to filename-only if duration is not provided (backward compat).
-    """
+    """Return the cache key for a file: filename + rounded duration."""
     name = Path(filepath).name
     if duration is not None and duration > 0:
         return f"{name}|{duration:.1f}"
@@ -48,11 +44,11 @@ def cache_key(filepath: str, duration: float | None = None) -> str:
 
 
 def load_cache(path: str) -> TaggerCache:
-    """Load tagger cache. Now reads from the universal cache."""
+    """Load tagger cache from raw + derived cache files."""
     from .universal_cache import get_cache
 
     ucache = get_cache(_universal_path(path))
-    # Build a TaggerCache dict view from universal cache entries
+    # Build a TaggerCache dict view from cache entries
     result: TaggerCache = {}
     for key, entry in ucache._entries.items():
         if not key.endswith("|tagger"):
@@ -63,12 +59,12 @@ def load_cache(path: str) -> TaggerCache:
             version=entry.version,
             result=entry.data,
         )
-    logger.info("Loaded tagger layer from universal cache (%d entries)", len(result))
+    logger.info("Loaded tagger layer from derived cache (%d entries)", len(result))
     return result
 
 
 def save_cache(cache: TaggerCache, path: str) -> None:
-    """Save tagger cache. Now writes to the universal cache."""
+    """Save tagger cache to raw + derived cache files."""
     from .universal_cache import get_cache, DERIVED_VERSIONS
 
     ucache = get_cache(_universal_path(path))
@@ -85,20 +81,10 @@ def get_cached(
     mtime: float,
     duration: float | None = None,
 ) -> dict | None:
-    """Look up a cached result. Tries duration-keyed first, falls back to name-only."""
-    # Try new key format (filename|duration)
-    if duration is not None and duration > 0:
-        key = cache_key(filepath, duration)
-        entry = cache.get(key)
-        if entry and entry.version == ANALYZER_VERSION:
-            return entry.result
-
-    # Fall back to old key format (filename only) for backward compat
-    key = cache_key(filepath)
+    """Look up a cached result by filename + duration."""
+    key = cache_key(filepath, duration)
     entry = cache.get(key)
     if entry is None:
-        return None
-    if entry.mtime != mtime:
         return None
     if entry.version != ANALYZER_VERSION:
         return None
@@ -112,11 +98,7 @@ def put_cached(
     result: dict,
     duration: float | None = None,
 ) -> None:
-    """Store a result in cache.
-
-    Writes duration-keyed entry when duration is available.
-    Falls back to name-only key only when duration is unknown.
-    """
+    """Store a result in cache by filename + duration."""
     entry = TaggerCacheEntry(mtime=mtime, version=ANALYZER_VERSION, result=result)
     cache[cache_key(filepath, duration)] = entry
 

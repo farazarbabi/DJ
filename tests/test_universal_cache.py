@@ -69,12 +69,11 @@ def test_put_track_without_duration_writes_name_only(cache):
     assert cache.get_track("track.aiff", None, "dsp") == {"rms": 0.3}
 
 
-def test_get_track_falls_back_to_name_only(cache):
-    """get_track should fall back to name-only for legacy entries."""
-    # Simulate a legacy name-only entry
-    cache.put("track.aiff|dsp", {"rms": 0.3}, version=LAYER_VERSIONS["dsp"])
-    # Should be found via fallback even when duration is provided
+def test_get_track_requires_duration_match(cache):
+    """get_track should not find entries stored with a different duration."""
+    cache.put_track("track.aiff", 180.5, "dsp", {"rms": 0.3})
     assert cache.get_track("track.aiff", 180.5, "dsp") == {"rms": 0.3}
+    assert cache.get_track("track.aiff", 200.0, "dsp") is None
 
 
 def test_isrc_put_and_get(cache):

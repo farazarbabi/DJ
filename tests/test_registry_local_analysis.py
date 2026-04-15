@@ -9,7 +9,7 @@ from dj_registry.config import RegistryConfig
 from dj_registry.models import LogicalTrack, FileRecord
 from dj_registry.store.csv_store import CsvStore
 from dj_registry.adapters.local_analysis import run_analysis
-from dj_tagger.cache import load_cache, put_cached, save_cache, ANALYZER_VERSION
+from dj_tagger.universal_cache import get_cache, reset_cache
 
 
 def _make_wav(path: str, duration_sec: float = 2.0) -> None:
@@ -23,6 +23,10 @@ def _make_wav(path: str, duration_sec: float = 2.0) -> None:
 class TestRunAnalysis:
     def setup_method(self):
         self.config = RegistryConfig()
+        reset_cache()
+
+    def teardown_method(self):
+        reset_cache()
 
     def test_no_candidates(self, tmp_path):
         """No tracks with primary files -> 0 processed."""
@@ -32,25 +36,34 @@ class TestRunAnalysis:
         store.save_files([])
         store.save_observations([])
 
-        count = run_analysis(self.config, store, no_essentia=True)
-        assert count == 0
+        stats = run_analysis(self.config, store, no_essentia=True)
+        assert stats["total"] == 0
 
-    def test_cache_hit_creates_observation(self, tmp_path):
+    def test_cache_hit_creates_observation(self, tmp_path, monkeypatch):
         """A file with a tagger cache entry should create a librosa observation from cache."""
         wav_path = str(tmp_path / "track.wav")
         _make_wav(wav_path)
-        mtime = os.path.getmtime(wav_path)
         duration = 2.0
 
-        # Set up tagger cache with a known result
-        cache_path = str(tmp_path / "cache" / "tagger_cache.pkl")
-        tagger_cache = {}
-        put_cached(tagger_cache, wav_path, mtime, {
+        # chdir so relative cache path resolves to test dir
+        monkeypatch.chdir(tmp_path)
+        os.makedirs("cache", exist_ok=True)
+
+        # Set up universal cache with a known tagger result
+        ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+        ucache.put_track("track.wav", duration, "tagger", {
             "camelot": "8A",
             "key": "A minor",
             "key_confidence": 0.92,
-        }, duration=duration)
-        save_cache(tagger_cache, cache_path)
+            "energy": 3,
+            "vibe": "DRK",
+            "vocal": "NV",
+            "structure": "32H",
+            "bpm": 128.0,
+            "vibe_scores": {"DRK": 0.8, "HYPN": 0.1},
+            "confidences": {"energy": 0.9, "vibe": 0.7, "vocal": 0.8},
+        })
+        ucache.save()
 
         # Set up registry store
         self.config.output_dir = str(tmp_path / "registry")
@@ -67,16 +80,9 @@ class TestRunAnalysis:
         ])
         store.save_observations([])
 
-        # Monkey-patch the cache path
-        import dj_registry.adapters.local_analysis as la_mod
-        orig_cache_path = la_mod.TAGGER_CACHE_PATH
-        la_mod.TAGGER_CACHE_PATH = cache_path
-        try:
-            count = run_analysis(self.config, store, no_essentia=True)
-        finally:
-            la_mod.TAGGER_CACHE_PATH = orig_cache_path
+        stats = run_analysis(self.config, store, no_essentia=True)
 
-        assert count == 1
+        assert stats["total"] == 1
 
         obs = store.load_observations()
         librosa_obs = [o for o in obs if o.source_system == "analysis_librosa"]
@@ -85,14 +91,14 @@ class TestRunAnalysis:
         assert librosa_obs[0].key_standard == "A minor"
         assert librosa_obs[0].key_confidence == pytest.approx(0.92)
 
-    def test_cache_miss_runs_analysis(self, tmp_path):
+    def test_cache_miss_runs_analysis(self, tmp_path, monkeypatch):
         """A file not in tagger cache should be analyzed and create observations."""
         wav_path = str(tmp_path / "track.wav")
         _make_wav(wav_path, duration_sec=5.0)
 
-        # Empty tagger cache
-        cache_path = str(tmp_path / "cache" / "tagger_cache.pkl")
-        save_cache({}, cache_path)
+        monkeypatch.chdir(tmp_path)
+        os.makedirs("cache", exist_ok=True)
+        ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
 
         self.config.output_dir = str(tmp_path / "registry")
 
@@ -108,15 +114,9 @@ class TestRunAnalysis:
         ])
         store.save_observations([])
 
-        import dj_registry.adapters.local_analysis as la_mod
-        orig_cache_path = la_mod.TAGGER_CACHE_PATH
-        la_mod.TAGGER_CACHE_PATH = cache_path
-        try:
-            count = run_analysis(self.config, store, no_essentia=True)
-        finally:
-            la_mod.TAGGER_CACHE_PATH = orig_cache_path
+        stats = run_analysis(self.config, store, no_essentia=True)
 
-        assert count == 1
+        assert stats["total"] == 1
 
         obs = store.load_observations()
         librosa_obs = [o for o in obs if o.source_system == "analysis_librosa"]
@@ -124,17 +124,18 @@ class TestRunAnalysis:
         assert librosa_obs[0].key_camelot  # some key was detected
         assert librosa_obs[0].key_confidence > 0
 
-        # Verify result was written to tagger cache
-        updated_cache = load_cache(cache_path)
-        assert len(updated_cache) > 0
+        # Verify result was stored in universal cache
+        tagger_entries = [k for k in ucache._entries if k.endswith("|tagger")]
+        assert len(tagger_entries) > 0
 
-    def test_rerun_uses_cache(self, tmp_path):
+    def test_rerun_uses_cache(self, tmp_path, monkeypatch):
         """Running analysis twice should use cache on second run."""
         wav_path = str(tmp_path / "track.wav")
         _make_wav(wav_path, duration_sec=5.0)
 
-        cache_path = str(tmp_path / "cache" / "tagger_cache.pkl")
-        save_cache({}, cache_path)
+        monkeypatch.chdir(tmp_path)
+        os.makedirs("cache", exist_ok=True)
+        get_cache(os.path.join("cache", "raw_cache.pkl"))
 
         self.config.output_dir = str(tmp_path / "registry")
 
@@ -150,16 +151,12 @@ class TestRunAnalysis:
         ])
         store.save_observations([])
 
-        import dj_registry.adapters.local_analysis as la_mod
-        orig_cache_path = la_mod.TAGGER_CACHE_PATH
-        la_mod.TAGGER_CACHE_PATH = cache_path
-        try:
-            # First run — cache miss, actual analysis
-            count1 = run_analysis(self.config, store, no_essentia=True)
-            assert count1 == 1
+        # First run — cache miss, actual analysis
+        stats1 = run_analysis(self.config, store, no_essentia=True)
+        assert stats1["total"] == 1
+        assert stats1["analyzed"] == 1
 
-            # Second run — cache hit, no analysis needed
-            count2 = run_analysis(self.config, store, no_essentia=True)
-            assert count2 == 1
-        finally:
-            la_mod.TAGGER_CACHE_PATH = orig_cache_path
+        # Second run — cache hit, no analysis needed
+        stats2 = run_analysis(self.config, store, no_essentia=True)
+        assert stats2["total"] == 1
+        assert stats2["cached"] == 1
