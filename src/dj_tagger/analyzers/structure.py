@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import librosa
 import numpy as np
@@ -34,6 +34,7 @@ class StructureResult:
     intro_bars: int
     flow_type: str
     formatted: str
+    bar_energies: list[float] = field(default_factory=list)
     confidence: float = 1.0
 
 
@@ -149,4 +150,4 @@ def analyze_structure(track_audio: TrackAudio) -> StructureResult:
     formatted = f"{intro_bars}{flow_type}"
 
     logger.debug("Structure: %s (intro=%d bars, flow=%s, conf=%.2f)", formatted, intro_bars, flow_type, intro_conf)
-    return StructureResult(intro_bars=intro_bars, flow_type=flow_type, formatted=formatted, confidence=intro_conf)
+    return StructureResult(intro_bars=intro_bars, flow_type=flow_type, formatted=formatted, bar_energies=bar_e.tolist(), confidence=intro_conf)

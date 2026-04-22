@@ -46,16 +46,46 @@ def _lookup_audio_features(ucache, isrc: str) -> dict[str, float] | None:
     return features if features else None
 
 
-def _analyze_full(path: str, use_essentia: bool) -> dict:
+def _hydrate_tagger_result(result: dict, audio_features: dict[str, float] | None) -> dict:
+    """Attach cache-only metadata used to detect stale vibe results."""
+    from dj_tagger.tagger_cache import hydrate_tagger_result
+
+    return hydrate_tagger_result(result, audio_features)
+
+
+def _merge_rederived_tagger(existing: dict | None, derived: dict, audio_features: dict[str, float] | None) -> dict:
+    """Merge re-derived fields into the richest available tagger record."""
+    from dj_tagger.tagger_cache import merge_rederived_tagger
+
+    return merge_rederived_tagger(existing, derived, audio_features)
+
+
+def _analyze_full(path: str, use_essentia: bool, audio_features: dict[str, float] | None = None) -> dict:
     """Run full tagger analysis + optional essentia key. Top-level for pickling."""
-    from dj_tagger.pipeline import analyze_track, AnalysisConfig
+    from dj_tagger.audio import load_audio_features
+    from dj_tagger.raw_features import compute_tagger_artifacts
 
-    result: dict = {"path": path, "tagger_result": None, "essentia": None}
+    result: dict = {
+        "path": path,
+        "tagger_result": None,
+        "dsp": None,
+        "raw_analysis": None,
+        "section_dsp": None,
+        "essentia": None,
+    }
 
-    # Full tagger pipeline (librosa key + energy + vibe + vocal + structure)
+    # Canonical tagger pipeline: raw extraction + settings-driven derivation + key analysis
     try:
-        config = AnalysisConfig(dry_run=True, overwrite=True, use_essentia=False)
-        result["tagger_result"] = analyze_track(path, config)
+        audio = load_audio_features(path)
+        artifacts = compute_tagger_artifacts(
+            audio,
+            audio_features=audio_features,
+            use_essentia=False,
+        )
+        result["tagger_result"] = artifacts["tagger_result"]
+        result["dsp"] = artifacts["dsp"]
+        result["raw_analysis"] = artifacts["raw_analysis"]
+        result["section_dsp"] = artifacts["section_dsp"]
     except Exception as e:
         result["error"] = str(e)
         return result
@@ -63,10 +93,8 @@ def _analyze_full(path: str, use_essentia: bool) -> dict:
     # Optional essentia key analysis (separate run)
     if use_essentia:
         try:
-            from dj_tagger.audio import load_audio_features
             from dj_tagger.analyzers.key import analyze_key
 
-            audio = load_audio_features(path)
             kr = analyze_key(audio, use_essentia=True)
             result["essentia"] = {
                 "camelot": kr.camelot,
@@ -144,6 +172,18 @@ def _extract_tagger_features(result: dict) -> dict:
     if confidences and isinstance(confidences, dict):
         features["confidences"] = json.dumps({k: round(v, 3) for k, v in confidences.items()})
 
+    # Provenance signatures
+    for src_key, feature_key in [
+        ("_tagger_version", "tagger_version"),
+        ("_tagger_raw_sig", "tagger_raw_signature"),
+        ("_tagger_derived_sig", "tagger_derived_signature"),
+        ("_tagger_key_sig", "tagger_key_signature"),
+        ("_tagger_audio_features_sig", "tagger_audio_features_signature"),
+    ]:
+        value = result.get(src_key)
+        if value:
+            features[feature_key] = str(value)
+
     return features
 
 
@@ -163,6 +203,16 @@ def _apply_tagger_to_track(track: LogicalTrack, features: dict) -> None:
         track.tagger_vibe_scores = features["vibe_scores"]
     if "confidences" in features:
         track.tagger_confidences = features["confidences"]
+    if "tagger_version" in features:
+        track.tagger_version = features["tagger_version"]
+    if "tagger_raw_signature" in features:
+        track.tagger_raw_signature = features["tagger_raw_signature"]
+    if "tagger_derived_signature" in features:
+        track.tagger_derived_signature = features["tagger_derived_signature"]
+    if "tagger_key_signature" in features:
+        track.tagger_key_signature = features["tagger_key_signature"]
+    if "tagger_audio_features_signature" in features:
+        track.tagger_audio_features_signature = features["tagger_audio_features_signature"]
 
 
 def _build_observation(
@@ -252,6 +302,7 @@ def run_analysis(
 
     # Load shared caches
     from dj_tagger.universal_cache import get_cache as get_ucache
+    from dj_tagger.tagger_cache import key_signature_matches, tagger_metadata_matches
     ucache = get_ucache(os.path.join("cache", "raw_cache.pkl"))
 
     # Split into cache hits and misses.
@@ -264,27 +315,35 @@ def run_analysis(
     for track_id, file_id, path, mtime, duration in candidates:
         filename = os.path.basename(path)
         features: dict = {}
+        track = track_by_id.get(track_id)
 
         # Use mutagen duration for cache lookups — matches how tagger/grouper store entries.
         # FileRecord.audio_duration_sec comes from soundfile which can differ slightly.
         cache_dur = quick_duration(path) or duration
+        tagger_key = ucache.track_key(filename, cache_dur, "tagger")
+        any_tagger_entry = ucache._entries.get(tagger_key)
+        cached_tagger = any_tagger_entry.data if any_tagger_entry and isinstance(any_tagger_entry.data, dict) else None
+        audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
+        dsp_data = ucache.get_track(filename, cache_dur, "dsp")
+        raw_analysis = ucache.get_track(filename, cache_dur, "raw_analysis")
 
         # Try tagger layer in universal cache (version-checked, no mtime check).
         tagger_data = ucache.get_track(filename, cache_dur, "tagger")
-        if tagger_data and isinstance(tagger_data, dict):
+        if tagger_metadata_matches(tagger_data if isinstance(tagger_data, dict) else None, audio_features):
             features = _extract_tagger_features(tagger_data)
 
         # Fill in missing tagger features from raw cache via derive_all
         if not (features.get("energy") and features.get("vibe")):
-            dsp_data = ucache.get_track(filename, cache_dur, "dsp")
-            raw_analysis = ucache.get_track(filename, cache_dur, "raw_analysis")
-            if dsp_data and isinstance(dsp_data, dict) and raw_analysis and isinstance(raw_analysis, dict):
+            if (
+                dsp_data and isinstance(dsp_data, dict)
+                and raw_analysis and isinstance(raw_analysis, dict)
+                and key_signature_matches(cached_tagger)
+            ):
                 from dj_tagger.derive import derive_all
-                isrc = track_by_id[track_id].isrc_canonical if track_id in track_by_id else ""
-                af = _lookup_audio_features(ucache, isrc)
-                derived = derive_all(dsp_data, raw_analysis, audio_features=af)
-                ucache.put_track(filename, cache_dur, "tagger", derived)
-                derived_features = _extract_tagger_features(derived)
+                derived = derive_all(dsp_data, raw_analysis, audio_features=audio_features)
+                merged = _merge_rederived_tagger(cached_tagger, derived, audio_features)
+                ucache.put_track(filename, cache_dur, "tagger", merged)
+                derived_features = _extract_tagger_features(merged)
                 # Merge: derived fills gaps, existing features take precedence
                 for k, v in derived_features.items():
                     if k not in features or not features[k]:
@@ -312,13 +371,15 @@ def run_analysis(
     if cache_misses:
         paths_to_analyze = [path for _, _, path, _, _ in cache_misses]
         n_total = len(paths_to_analyze)
-        t_analysis_start = _time.perf_counter()
 
         if config.analysis_workers <= 1:
             raw_results = []
             for i, p in enumerate(paths_to_analyze):
                 t0 = _time.perf_counter()
-                result = _analyze_full(p, use_essentia)
+                track_id = cache_misses[i][0]
+                track = track_by_id.get(track_id)
+                audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
+                result = _analyze_full(p, use_essentia, audio_features)
                 elapsed = _time.perf_counter() - t0
                 raw_results.append(result)
                 fname = os.path.basename(p)
@@ -328,7 +389,15 @@ def run_analysis(
             done = 0
             with ProcessPoolExecutor(max_workers=config.analysis_workers) as pool:
                 futures = {
-                    pool.submit(_analyze_full, p, use_essentia): i
+                    pool.submit(
+                        _analyze_full,
+                        p,
+                        use_essentia,
+                        _lookup_audio_features(
+                            ucache,
+                            track_by_id.get(cache_misses[i][0]).isrc_canonical if track_by_id.get(cache_misses[i][0]) else "",
+                        ),
+                    ): i
                     for i, p in enumerate(paths_to_analyze)
                 }
                 for future in as_completed(futures):
@@ -345,16 +414,32 @@ def run_analysis(
 
         # Store results directly in universal cache with duration key.
         # This ensures results survive across runs — no mtime dependency.
+        # Saves tagger (derived) + dsp/raw_analysis/section_dsp (raw) so that
+        # future settings.toml changes can re-derive without re-analyzing audio.
         for (track_id, file_id, path, mtime, duration), result in zip(cache_misses, raw_results):
             if result and "error" not in result and result.get("tagger_result"):
-                tagger_result = result["tagger_result"]
+                track = track_by_id.get(track_id)
+                audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
+                tagger_result = _hydrate_tagger_result(result["tagger_result"], audio_features)
                 store_dur = quick_duration(path) or duration
-                ucache.put_track(os.path.basename(path), store_dur, "tagger", tagger_result)
+                fname = os.path.basename(path)
+                ucache.put_track(fname, store_dur, "tagger", tagger_result, mtime=mtime)
+                # Save raw layers so derive_all can re-derive on settings changes
+                if isinstance(result.get("dsp"), dict):
+                    ucache.put_track(fname, store_dur, "dsp", result["dsp"], mtime=mtime)
+                if isinstance(result.get("raw_analysis"), dict):
+                    ucache.put_track(fname, store_dur, "raw_analysis", result["raw_analysis"], mtime=mtime)
+                if isinstance(result.get("section_dsp"), dict):
+                    ucache.put_track(fname, store_dur, "section_dsp", result["section_dsp"], mtime=mtime)
+                result["tagger_result"] = tagger_result
                 fresh_results.append((track_id, file_id, path, result))
             else:
                 err = result.get("error", "unknown") if result else "unknown"
                 logger.warning("Analysis failed for %s: %s", path, err)
 
+        ucache.save()
+
+    if ucache.dirty:
         ucache.save()
 
     # Build observations and update tracks

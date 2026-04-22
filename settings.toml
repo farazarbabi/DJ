@@ -1,7 +1,9 @@
 # DJ Toolkit Settings
 # All tunable parameters in one place.
 # Change any value here → derived cache auto-invalidates → recomputes on next run.
-# Raw cache (DSP, CLAP, API data) is NEVER affected by these changes.
+# Relevant source-code changes also auto-invalidate through hashed signatures, so
+# you do not need to remember to bump a manual version string.
+# Raw cache (DSP, CLAP, API data) is only reused when the raw extractor signature matches.
 
 
 # ─── Energy Classification (E1-E5) ──────────────────────────────────────────
@@ -51,10 +53,11 @@ mel_lowflat_weight = 0.20       # how much clean production contributes
 
 # DRK (Dark): aggressive rhythmic character + spectral noise + bass-heavy.
 # Typical: dark techno, industrial. High onset variance + noisy + bassy.
-drk_onset_var = [0.25, 1.5, 2.0]     # irregular rhythmic pattern. Raise offset to require more irregularity.
-drk_flatness  = [0.30, 0.010, 0.030] # spectral noisiness. Higher flatness = noisier/rawer.
-drk_low_ratio = [0.25, 45, 25]       # bass presence. Higher low_ratio = more sub-bass.
-drk_flux      = [0.20, 2.0, 2.5]     # spectral change rate. Higher = more aggressive timbral movement.
+# Thresholds raised so generic electronic music doesn't score — only genuinely dark tracks.
+drk_onset_var = [0.25, 2.0, 2.0]     # irregular rhythmic pattern. Offset nudged up from 1.5.
+drk_flatness  = [0.30, 0.018, 0.030] # spectral noisiness. Offset nudged up from 0.010.
+drk_low_ratio = [0.25, 50, 25]       # bass presence. Offset nudged up from 45.
+drk_flux      = [0.20, 2.5, 2.5]     # spectral change rate. Offset nudged up from 2.0.
 
 # TRIB (Tribal): very high percussion-to-harmonic ratio with clean spectrum.
 # Typical: tribal house, afro-percussion-driven tracks.
@@ -96,8 +99,8 @@ atm_quiet  = [0.50, 0.20, 0.08] # (inverse) low loudness = quiet/ambient charact
 [vibe.songstats]
 
 # DRK: low valence (dark mood) + high energy (intense)
-drk_valence = [0.15, 0.35, 0.25]     # (inverse) valence < 0.35 → dark mood
-drk_energy  = [0.10, 0.60, 0.30]     # energy > 0.60 → intense
+drk_valence = [0.12, 0.30, 0.22]     # (inverse) valence < 0.30 → dark mood (slightly tightened)
+drk_energy  = [0.09, 0.65, 0.28]     # energy > 0.65 → intense (slightly raised threshold)
 
 # HYPN: high instrumentalness (no vocals) + low valence (detached)
 hypn_instrumentalness = [0.15, 0.70, 0.25]  # instrumentalness > 0.70 → instrumental/looping

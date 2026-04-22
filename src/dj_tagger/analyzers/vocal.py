@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class VocalResult:
     has_vocals: bool
     vocal_ratio: float
+    temporal_bonus: float = 0.0
     confidence: float = 1.0  # 0=uncertain, 1=confident
 
 
@@ -95,4 +96,4 @@ def analyze_vocal(track_audio: TrackAudio) -> VocalResult:
         "Vocal: %s (score=%.3f, fraction=%.3f, temporal=%.2f, conf=%.2f)",
         "V" if has_vocals else "NV", vocal_score, vocal_fraction, temporal_bonus, confidence,
     )
-    return VocalResult(has_vocals=has_vocals, vocal_ratio=vocal_fraction, confidence=confidence)
+    return VocalResult(has_vocals=has_vocals, vocal_ratio=vocal_fraction, temporal_bonus=temporal_bonus, confidence=confidence)
