@@ -83,14 +83,18 @@ def run_full_pipeline(
 
     if include_songstats:
         summary["isrcs_enriched"] = enrich_isrcs(store)
-        summary["songstats_fetched"] = ingest_songstats(
+        ss_stats = ingest_songstats(
             config, store, obs_cache=obs_cache, limit=songstats_limit
         )
+        summary["songstats_fetched"] = ss_stats["total"]
+        summary["songstats_cached"] = ss_stats["cached"]
     else:
         summary["isrcs_enriched"] = 0
         summary["songstats_fetched"] = 0
 
-    summary["tracks_analyzed"] = run_analysis(config, store, no_essentia=no_essentia)
+    analysis_stats = run_analysis(config, store, no_essentia=no_essentia)
+    summary["tracks_analyzed"] = analysis_stats["total"]
+    summary["tracks_analyzed_cached"] = analysis_stats["cached"]
 
     _enrich_observations(store)
     obs_cache.save()

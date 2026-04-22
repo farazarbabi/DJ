@@ -89,6 +89,42 @@ def _read_native_bpm(path: str) -> float | None:
     return None
 
 
+def _read_native_key(path: str) -> str | None:
+    """Read key from the file's native TKEY/InitialKey tag (Camelot notation).
+
+    Returns the Camelot key string (e.g. '9A') or None if not found.
+    """
+    try:
+        from mutagen import File
+        audio = File(path)
+        if audio is None or audio.tags is None:
+            return None
+
+        # ID3 (MP3, AIFF, WAV): TKEY frame
+        for key in ("TKEY", "TKEY:"):
+            if key in audio.tags:
+                val = str(audio.tags[key]).strip()
+                if val:
+                    logger.debug("Native key from %s: %s", key, val)
+                    return val
+
+        # Vorbis (FLAC): INITIALKEY tag
+        for key in ("INITIALKEY", "initialkey", "KEY", "key"):
+            if key in audio:
+                try:
+                    val = str(audio[key][0]).strip()
+                    if val:
+                        logger.debug("Native key from %s: %s", key, val)
+                        return val
+                except (IndexError, TypeError):
+                    pass
+
+    except Exception:
+        logger.debug("Could not read native key from %s", path, exc_info=True)
+
+    return None
+
+
 def load_audio_features(
     path: str | Path,
     max_duration: float | None = None,

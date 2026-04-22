@@ -124,6 +124,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Delete cached results and re-analyze from scratch",
     )
     parser.add_argument(
+        "--no-registry",
+        action="store_true",
+        help="Skip registry key/BPM resolution (use analysis values directly)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -180,6 +185,123 @@ def _progress_bar(done: int, total: int, width: int = 20) -> str:
     return f"[{bar}] {pct:>3}%"
 
 
+def _resolve_via_registry(
+    file_paths: list[str],
+    tagger_results: dict[str, dict],
+) -> dict[str, dict]:
+    """Run minimal registry pipeline to get canonical key/BPM.
+
+    Returns {abs_path: {"canonical_key_camelot": str, "canonical_bpm": str}} or
+    empty dict on failure.
+    """
+    try:
+        from dj_registry.adapters.file_scanner import scan_files
+        from dj_registry.adapters.local_analysis import (
+            _extract_tagger_features,
+            _apply_tagger_to_track,
+            _build_observation,
+        )
+        from dj_registry.config import RegistryConfig
+        from dj_registry.identity.matcher import link_files_to_tracks
+        from dj_registry.resolver.bpm_resolver import resolve_all_bpms
+        from dj_registry.resolver.key_resolver import resolve_all_keys
+        from dj_registry.store.csv_store import CsvStore
+        from dj_registry.store.obs_cache import ObsCache
+    except ImportError:
+        logger.warning("Registry not available (install with pip install -e '.[registry]')")
+        return {}
+
+    config = RegistryConfig()
+    # Derive library roots from file paths
+    roots = list({str(Path(p).parent) for p in file_paths})
+    config.library_roots = roots
+
+    store = CsvStore(config.output_dir)
+    obs_cache = ObsCache()
+
+    # Scan + link (ensures files and tracks exist in registry)
+    scan_files(config, store, obs_cache=obs_cache)
+    link_files_to_tracks(config, store)
+
+    # Ingest tagger results as observations
+    files = store.load_files()
+    tracks = store.load_tracks()
+    track_by_id = {t.track_id: t for t in tracks}
+    file_by_path = {}
+    for f in files:
+        file_by_path[f.path_abs] = f
+        # Also index by filename for matching
+        file_by_path[f.file_name] = f
+
+    all_obs = store.load_observations()
+    # Remove old analysis observations (will be replaced)
+    processed_track_ids = set()
+
+    for abs_path, result in tagger_results.items():
+        frec = file_by_path.get(abs_path) or file_by_path.get(Path(abs_path).name)
+        if not frec or not frec.track_id:
+            continue
+
+        features = _extract_tagger_features(result)
+        if not features:
+            continue
+
+        processed_track_ids.add(frec.track_id)
+
+        # Build observation
+        obs = _build_observation(frec.track_id, frec.file_id, "analysis_librosa", features)
+        if obs:
+            all_obs.append(obs)
+
+        # Update LogicalTrack with tagger features
+        track = track_by_id.get(frec.track_id)
+        if track:
+            _apply_tagger_to_track(track, features)
+
+    # Remove old analysis obs for tracks we just processed
+    all_obs = [
+        o for o in all_obs
+        if not (o.source_system.startswith("analysis_") and o.track_id in processed_track_ids)
+        or o in all_obs[-len(processed_track_ids):]  # keep the new ones
+    ]
+    # Simpler: rebuild without old analysis for processed tracks, then add new
+    kept = [
+        o for o in all_obs
+        if not (o.source_system.startswith("analysis_") and o.track_id in processed_track_ids)
+    ]
+    for abs_path, result in tagger_results.items():
+        frec = file_by_path.get(abs_path) or file_by_path.get(Path(abs_path).name)
+        if not frec or not frec.track_id:
+            continue
+        features = _extract_tagger_features(result)
+        obs = _build_observation(frec.track_id, frec.file_id, "analysis_librosa", features)
+        if obs:
+            kept.append(obs)
+    store.save_observations(kept)
+
+    store.save_tracks(tracks)
+    obs_cache.save()
+
+    # Resolve canonical key + BPM
+    resolve_all_keys(config, store, force=True)
+    resolve_all_bpms(config, store, force=True)
+
+    # Build result mapping: file path -> canonical values
+    tracks = store.load_tracks()
+    files = store.load_files()
+    track_by_id = {t.track_id: t for t in tracks}
+    canonical: dict[str, dict] = {}
+    for f in files:
+        track = track_by_id.get(f.track_id)
+        if track and f.path_abs in tagger_results:
+            canonical[f.path_abs] = {
+                "canonical_key_camelot": track.canonical_key_camelot,
+                "canonical_bpm": track.canonical_bpm,
+            }
+
+    return canonical
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the CLI."""
     parser = _build_parser()
@@ -224,9 +346,11 @@ def main(argv: list[str] | None = None) -> int:
     from .pipeline import analyze_track, AnalysisConfig
     from .cache import get_cached, put_cached, save_cache
     from .metadata import write_tag
+    from .formats import format_tag
 
-    config = AnalysisConfig(
-        dry_run=dry_run,
+    # Always analyze with dry_run=True — tags are written later after registry resolution
+    analysis_config = AnalysisConfig(
+        dry_run=True,
         overwrite=args.overwrite,
         use_essentia=args.use_essentia,
         verbose=args.verbose,
@@ -258,34 +382,44 @@ def main(argv: list[str] | None = None) -> int:
     else:
         misses = list(files)
 
-    # --- Process cache hits ---
+    # --- Phase 1: Collect results (analysis only, no tag writing) ---
     done_count = 0
+
+    # Process cache hits
     for fpath, result in hits:
         done_count += 1
         n_ok += 1
         n_cached += 1
-        # Update the file path in the result to match current location
         result = {**result, "file": str(fpath)}
-        if not dry_run:
-            try:
-                write_tag(str(fpath), result["tag"], dry_run=False)
-            except Exception:
-                logger.debug("Failed to write tag for cached %s", fpath, exc_info=True)
+
+        # Ensure tag field exists for display
+        if "tag" not in result:
+            has_voc = result.get("has_vocals")
+            if has_voc is None and result.get("vocal") in ("V", "NV"):
+                has_voc = result["vocal"] == "V"
+            bpm_val = result.get("bpm")
+            result["tag"] = format_tag(
+                energy=result.get("energy"),
+                camelot=result.get("camelot"),
+                bpm=round(bpm_val) if bpm_val is not None else None,
+                structure=result.get("structure"),
+                vibe=result.get("vibe"),
+                has_vocals=has_voc,
+            )
+
         results.append(result)
-        if args.json_output:
-            print(json.dumps(result))
-        elif not args.quiet:
+        if not args.quiet and not args.json_output:
             elapsed_total = _fmt_elapsed(time.perf_counter() - t_start)
             print(
                 f"{_progress_bar(done_count, total)} "
                 f"{fpath.name} -> {result['tag']}  [cached]  ({elapsed_total})"
             )
 
-    # --- Process cache misses ---
+    # Process cache misses
     new_results_count = 0
 
     def _handle_completed(fpath: Path, result: dict, elapsed: float | None = None) -> None:
-        nonlocal n_ok, n_cached, done_count, new_results_count
+        nonlocal n_ok, done_count, new_results_count
         done_count += 1
         n_ok += 1
         new_results_count += 1
@@ -302,30 +436,26 @@ def main(argv: list[str] | None = None) -> int:
                 pass
             if new_results_count % 20 == 0:
                 save_cache(cache, cache_path)
-        if args.json_output:
-            print(json.dumps(result))
-        elif not args.quiet:
+        if not args.quiet and not args.json_output:
             track_str = f"({_fmt_elapsed(elapsed)})" if elapsed is not None else ""
             elapsed_total = _fmt_elapsed(time.perf_counter() - t_start)
             print(
                 f"{_progress_bar(done_count, total)} "
-                f"{fpath.name} -> {result['tag']}  {track_str}  ({elapsed_total})"
+                f"{fpath.name} -> {result.get('tag', '??')}  {track_str}  ({elapsed_total})"
             )
 
     if args.workers == 1:
         for fpath in misses:
             t0 = time.perf_counter()
             try:
-                result = analyze_track(str(fpath), config)
+                result = analyze_track(str(fpath), analysis_config)
                 elapsed = time.perf_counter() - t0
                 _handle_completed(fpath, result, elapsed)
             except Exception as exc:
                 n_fail += 1
                 done_count += 1
                 elapsed = time.perf_counter() - t0
-                if args.json_output:
-                    print(json.dumps({"file": str(fpath), "error": str(exc)}))
-                elif not args.quiet:
+                if not args.quiet:
                     elapsed_total = _fmt_elapsed(time.perf_counter() - t_start)
                     print(
                         f"{_progress_bar(done_count, total)} "
@@ -336,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         futures = {}
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
             for fpath in misses:
-                fut = pool.submit(analyze_track, str(fpath), config)
+                fut = pool.submit(analyze_track, str(fpath), analysis_config)
                 futures[fut] = fpath
 
             for fut in as_completed(futures):
@@ -347,9 +477,7 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     n_fail += 1
                     done_count += 1
-                    if args.json_output:
-                        print(json.dumps({"file": str(fpath), "error": str(exc)}))
-                    elif not args.quiet:
+                    if not args.quiet:
                         elapsed_total = _fmt_elapsed(time.perf_counter() - t_start)
                         print(
                             f"{_progress_bar(done_count, total)} "
@@ -357,9 +485,63 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     logger.debug("Traceback for %s", fpath, exc_info=True)
 
-    # --- Save cache ---
+    # Save cache
     if use_cache and new_results_count > 0:
         save_cache(cache, cache_path)
+
+    # --- Phase 2: Registry resolution (canonical key/BPM) ---
+    canonical: dict[str, dict] = {}
+    if not args.no_registry and results:
+        if not args.quiet and not args.json_output:
+            print("\nResolving canonical key/BPM via registry...")
+        tagger_results = {r["file"]: r for r in results if "file" in r and "error" not in r}
+        canonical = _resolve_via_registry(list(tagger_results.keys()), tagger_results)
+        if canonical and not args.quiet and not args.json_output:
+            print(f"  {len(canonical)} tracks resolved")
+
+    # --- Phase 3: Rebuild tags with canonical values and write ---
+    for result in results:
+        fpath = result.get("file")
+        if not fpath:
+            continue
+
+        canon = canonical.get(fpath, {})
+        canon_key = canon.get("canonical_key_camelot")
+        canon_bpm = canon.get("canonical_bpm")
+
+        # Rebuild tag if we have canonical values
+        if canon_key or canon_bpm:
+            has_voc = result.get("has_vocals")
+            if has_voc is None and result.get("vocal") in ("V", "NV"):
+                has_voc = result["vocal"] == "V"
+            bpm_val = canon_bpm or result.get("bpm")
+            if bpm_val is not None:
+                try:
+                    bpm = int(round(float(bpm_val)))
+                except (ValueError, TypeError):
+                    bpm = None
+            else:
+                bpm = None
+            result["tag"] = format_tag(
+                energy=result.get("energy"),
+                camelot=canon_key or result.get("camelot"),
+                bpm=bpm,
+                structure=result.get("structure"),
+                vibe=result.get("vibe"),
+                has_vocals=has_voc,
+            )
+
+        # Write tag to file
+        if not dry_run and result.get("tag"):
+            try:
+                write_tag(fpath, result["tag"], dry_run=False)
+            except Exception:
+                logger.debug("Failed to write tag for %s", fpath, exc_info=True)
+
+    # Output JSON results (after tag rebuild)
+    if args.json_output:
+        for result in results:
+            print(json.dumps(result))
 
     # Summary
     if not args.quiet and not args.json_output:

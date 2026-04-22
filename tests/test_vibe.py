@@ -1,7 +1,11 @@
 """Tests for vibe classifier."""
 
+import pytest
+
+from dj_grouper.features.dsp import extract_dsp_features
 from dj_tagger.audio import load_audio_features
 from dj_tagger.analyzers.vibe import analyze_vibe
+from dj_tagger.derive import derive_vibe
 
 VALID_VIBES = {"HYPN", "DRK", "RAW", "DEEP", "TRIB", "MEL", "ACID", "ATM"}
 
@@ -36,3 +40,23 @@ def test_silence_atmospheric(silence):
     track = load_audio_features(silence)
     result = analyze_vibe(track)
     assert result.label in VALID_VIBES
+
+
+def test_vibe_analyzer_matches_canonical_derive(sine_440hz):
+    """Direct analysis and cached derivation must use the same vibe scoring path."""
+    track = load_audio_features(sine_440hz)
+    audio_features = {
+        "valence": 0.78,
+        "energy": 0.62,
+        "instrumentalness": 0.41,
+        "liveness": 0.18,
+        "acousticness": 0.07,
+    }
+
+    analyzed = analyze_vibe(track, audio_features=audio_features)
+    derived = derive_vibe(extract_dsp_features(track), audio_features=audio_features)
+
+    assert analyzed.label == derived["vibe"]
+    for vibe in VALID_VIBES:
+        assert analyzed.scores[vibe] == pytest.approx(derived["vibe_scores"][vibe], abs=1e-8)
+    assert analyzed.confidence == pytest.approx(derived["vibe_confidence"], abs=1e-8)

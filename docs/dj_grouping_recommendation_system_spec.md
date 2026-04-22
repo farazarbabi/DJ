@@ -1,128 +1,264 @@
-# DJ Track Grouping and Recommendation System
+# DJ Grouping and Recommendation System
+
+This document describes the current as-built grouping system.
+
+It does not describe the proposed future redesign. It describes what `dj-grouper` does today.
 
 ## Overview
 
-A local system that organizes a DJ music library into similarity-based groups and generates per-track recommendations. Built for a Windows/Rekordbox workflow targeting techno, minimal tech, deep house, and downtempo.
+`dj-grouper` builds library-level features from shared caches, clusters tracks into groups, and produces directional recommendations.
 
-Builds on `dj-tagger` (per-track audio analysis and tagging). Reads from `./files`, writes all output to `./outputs`.
+Default command:
 
-## Tag Format
-
-```
-E# | KEY | BPM | STRUCT | VIBE | VOC | GID
+```bash
+dj-grouper
 ```
 
-Example: `E3 | 9A | 126 | 64H | HYPN | NV | G017`
+Equivalent to:
 
-Only the main group ID is written into file metadata. Recommendations and detailed data live in CSV files under `./outputs`.
-
-## Feature Architecture
-
-Three layers, computed independently, combined via blended distance:
-
-1. **Tags** (~19 dims) — encoded from existing dj-tagger output: energy (ordinal), BPM (continuous, non-linear), key (circular sin/cos on Camelot wheel), structure (ordinal + one-hot), vibe (one-hot), vocal (binary)
-
-2. **DSP** (~45 dims raw, PCA-reduced to 18) — extracted from audio: onset density, beat strength, perc/harmonic ratio, spectral centroid/rolloff/flatness/bandwidth, MFCCs, RMS, low-freq ratio, energy trend, flux, chroma strength/variance, tonal stability. Z-score normalized, then PCA-reduced to 18 dims to prevent MFCC dominance.
-
-3. **CLAP** (optional, 64 dims after PCA) — perceptual audio embeddings via CLAP model, PCA-reduced
-
-## Distance
-
-```
-d = w_tags * d_tags + w_dsp * d_dsp + w_embed * d_embed
+```bash
+dj-grouper run
 ```
 
-Weights: 0.25 / 0.30 / 0.45 (with CLAP), 0.40 / 0.60 (without CLAP).
+## Inputs
 
-All tag sub-distances normalized to [0, 1] before weighting:
-- Energy: 0.30 (strongest differentiator)
-- Vibe: 0.25
-- BPM: 0.20 (non-linear: `d ** 1.5` to amplify genre-boundary gaps)
-- Key: 0.10 * vibe-conditional weight (MEL 0.8 down to RAW 0.1, +0.2 for vocals)
-- Flow type: 0.05
-- Intro bars: 0.05
-- Vocal: 0.05
+The grouper reads from:
 
-## Caching
+- the music library (`./files` by default)
+- the shared cache in `./cache/`
+- optional registry data in `./outputs/registry/registry_overview.csv`
+- optional feedback in `./outputs/feedback.csv`
 
-Feature extraction is cached in `outputs/features_cache.pkl`. Subsequent runs load from cache and skip extraction. Use `--force-extract` to regenerate. Clustering and recommendations always recompute.
+It no longer relies on a separate `features_cache.pkl` for analysis truth. The canonical source for extracted tagger data is the shared tagger/raw cache.
 
-## Clustering
+## Extraction Behavior
 
-1. Split by vocal presence (V / NV)
-2. Agglomerative clustering with `complete` linkage (conservative — won't merge unless all cross-pairs are close)
-3. Auto-threshold to target group sizes of 2–10
-4. Post-process: merge <2, bisect >20
-5. Assign stable group IDs (G001–G999)
-6. Compute medoid (most central real track) per group
+Current extraction logic is shared with tagger and registry:
 
-## Stable Mode
+```text
+load audio
+  -> compute_tagger_artifacts()
+  -> cache dsp/raw_analysis/section_dsp
+  -> hydrate tagger result
+  -> apply tagger result to TrackInfo
+```
 
-New tracks assigned to nearest existing medoid. If too distant (>0.8), a new group is created.
+Cache usage rules:
+
+- if a current tagger entry exists, use it
+- if raw layers are current but derived logic changed, re-derive without reloading audio
+- if a richer Songstats-aware tagger entry already exists, preserve it
+- if raw layers are stale or missing, extract fresh audio features
+
+## Feature Layers
+
+### 1. Tag Layer
+
+Built from `TrackInfo` and encoded into a compact numeric vector.
+
+Current dimensions:
+
+- energy: 1
+- BPM: 1
+- key sin/cos: 2
+- intro bars: 1
+- flow type: 5
+- vibe scores: 8
+- vocal: 1
+
+Total: `19` dimensions.
+
+Confidence values soften uncertain features toward neutral values instead of forcing hard one-hot decisions.
+
+### 2. DSP Layer
+
+Built from curated DSP features and section-aware DSP slices.
+
+Used for:
+
+- clustering distance
+- role inference
+- recommendation features such as groove compatibility and bass conflict risk
+
+### 3. CLAP Layer
+
+Optional.
+
+- extracted only when CLAP is installed and enabled
+- cached in the shared raw cache
+- PCA-reduced before use
+
+### 4. Registry Enrichment
+
+Optional enrichment from `registry_overview.csv`, currently used as an additional feature source when available.
+
+## Distance Model
+
+Main blended distance:
+
+```text
+d = w_tags * d_tags + w_dsp * d_dsp [+ w_embed * d_embed]
+```
+
+Current defaults from `GrouperConfig`:
+
+- with CLAP: `0.25 / 0.30 / 0.45`
+- without CLAP: `0.45 / 0.55`
+
+### Tag Distance
+
+Current tag sub-distance weighting in `src/dj_grouper/grouping/distance.py`:
+
+- energy: `0.25`
+- BPM: `0.30`
+- key: `0.10 * conditional key weight`
+- intro bars: `0.05`
+- flow type: `0.05`
+- vibe: `0.20`
+- vocal: `0.05`
+
+Notes:
+
+- energy distance is amplified with exponent `1.5`
+- BPM distance is amplified quadratically
+- key weight depends on vibe and gets a boost for vocal tracks
+
+### DSP Distance
+
+Uses Euclidean distance on L2-normalized DSP vectors.
+
+### CLAP Distance
+
+Uses cosine distance on embeddings.
+
+### Contrast Stretching
+
+The full pairwise matrix is stretched to `[0, 1]` using the observed `2nd` to `98th` percentile range.
+
+## Clustering Modes
+
+### `constrained` (default)
+
+Uses COP-KMedoids on a unified PCA-reduced feature space.
+
+Constraint tiers from `src/dj_grouper/grouping/constraints.py`:
+
+- Camelot distance `<= 1`: no constraint
+- Camelot distance `== 2`: relaxed cannot-link
+- Camelot distance `> 2`: hard cannot-link
+- BPM spread above `bpm_group_max_spread_pct`: hard cannot-link
+- feedback can create must-link or hard cannot-link pairs
+
+Assignment behavior:
+
+- first try clusters with no hard or relaxed violations
+- then allow relaxed violations as fallback
+- if no cluster works, create a new cluster
+
+### `agglomerative`
+
+Uses hierarchical clustering with:
+
+- average linkage
+- auto-threshold search against target group size
+- post-processing for over/under-sized groups
+- post-clustering validation for key, BPM, and energy spread
+
+## Current Hard Safety Rules
+
+As built today, the system enforces:
+
+- BPM group spread limit from `GrouperConfig.bpm_group_max_spread_pct`
+- energy group spread limit from `GrouperConfig.energy_group_max_spread`
+- key incompatibility splitting in agglomerative mode when Camelot distance exceeds `1`
+
+Important current behavior:
+
+- constrained mode still allows Camelot distance `2` as a relaxed fallback
+- unknown keys float without key constraints
+
+That is the current code behavior, even though future plans may tighten it.
 
 ## Recommendations
 
-Single similarity score per track pair:
+Recommendations are directional:
 
-```
-score = (1 - blended_distance) - key_penalty + structure_compatibility
-```
-
-Hard filters: BPM within 4%, same vocal class.
-
-Top 10 recommendations per track. Structure compatibility via flow type pairing matrix and intro bar matching.
-
-## Feedback
-
-Three types in `outputs/feedback.csv`:
-- **good_pair**: reduce pairwise distance by 30%
-- **bad_pair**: increase pairwise distance by 50%
-- **group_override**: force assignment to specific group
-
-## Output
-
-| Output | Location |
-|--------|----------|
-| Group assignments | `outputs/groups.csv` |
-| Recommendations | `outputs/recommendations.csv` |
-| Feature cache | `outputs/features_cache.pkl` |
-| Group folders | `outputs/Grouped/G001_E3HYP_126_64H/` |
-| Group playlists | `outputs/playlists/groups/*.m3u8` |
-| Rec playlists | `outputs/playlists/recommendations/*.m3u8` |
-
-Group folders contain hard-linked files (zero extra space on NTFS).
-
-## Folder Naming
-
-```
-G017_E3HYP_126_64H
+```text
+recommend_score(A, B) != recommend_score(B, A)
 ```
 
-Group ID + dominant energy + vibe abbreviation + median BPM + dominant structure.
+Current scoring combines:
 
-## CLI
+- blended similarity
+- soft BPM penalty with hard cutoff
+- vibe-weighted key penalty
+- structure compatibility
+- intro usability
+- bass conflict risk
+- groove compatibility
+- energy direction bonus
+- breakdown risk
 
-```bash
-# Full pipeline (loads from cache if available)
-dj-grouper --write-tags
+Current hard rejection:
 
-# Force re-extraction
-dj-grouper --write-tags --force-extract
+- BPM difference beyond `bpm_hard_cutoff_pct`
 
-# Step by step
-dj-grouper extract              # skips if cache exists
-dj-grouper extract --force      # regenerate cache
-dj-grouper cluster
-dj-grouper review
-dj-grouper apply --write-tags
-dj-grouper recommend
+## Outputs
 
-# Feedback
-dj-grouper feedback --good "track_a.aiff" "track_b.aiff"
-```
+Generated by `dj-grouper run`:
 
-All commands read from `./files` and write to `./outputs` by default.
+- `outputs/groups.csv`
+- `outputs/recommendations.csv`
+- `outputs/Grouped/`
+- `outputs/playlists/`
 
-## Review Mode
+Optional:
 
-Interactive text-based review before writing. Shows proposed groups with tracks, medoids, and descriptors. Supports move and merge overrides.
+- updated COMMENT tags containing group IDs
+
+## Current Defaults
+
+Key `GrouperConfig` defaults:
+
+- `clustering_method = "constrained"`
+- `target_group_size = (4, 12)`
+- `min_group_size = 2`
+- `max_group_size = 20`
+- `bpm_group_max_spread_pct = 0.07`
+- `energy_group_max_spread = 3`
+- `vocal_confidence_threshold = 0.5`
+- `clap_pca_dims = 32`
+- `n_recommendations = 10`
+
+## Role Inference
+
+The grouper also infers a coarse role per track:
+
+- `TOOL`
+- `DRIVER`
+- `PEAK`
+- `RESET`
+- `BREAKDOWN`
+- `BRIDGE`
+
+Roles are derived from the built feature bundle and exported into group outputs.
+
+## Current Limitations
+
+- grouping rules are not yet the proposed constraint-first redesign
+- constrained mode still has a relaxed key-distance fallback
+- cache keys are filename-plus-duration scoped
+- unknown keys currently float rather than receiving stricter fallback logic
+- the registry enrichment feature set is still relatively narrow
+
+## Immediate Tuning Surfaces
+
+For current behavior, the main places to tune are:
+
+- `settings.toml` for derived tagger outputs
+- `src/dj_grouper/config.py` for grouping and recommendation weights/thresholds
+- `src/dj_grouper/grouping/distance.py` for tag-layer math
+- `src/dj_grouper/grouping/constraints.py` for key/BPM admissibility rules
+- `src/dj_grouper/recommend/scoring.py` for directional recommendation behavior
+
+If those changes affect tagger-derived inputs, the shared cache signatures will invalidate the affected layers automatically.

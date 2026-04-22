@@ -202,5 +202,7 @@ def ingest_rekordbox(
         fetched_at=now_iso(),
     ))
 
-    logger.info("Rekordbox: %d tracks matched", matched)
+    xml_total = len(collection.findall("TRACK"))
+    unmatched = xml_total - matched
+    logger.info("Rekordbox: %d matched, %d unmatched (of %d XML tracks)", matched, unmatched, xml_total)
     return matched

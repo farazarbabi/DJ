@@ -114,83 +114,116 @@ def _fmt_elapsed(seconds: float) -> str:
 
 
 def _run_vibe_audit() -> int:
-    """Audit vibe score distributions from cached DSP + Songstats data."""
-    import numpy as np
+    """Audit canonical vibe output for the current registry and compare it to fresh derivation."""
+    return _run_vibe_audit_canonical()
 
-    from dj_tagger.derive import derive_vibe
-    from dj_tagger.universal_cache import get_cache
-
-    ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
-
-    # Collect all DSP entries and their songstats (if available)
-    tracks: list[tuple[str, dict, dict[str, float] | None]] = []  # (name, vibe_result, audio_features)
+    # Collect all DSP entries
+    dsp_entries: list[tuple[str, str, dict]] = []  # (key_prefix, name, dsp_data)
     for key, entry in ucache._entries.items():
         if not key.endswith("|dsp"):
             continue
         if not isinstance(entry.data, dict):
             continue
-        name = key.rsplit("|", 2)[0]
-        # Look up songstats by scanning for matching ISRC entries
-        # (we don't have the ISRC→filename mapping here, so try all songstats entries)
-        tracks.append((name, entry.data, None))
+        # key format: "filename|duration|dsp"
+        parts = key.rsplit("|", 1)  # ["filename|duration", "dsp"]
+        prefix = parts[0]  # "filename|duration"
+        name_parts = prefix.split("|")
+        name = name_parts[0] if name_parts else prefix
+        dsp_entries.append((prefix, name, entry.data))
 
-    # Try to load Songstats features via registry overview CSV
-    overview_path = os.path.join("outputs", "registry", "registry_overview.csv")
+    # Check tagger cache state for each DSP entry
+    n_tagger_hit = 0
+    n_tagger_stale = 0
+    n_tagger_miss = 0
+    cached_vibes: list[str] = []
+    for prefix, name, dsp in dsp_entries:
+        tagger_key = f"{prefix}|tagger"
+        tagger_entry = ucache._entries.get(tagger_key)
+        if tagger_entry is None:
+            n_tagger_miss += 1
+        elif tagger_entry.version != current_ver:
+            n_tagger_stale += 1
+        else:
+            n_tagger_hit += 1
+            if isinstance(tagger_entry.data, dict):
+                cached_vibes.append(tagger_entry.data.get("vibe", "?"))
+
+    print(f"Tagger cache: {n_tagger_hit} current, {n_tagger_stale} stale, {n_tagger_miss} missing")
+    if cached_vibes:
+        from collections import Counter as C
+        print(f"Cached tagger vibes: {dict(C(cached_vibes).most_common())}")
+
+    # Load Songstats features from raw cache (same path as pipeline)
+    # Build filename → ISRC mapping from registry, then look up songstats by ISRC
     ss_by_name: dict[str, dict[str, float]] = {}
-    if os.path.exists(overview_path):
-        import csv
-        with open(overview_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                fn = row.get("file_name", "")
-                if not fn:
-                    continue
-                af: dict[str, float] = {}
-                for ss_key, col in [
-                    ("valence", "ss_valence"), ("energy", "ss_energy"),
-                    ("instrumentalness", "ss_instrumentalness"),
-                    ("liveness", "ss_liveness"), ("acousticness", "ss_acousticness"),
-                ]:
-                    val = row.get(col, "")
-                    if val:
-                        try:
-                            af[ss_key] = float(val)
-                        except (ValueError, TypeError):
-                            pass
-                if af:
-                    ss_by_name[fn] = af
+    try:
+        from dj_registry.store.csv_store import CsvStore
+        store = CsvStore(os.path.join("outputs", "registry"))
+        tracks_list = store.load_tracks()
+        files_list = store.load_files()
+        file_by_id = {f.file_id: f for f in files_list}
+        for t in tracks_list:
+            if not t.isrc_canonical or not t.primary_file_id:
+                continue
+            frec = file_by_id.get(t.primary_file_id)
+            if not frec:
+                continue
+            data = ucache.get(f"isrc:{t.isrc_canonical}|songstats")
+            if not data or not isinstance(data, dict):
+                continue
+            af: dict[str, float] = {}
+            for feat_key in ("valence", "instrumentalness", "energy", "liveness", "acousticness"):
+                val = data.get(feat_key, "")
+                if val != "" and val is not None:
+                    try:
+                        af[feat_key] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+            if af:
+                ss_by_name[frec.file_name] = af
+    except Exception as e:
+        print(f"  (Songstats lookup failed: {e})")
 
-    # Run derive_vibe on each track
+    # Run derive_vibe on each track (fresh, from DSP)
     labels: list[str] = []
     all_scores: dict[str, list[float]] = {v: [] for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]}
-    near_misses: dict[str, int] = {v: 0 for v in all_scores}  # non-MEL vibes that lost to MEL by <0.10
+    near_misses: dict[str, int] = {v: 0 for v in all_scores}
     ss_count = 0
+    mismatches: list[tuple[str, str, str]] = []  # (name, cached_vibe, derived_vibe)
 
-    for name, dsp, _ in tracks:
+    for prefix, name, dsp in dsp_entries:
         af = ss_by_name.get(name)
         if af:
             ss_count += 1
         result = derive_vibe(dsp, audio_features=af)
-        labels.append(result["vibe"])
+        derived_label = result["vibe"]
+        labels.append(derived_label)
         for v, score in result["vibe_scores"].items():
             all_scores[v].append(score)
 
-        # Near-miss: non-MEL vibe scored within 0.10 of MEL but lost
+        # Check if cached tagger vibe matches
+        tagger_key = f"{prefix}|tagger"
+        tagger_entry = ucache._entries.get(tagger_key)
+        if tagger_entry and isinstance(tagger_entry.data, dict):
+            cached_label = tagger_entry.data.get("vibe", "")
+            if cached_label and cached_label != derived_label:
+                mismatches.append((name, cached_label, derived_label))
+
         if result["vibe"] == "MEL":
             mel_score = result["vibe_scores"]["MEL"]
             for v, score in result["vibe_scores"].items():
                 if v != "MEL" and mel_score - score < 0.10:
                     near_misses[v] += 1
 
-    if not tracks:
+    if not dsp_entries:
         print("No cached DSP entries found. Run 'dj run' first.")
         return 1
 
-    n = len(tracks)
+    n = len(dsp_entries)
     print(f"\nVibe Audit: {n} tracks ({ss_count} with Songstats data)\n")
 
-    # Label distribution
-    print("Label Distribution:")
+    # Label distribution (from fresh derive_vibe)
+    print("Label Distribution (fresh derive_vibe):")
     from collections import Counter
     counts = Counter(labels)
     for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
@@ -198,6 +231,14 @@ def _run_vibe_audit() -> int:
         pct = 100.0 * c / n
         bar = "#" * int(pct / 2)
         print(f"  {v:5s}  {c:4d}  ({pct:5.1f}%)  {bar}")
+
+    # Mismatches between cached tagger and fresh derive
+    if mismatches:
+        print(f"\nMismatches (cached tagger vs fresh derive): {len(mismatches)}")
+        for name, cached, derived in mismatches[:10]:
+            print(f"  {name}: cached={cached}, derive={derived}")
+        if len(mismatches) > 10:
+            print(f"  ... and {len(mismatches) - 10} more")
 
     # Score stats
     print("\nScore Statistics (mean / p25 / p50 / p75 / max):")
@@ -216,6 +257,136 @@ def _run_vibe_audit() -> int:
             c = near_misses[v]
             if c > 0:
                 print(f"  {v:5s}  {c:4d}  ({100.0 * c / mel_count:.1f}% of MEL tracks)")
+
+    return 0
+
+
+def _run_vibe_audit_canonical() -> int:
+    """Audit the same registry-backed vibe truth that `dj run` writes."""
+    from collections import Counter
+
+    import numpy as np
+
+    from dj_registry.adapters.local_analysis import _lookup_audio_features
+    from dj_registry.store.csv_store import CsvStore
+    from dj_tagger.derive import derive_vibe
+    from dj_tagger.universal_cache import DERIVED_VERSIONS, get_cache, quick_duration
+
+    ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+    store = CsvStore(os.path.join("outputs", "registry"))
+    tracks = store.load_tracks()
+    files = store.load_files()
+    file_by_id = {f.file_id: f for f in files}
+
+    registry_rows = []
+    for track in tracks:
+        if not track.primary_file_id:
+            continue
+        frec = file_by_id.get(track.primary_file_id)
+        if not frec:
+            continue
+        cache_dur = quick_duration(frec.path_abs) or frec.audio_duration_sec
+        registry_rows.append((track, frec, cache_dur))
+
+    if not registry_rows:
+        print("No registry tracks found. Run 'dj run' first.")
+        return 1
+
+    current_ver = DERIVED_VERSIONS.get("tagger", "?")
+    print(f"\nDerived version (current): {current_ver}")
+
+    canonical_labels: list[str] = []
+    cached_vibes: list[str] = []
+    all_scores: dict[str, list[float]] = {v: [] for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]}
+    near_misses: dict[str, int] = {v: 0 for v in all_scores}
+    mismatches: list[tuple[str, str, str]] = []
+    n_tagger_hit = 0
+    n_tagger_stale = 0
+    n_tagger_miss = 0
+    ss_count = 0
+    dsp_missing = 0
+
+    for track, frec, cache_dur in registry_rows:
+        filename = frec.file_name or os.path.basename(frec.path_abs)
+        tagger_key = ucache.track_key(filename, cache_dur, "tagger")
+        tagger_entry = ucache._entries.get(tagger_key)
+        if tagger_entry is None:
+            n_tagger_miss += 1
+        elif tagger_entry.version != current_ver:
+            n_tagger_stale += 1
+        else:
+            n_tagger_hit += 1
+            if isinstance(tagger_entry.data, dict):
+                cached_vibes.append(tagger_entry.data.get("vibe", "?"))
+
+        if track.tagger_vibe:
+            canonical_labels.append(track.tagger_vibe)
+
+        audio_features = _lookup_audio_features(ucache, track.isrc_canonical)
+        if audio_features:
+            ss_count += 1
+
+        dsp_data = ucache.get_track(filename, cache_dur, "dsp")
+        if not dsp_data or not isinstance(dsp_data, dict):
+            dsp_missing += 1
+            continue
+
+        result = derive_vibe(dsp_data, audio_features=audio_features)
+        derived_label = result["vibe"]
+        for vibe, score in result["vibe_scores"].items():
+            all_scores[vibe].append(score)
+
+        if track.tagger_vibe and track.tagger_vibe != derived_label:
+            mismatches.append((filename, track.tagger_vibe, derived_label))
+
+        if derived_label == "MEL":
+            mel_score = result["vibe_scores"]["MEL"]
+            for vibe, score in result["vibe_scores"].items():
+                if vibe != "MEL" and mel_score - score < 0.10:
+                    near_misses[vibe] += 1
+
+    print(f"Tagger cache: {n_tagger_hit} current, {n_tagger_stale} stale, {n_tagger_miss} missing")
+    if cached_vibes:
+        print(f"Cached tagger vibes: {dict(Counter(cached_vibes).most_common())}")
+
+    print(f"\nVibe Audit: {len(registry_rows)} registry tracks ({ss_count} with Songstats data)")
+    if dsp_missing:
+        print(f"DSP missing for {dsp_missing} track(s); drift checks skipped for those entries.")
+
+    print("\nCanonical Label Distribution (registry / dj run):")
+    counts = Counter(canonical_labels)
+    for vibe in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+        count = counts.get(vibe, 0)
+        pct = 100.0 * count / len(registry_rows)
+        bar = "#" * int(pct / 2)
+        print(f"  {vibe:5s}  {count:4d}  ({pct:5.1f}%)  {bar}")
+
+    if mismatches:
+        print(f"\nDrift Check (registry vs fresh derive): {len(mismatches)} mismatch(es)")
+        for name, cached, derived in mismatches[:10]:
+            print(f"  {name}: registry={cached}, derive={derived}")
+        if len(mismatches) > 10:
+            print(f"  ... and {len(mismatches) - 10} more")
+    else:
+        print("\nDrift Check (registry vs fresh derive): 0 mismatches")
+
+    print("\nScore Statistics (mean / p25 / p50 / p75 / max):")
+    for vibe in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+        arr = np.array(all_scores[vibe])
+        if len(arr) == 0:
+            continue
+        print(
+            f"  {vibe:5s}  {np.mean(arr):.3f} / {np.percentile(arr, 25):.3f} / "
+            f"{np.percentile(arr, 50):.3f} / {np.percentile(arr, 75):.3f} / {np.max(arr):.3f}"
+        )
+
+    mel_count = counts.get("MEL", 0)
+    if mel_count > 0:
+        print("\nNear-Misses (non-MEL vibes that lost to MEL by <0.10):")
+        for vibe in ["DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+            count = near_misses[vibe]
+            if count > 0:
+                print(f"  {vibe:5s}  {count:4d}  ({100.0 * count / mel_count:.1f}% of MEL tracks)")
 
     return 0
 

@@ -22,6 +22,7 @@ import logging
 import numpy as np
 
 from .settings import get, get_section
+from .vibe_scoring import vibe_metrics_from_dsp, score_vibe_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -83,126 +84,8 @@ def derive_vibe(dsp: dict, audio_features: dict[str, float] | None = None) -> di
     'liveness', 'energy', 'acousticness' (0-1 scale). When provided, these
     contribute additional scoring signals per vibe via [vibe.songstats] settings.
     """
-    s = get_section("vibe")
-
-    rms = dsp.get("rms_mean", 0.0)
-    centroid_mean = dsp.get("centroid_mean", 0.0)
-    centroid_var = dsp.get("centroid_var", 0.0)
-    flatness = dsp.get("flatness_mean", 0.0)
-    onset_density = dsp.get("onset_density", 0.0)
-    onset_variance = dsp.get("onset_variance", 0.0)
-    perc_ratio = dsp.get("perc_harmonic_ratio", 0.0)
-    low_ratio = dsp.get("low_freq_ratio", 0.0)
-    flux = dsp.get("flux_mean", 0.0)
-    chroma_var = dsp.get("chroma_var", 0.0)
-
-    # Normalize to coefficient of variation
-    onset_var = onset_variance / (onset_density ** 2 + 1e-8)
-    centroid_cv = centroid_var / (centroid_mean ** 2 + 1e-8)
-    spectral_stability = 1.0 - min(1.0, centroid_cv * 10)
-
-    scores: dict[str, float] = {}
-
-    # MEL
-    mel_base = s.get("mel_base", 0.38)
-    mel_chroma = min(1.0, chroma_var / s.get("mel_chroma_scale", 0.065))
-    mel_lowflat = _clip01((s.get("mel_lowflat_center", 0.025) - flatness) / s.get("mel_lowflat_scale", 0.015))
-    scores["MEL"] = mel_base + s.get("mel_chroma_weight", 0.25) * mel_chroma + s.get("mel_lowflat_weight", 0.12) * mel_lowflat
-
-    # DRK
-    scores["DRK"] = (
-        _scored(onset_var, s.get("drk_onset_var", [0.25, 1.5, 2.0]))
-        + _scored(flatness, s.get("drk_flatness", [0.30, 0.010, 0.030]))
-        + _scored(low_ratio, s.get("drk_low_ratio", [0.25, 45, 25]))
-        + _scored(flux, s.get("drk_flux", [0.20, 2.0, 2.5]))
-    )
-
-    # TRIB
-    scores["TRIB"] = (
-        _scored(perc_ratio, s.get("trib_perc_ratio", [0.70, 0.40, 0.15]))
-        + _scored_inv(flatness, s.get("trib_clean", [0.30, 0.03, 0.02]))
-    )
-
-    # RAW
-    scores["RAW"] = (
-        _scored_inv(low_ratio, s.get("raw_nobass", [0.45, 42, 12]))
-        + _scored_inv(onset_density, s.get("raw_sparse", [0.30, 1.5, 0.8]))
-        + _scored_inv(onset_var, s.get("raw_lowvar", [0.25, 1.5, 1.0]))
-    )
-
-    # HYPN
-    hypn_stab_w = s.get("hypn_stability_weight", 0.50)
-    hypn_onset = s.get("hypn_onset_var", [0.50, 2.0, 1.5])
-    scores["HYPN"] = hypn_stab_w * spectral_stability + _scored_inv(onset_var, hypn_onset)
-
-    # DEEP
-    scores["DEEP"] = (
-        _scored_inv(centroid_mean, s.get("deep_centroid", [0.35, 2000, 1000]))
-        + _scored_inv(rms, s.get("deep_rms", [0.35, 0.22, 0.10]))
-        + _scored(low_ratio, s.get("deep_low", [0.30, 50, 20]))
-    )
-
-    # ACID
-    scores["ACID"] = _scored(centroid_cv, s.get("acid_centroid_var", [1.0, 0.75, 0.40]))
-
-    # ATM
-    scores["ATM"] = (
-        _scored_inv(onset_density, s.get("atm_sparse", [0.50, 1.5, 1.0]))
-        + _scored_inv(rms, s.get("atm_quiet", [0.50, 0.20, 0.08]))
-    )
-
-    # Add Songstats audio feature contributions (when available)
-    if audio_features:
-        ss = s.get("songstats", {})
-
-        af_valence = audio_features.get("valence")
-        af_energy = audio_features.get("energy")
-        af_instrumentalness = audio_features.get("instrumentalness")
-        af_liveness = audio_features.get("liveness")
-        af_acousticness = audio_features.get("acousticness")
-
-        # DRK: low valence + high energy
-        if af_valence is not None:
-            scores["DRK"] += _scored_inv(af_valence, ss.get("drk_valence", [0.15, 0.35, 0.25]))
-        if af_energy is not None:
-            scores["DRK"] += _scored(af_energy, ss.get("drk_energy", [0.10, 0.60, 0.30]))
-
-        # HYPN: high instrumentalness + low valence
-        if af_instrumentalness is not None:
-            scores["HYPN"] += _scored(af_instrumentalness, ss.get("hypn_instrumentalness", [0.15, 0.70, 0.25]))
-        if af_valence is not None:
-            scores["HYPN"] += _scored_inv(af_valence, ss.get("hypn_valence", [0.10, 0.40, 0.30]))
-
-        # TRIB: high instrumentalness + high energy
-        if af_instrumentalness is not None:
-            scores["TRIB"] += _scored(af_instrumentalness, ss.get("trib_instrumentalness", [0.10, 0.70, 0.25]))
-        if af_energy is not None:
-            scores["TRIB"] += _scored(af_energy, ss.get("trib_energy", [0.10, 0.60, 0.30]))
-
-        # DEEP: low energy + low valence
-        if af_energy is not None:
-            scores["DEEP"] += _scored_inv(af_energy, ss.get("deep_energy", [0.15, 0.40, 0.25]))
-        if af_valence is not None:
-            scores["DEEP"] += _scored_inv(af_valence, ss.get("deep_valence", [0.10, 0.35, 0.25]))
-
-        # ATM: low energy + high acousticness
-        if af_energy is not None:
-            scores["ATM"] += _scored_inv(af_energy, ss.get("atm_energy", [0.15, 0.35, 0.25]))
-        if af_acousticness is not None:
-            scores["ATM"] += _scored(af_acousticness, ss.get("atm_acousticness", [0.10, 0.40, 0.30]))
-
-        # RAW: high liveness
-        if af_liveness is not None:
-            scores["RAW"] += _scored(af_liveness, ss.get("raw_liveness", [0.15, 0.40, 0.30]))
-
-        # MEL: high valence (earned evidence)
-        if af_valence is not None:
-            scores["MEL"] += _scored(af_valence, ss.get("mel_valence", [0.15, 0.50, 0.30]))
-
-    scores = {k: _clip01(v) for k, v in scores.items()}
-    label = max(scores, key=scores.get)  # type: ignore[arg-type]
-    sorted_scores = sorted(scores.values(), reverse=True)
-    confidence = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) >= 2 else 1.0
+    metrics = vibe_metrics_from_dsp(dsp)
+    label, scores, confidence = score_vibe_metrics(metrics, audio_features=audio_features)
 
     return {"vibe": label, "vibe_scores": scores, "vibe_confidence": confidence}
 
@@ -316,6 +199,7 @@ def derive_all(dsp: dict, raw_analysis: dict, audio_features: dict[str, float] |
 
     return {
         "energy": energy["energy"],
+        "bpm": round(float(raw_analysis.get("tempo", 0.0)), 1) if raw_analysis.get("tempo") is not None else None,
         "vibe": vibe["vibe"],
         "vocal": vocal["vocal"],
         "has_vocals": vocal["has_vocals"],

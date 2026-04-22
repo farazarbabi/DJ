@@ -36,6 +36,20 @@ class LogicalTrack:
     canonical_bpm_confidence: float = 0.0
     canonical_genre: str = ""
 
+    # Tagger analysis features (single-source, stored directly)
+    tagger_energy: str = ""
+    tagger_vibe: str = ""
+    tagger_vocal: str = ""
+    tagger_structure: str = ""
+    tagger_bpm: str = ""
+    tagger_vibe_scores: str = ""
+    tagger_confidences: str = ""
+    tagger_version: str = ""
+    tagger_raw_signature: str = ""
+    tagger_derived_signature: str = ""
+    tagger_key_signature: str = ""
+    tagger_audio_features_signature: str = ""
+
     # Resolution control
     needs_manual_review: bool = False
     review_reason: str = ""
@@ -142,6 +156,14 @@ class SourceObservation:
     speechiness: str = ""
     valence: str = ""
     time_signature: str = ""
+
+    # Tagger analysis features
+    tagger_energy: str = ""
+    tagger_vibe: str = ""
+    tagger_vocal: str = ""
+    tagger_structure: str = ""
+    tagger_vibe_scores: str = ""
+    tagger_confidences: str = ""
 
     # Platform IDs (for cross-referencing)
     spotify_id: str = ""

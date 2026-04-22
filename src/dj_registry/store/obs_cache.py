@@ -1,4 +1,4 @@
-"""Persistent observation cache — delegates to universal cache.
+"""Persistent observation cache — delegates to raw cache.
 
 All data is stored in cache/raw_cache.pkl alongside tagger and
 grouper data. This ensures one single cache file for everything.
@@ -15,7 +15,7 @@ from ..models import SourceObservation
 
 logger = logging.getLogger(__name__)
 
-# Legacy path — kept for backward-compatible loading. New data goes to universal cache.
+# Legacy path — kept for backward-compatible loading. New data goes to raw cache.
 CACHE_PATH = os.path.join("cache", "registry_cache.pkl")
 _CACHE_VERSION = "2"
 
@@ -35,7 +35,7 @@ def _make_key_by_isrc(isrc: str, source: str) -> str:
 class ObsCache:
     """Persistent pickle cache for source observations.
 
-    Delegates to the universal cache when available, falls back to
+    Delegates to the raw cache when available, falls back to
     its own pickle file for backward compatibility.
     """
 
@@ -47,7 +47,7 @@ class ObsCache:
         self._load()
 
     def _get_universal_cache(self):
-        """Lazy-load the universal cache."""
+        """Lazy-load the raw cache."""
         if self._ucache is None:
             try:
                 from dj_tagger.universal_cache import get_cache
@@ -73,7 +73,7 @@ class ObsCache:
         if self._entries:
             logger.debug("ObsCache loaded %d entries from cache", len(self._entries))
         ucache.save()
-        logger.debug("Migrated %d registry entries to universal cache", len(self._entries))
+        logger.debug("Migrated %d registry entries to raw cache", len(self._entries))
 
     def save(self) -> None:
         if not self._dirty:
@@ -92,7 +92,7 @@ class ObsCache:
         key = _make_key(filename, duration, source)
         data = self._entries.get(key)
         if data is None:
-            # Try universal cache
+            # Try raw cache
             ucache = self._get_universal_cache()
             if ucache is not None:
                 data = ucache.get(key)

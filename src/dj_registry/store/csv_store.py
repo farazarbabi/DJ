@@ -53,8 +53,18 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _sanitize_cell(value: str) -> str:
-    """Prevent CSV formula injection by prefixing dangerous values with a single quote."""
+    """Prevent CSV formula injection by prefixing dangerous values with a single quote.
+
+    Skips values that look numeric (e.g. negative numbers like -6.789).
+    """
     if value and value[0] in _FORMULA_PREFIXES:
+        # Don't escape negative numbers
+        if value[0] == "-":
+            try:
+                float(value)
+                return value
+            except ValueError:
+                pass
         return "'" + value
     return value
 

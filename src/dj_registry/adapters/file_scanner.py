@@ -242,5 +242,5 @@ def scan_files(
         all_payload.extend(new_payloads)
         store.save_payload_index(all_payload)
 
-    logger.info("Scan: %d files (%d new, %d updated, %d cached)", len(all_files), len(new_files), updated, skipped)
+    logger.info("Scan: %d files (%d new, %d updated, %d unchanged)", len(all_files), len(new_files), updated, skipped)
     return all_files

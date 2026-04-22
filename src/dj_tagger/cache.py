@@ -16,13 +16,10 @@ logger = logging.getLogger(__name__)
 # Auto-computed from settings.toml — no manual bumping needed.
 def _get_analyzer_version() -> str:
     try:
-        from .settings import derived_version
-        return derived_version()
+        from .settings import tagger_version
+        return tagger_version()
     except Exception:
         return "5.1"
-
-
-ANALYZER_VERSION = _get_analyzer_version()
 
 
 @dataclass
@@ -65,13 +62,14 @@ def load_cache(path: str) -> TaggerCache:
 
 def save_cache(cache: TaggerCache, path: str) -> None:
     """Save tagger cache to raw + derived cache files."""
-    from .universal_cache import get_cache, DERIVED_VERSIONS
+    from .tagger_cache import hydrate_tagger_result
+    from .universal_cache import get_cache
 
     ucache = get_cache(_universal_path(path))
-    derived_ver = DERIVED_VERSIONS.get("tagger", "5.1")
+    derived_ver = _get_analyzer_version()
     for base_key, entry in cache.items():
         ukey = f"{base_key}|tagger"
-        ucache.put(ukey, entry.result, version=derived_ver, mtime=entry.mtime)
+        ucache.put(ukey, hydrate_tagger_result(entry.result), version=derived_ver, mtime=entry.mtime)
     ucache.save()
 
 
@@ -86,7 +84,7 @@ def get_cached(
     entry = cache.get(key)
     if entry is None:
         return None
-    if entry.version != ANALYZER_VERSION:
+    if entry.version != _get_analyzer_version():
         return None
     return entry.result
 
@@ -99,7 +97,9 @@ def put_cached(
     duration: float | None = None,
 ) -> None:
     """Store a result in cache by filename + duration."""
-    entry = TaggerCacheEntry(mtime=mtime, version=ANALYZER_VERSION, result=result)
+    from .tagger_cache import hydrate_tagger_result
+
+    entry = TaggerCacheEntry(mtime=mtime, version=_get_analyzer_version(), result=hydrate_tagger_result(result))
     cache[cache_key(filepath, duration)] = entry
 
 

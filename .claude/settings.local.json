@@ -1,16 +1,35 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest tests/ -v)",
-      "Bash(dj-grouper run:*)",
-      "Bash(python3)",
-      "Bash(find:*)",
+      "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(python -c \"from dj_grouper.features.clap_embed import is_clap_available; print\\(is_clap_available\\(\\)\\)\")",
-      "Bash(python -c \"from dj_grouper.features.embeddings import is_clap_available; print\\(is_clap_available\\(\\)\\)\")",
-      "Bash(python -c \"import tqdm; print\\(tqdm.__version__\\)\")",
-      "Bash(pip show:*)",
-      "Bash(python -c ':*)"
+      "Bash(python -m pytest:*)",
+      "Bash(dj-grouper:*)",
+      "Bash(dj-tagger:*)",
+      "Bash(pip:*)",
+      "Bash(git:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(tasklist)",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch(domain:tunebat.com)",
+      "WebFetch(domain:songbpm.com)",
+      "WebFetch(domain:docs.songstats.com)",
+      "WebFetch(domain:songstats.com)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:rapidapi.com)",
+      "Bash(xargs grep:*)",
+      "Bash(dj-registry run:*)",
+      "Bash(dj:*)",
+      "Bash(PYTHONPATH=src python3:*)",
+      "Bash(awk '{print $9, \"\\(\" $5 \"\\)\"}')",
+      "Bash(awk '{print $9, $5}')",
+      "Bash(grep:*)"
     ]
   }
 }

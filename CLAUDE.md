@@ -2,174 +2,216 @@
 
 Project-specific guidance for AI-assisted development.
 
-## Project overview
+## Project Overview
 
-DJ music library toolkit with three modules: `dj-tagger` (per-track audio analysis), `dj-grouper` (grouping and recommendations), and `dj-registry` (metadata collection, enrichment, and canonical key resolution). Python 3.10+, Windows-first, Rekordbox-compatible.
+DJ music library toolkit with four CLIs:
 
-## Commands
+- `dj`: unified pipeline
+- `dj-tagger`: per-track analysis and tag writing
+- `dj-registry`: metadata registry, enrichment, canonical resolution
+- `dj-grouper`: grouping and recommendations
+
+The registry is the source of truth for canonical key/BPM and stored `tagger_*` outputs. The unified `dj run` command is the preferred end-to-end entry point.
+
+## Common Commands
 
 ```bash
 # Install
 pip install -e ".[dev,registry]"
 
-# Run tests (145 tests)
-pytest tests/ -v
+# Full test suite
+pytest -q
 
-# Tag tracks (defaults to ./files)
+# Unified pipeline
+dj run
+dj run "E:\\Music" -w 4
+dj run --no-grouping
+dj run --no-tags
+dj run --no-songstats
+dj run --force-extract
+dj vibe-audit
+
+# Lower-level tools
 dj-tagger --write-tags
-dj-tagger "E:\Music" --write-tags
+dj-tagger --write-tags --no-registry
 
-# Group and recommend (defaults to ./files)
-dj-grouper --write-tags
-dj-grouper "E:\Music" --write-tags
-
-# Force re-extract (after changing analyzers or adding tracks)
-dj-grouper --force-extract --write-tags
-
-# Registry: collect metadata from all sources and resolve canonical key
-dj-registry run ./files --rekordbox-xml ./files/export.xml --songstats --no-essentia -w 4
-
-# Registry: write resolved keys to file tags
-dj-registry run ./files --rekordbox-xml ./files/export.xml --songstats --no-essentia -w 4 --write-tags
-
-# Registry: individual steps
-dj-registry scan ./files
-dj-registry link
-dj-registry ingest-rekordbox --xml ./files/export.xml
-dj-registry enrich-isrcs
-dj-registry ingest-songstats
-dj-registry analyze --no-essentia -w 4
+dj-registry analyze -w 4
 dj-registry resolve --force
-dj-registry review-queue
-dj-registry import-reviews
-dj-registry sync-tags --write
 dj-registry export
+
+dj-grouper --dry-run
+dj-grouper --force-extract
 ```
 
-## Architecture
+## Current Tag Format
 
+Current COMMENT tag format:
+
+```text
+KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM[_GID]
 ```
-src/dj_tagger/     per-track audio analysis (librosa + mutagen)
-src/dj_grouper/    library-level grouping (scipy clustering + custom scoring)
-src/dj_registry/   metadata collection, enrichment, canonical key resolution
+
+Example:
+
+```text
+9A_E3_HYPN_64H_NV_126
 ```
 
-dj-grouper depends on dj-tagger. dj-registry depends on dj-tagger (reuses key analysis, metadata I/O, file scanning). All three are CLI entry points from one pyproject.toml.
+Legacy pipe-separated tags are still parsed, but new writes use the underscore format.
 
-## Cache architecture
+## Cache Architecture
 
-Two cache files in `./cache/` (project root, survives `rm -rf outputs/`). All modules (dj-tagger, dj-grouper, dj-registry) read and write to these. Key format: `{filename}|{duration}|{layer}`.
+Shared cache lives in `./cache/`.
 
-**`cache/raw_cache.pkl`** — permanent, never invalidated. Contains fixed algorithm outputs and external data:
-- **dsp** — ~45 DSP features (librosa)
-- **section_dsp** — per-section DSP features
-- **clap** — 512-dim CLAP audio embeddings
-- **raw_analysis** — intermediate features for re-derivation: bar_energies, vocal_ratio, vocal_temporal_bonus, onset_rate
-- **tag**, **rekordbox**, **songstats**, **spotify** — external data sources
-- **isrc:{isrc}|{source}** — ISRC-based API results
+Files:
 
-**`cache/derived_cache.pkl`** — versioned, auto-recomputed from raw when logic changes:
-- **tagger** — energy (E1-E5), vibe, vocal (V/NV), structure, confidences. Version-gated by `DERIVED_VERSIONS["tagger"]` in `universal_cache.py`.
+- `cache/raw_cache.pkl`
+- `cache/derived_cache.pkl`
 
-When derived logic changes: edit `settings.toml` → derived version hash auto-changes → next run recomputes from cached raw data, no audio loading needed. Re-derivation functions live in `src/dj_tagger/derive.py`. Atomic writes (temp file + os.replace) prevent corruption.
+Relevant raw layers:
 
-## Settings
+- `dsp`
+- `section_dsp`
+- `raw_analysis`
+- `clap`
+- source payload layers such as `tag`, `songstats`, `rekordbox`
 
-All tunable parameters live in `settings.toml` at the project root. Sections: `[energy]`, `[vibe]`, `[vocal]`, `[structure]`, `[key]`, `[grouper]`, `[registry]`, `[paths]`. Change any value in the derived sections (energy/vibe/vocal/structure/key) and the derived cache auto-invalidates — no manual version bumping needed. The version is a SHA-256 hash of the settings content, computed by `src/dj_tagger/settings.py`.
+Relevant derived layer:
 
-## Key design decisions
+- `tagger`
 
-- **Input**: `./files/` — **Output**: `./outputs/` — **Cache**: `./cache/`
-- **Tag format**: `KEY_ENERGY_VIBE_STRUCT_VOC_BPM` (e.g. `9A_E3_HYPN_64H_NV_126`) — backward-compatible parser handles legacy v1 (pipe-separated, no BPM) and v2 (pipe-separated with BPM)
-- **Metadata**: written to COMMENT field via mutagen — both generic (for DJ software) and tagged (desc="DJTAGGER" for self-detection)
-- **Group folders**: hard-linked files on NTFS (zero extra space), fall back to copy
-- **BPM detection**: reads native TBPM from file metadata (Rekordbox/DJ software) before falling back to librosa beat tracking
-- **Clustering**: agglomerative with average linkage, soft vocal partitioning (only split when vocal confidence > 0.5), post-clustering BPM validation (force-split groups with >6% BPM spread), post-clustering energy validation (force-split groups with >3 energy levels spread), target group size (4, 12)
-- **Recommendations**: directional scoring (A→B ≠ B→A), DJ usability features, soft BPM penalty (4-8%), no recommendation modes — single similarity ranking
-- **Vibe**: internally continuous scores (8 floats), exported as argmax label. Used as continuous in distance computation.
-- **CLAP**: on by default when installed (opt-out with `--no-clap`). The old `--use-clap` flag is removed.
-- **DSP scaling**: percentile-rank normalized to [0,1] across the library (not z-score). Distance: L2-normalized Euclidean (not cosine). Contrast stretching maps 2nd-98th percentile to [0,1] after blending.
-- **Confidence**: every analyzer reports confidence (0-1). Low-confidence tags are softened toward neutral in feature encoding.
+Important current behavior:
 
-## Registry design decisions
+- raw layers `dsp`, `section_dsp`, and `raw_analysis` are versioned
+- tagger results are hydrated with provenance metadata
+- registry and grouper reuse the same canonical tagger/raw cache
+- grouper preserves richer Songstats-aware tagger entries instead of downgrading them
 
-- **Single source of truth**: canonical registry, not file tags or any single external source
-- **Sources**: file tags, Rekordbox XML, Songstats API (via ISRC), Spotify (for ISRC enrichment), local librosa key analysis
-- **Key resolution**: weighted vote share confidence (all agree = 1.0, any disagreement < 1.0). Tie-breaking priority: tag > rekordbox > songstats > analysis. Majority always wins.
-- **Source weights** (for ranking): manual=1.00, analysis_essentia=0.85, analysis_librosa=0.80, rekordbox=0.75, tag=0.55, songstats=0.40
-- **ISRC enrichment**: Spotify search by artist+title with duration matching. Handles artist-in-title (MP3s), multi-artist, featuring syntax.
-- **Tag write-back**: writes canonical key to both TKEY field (for DJ software) and key portion of dj-tagger COMMENT tag
-- **CSV backend**: atomic writes via temp file + os.replace(). Observations rebuilt fresh from pkl cache every run.
-- **Output**: `outputs/registry/registry_overview.csv` — one row per track, all sources as columns, canonical key, confidence, review status
+## Automatic Cache Invalidation
 
-## Registry output files
+Do not rely on manual version bumps.
 
-- `outputs/registry/registry_overview.csv` — main review file (one row per track, all data)
-- `outputs/registry/tracks_master.csv` — canonical track registry
-- `outputs/registry/files_master.csv` — file inventory
-- `outputs/registry/source_observations.csv` — all observations (wide format, one row per source per track)
-- `outputs/registry/review_queue.csv` — unresolved tracks for manual review
-- `outputs/registry/raw/` — raw API payloads (Songstats JSON, Rekordbox XML, analysis results, tag snapshots)
+`src/dj_tagger/settings.py` computes:
 
-## Calibration-sensitive code
+- `raw_version()`
+- `derived_version()`
+- `key_version()`
+- `tagger_version()`
 
-These files contain tunable thresholds that directly affect output quality. Changes require re-tagging and re-extracting.
+These signatures hash both:
 
-- `src/dj_tagger/constants.py` — energy normalization ranges, structure detection, vocal detection thresholds
-- `src/dj_tagger/analyzers/vibe.py` — vibe scoring formulas (inline weights, not in constants)
-- `src/dj_grouper/config.py` — layer weights (0.45/0.55 without CLAP, 0.25/0.30/0.45 with CLAP), tag sub-weights (energy d^1.5), BPM filtering, clustering params, group size targets
-- `src/dj_grouper/grouping/distance.py` — tag distance sub-weights (inline), contrast stretching (2nd-98th percentile), DSP L2-normalized Euclidean
-- `src/dj_registry/config.py` — source weights, confidence threshold (0.70), margin threshold (0.20), agreement/cross-type boosts
-- `src/dj_registry/resolver/key_resolver.py` — tie-breaking priority, majority/score/tie-break resolution logic
+- relevant sections of `settings.toml`
+- relevant source files listed in:
+  - `_RAW_VERSION_FILES`
+  - `_DERIVED_VERSION_FILES`
+  - `_KEY_VERSION_FILES`
 
-## Common calibration issues
+Hydrated tagger records carry:
 
-- **All tracks same energy**: normalization ranges in constants.py are too wide for the music genre. Tighten (min, range) values.
-- **Vibe all MEL**: chroma_strength is high for any produced music. MEL needs stricter melodic movement (chroma_var) threshold.
-- **HYPN missing trance**: HYPN must not penalize loud tracks. Trance is hypnotic AND loud.
-- **Bad groupings by BPM**: check bpm_group_max_spread_pct, BPM tag weight in distance.py, and BPM normalization range in builder.py.
-- **Groups too large/homogeneous**: lower target_group_size, switch to complete linkage, or increase tag layer weight.
-- **Groups too fragmented**: raise target_group_size, lower BPM spread threshold, increase DSP weight.
-- **Registry key conflicts**: adjust source_weights in RegistryConfig. Check registry_overview.csv to compare sources.
+- `_tagger_version`
+- `_tagger_raw_sig`
+- `_tagger_derived_sig`
+- `_tagger_key_sig`
+- `_tagger_audio_features_sig`
 
-## Testing
+If you add a brand-new Python file that affects tagger computation, add it to the appropriate signature list. Otherwise changing that file later will not invalidate cache.
 
-- 145 tests total: 85 tagger/grouper + 60 registry
-- Tests use synthetic audio (numpy-generated WAVs via soundfile) — no real music files needed
-- `conftest.py` provides fixtures: sine waves, noise, silence, chords, etc.
-- Tag format tests cover current v3 (underscore-separated) and legacy v1/v2 (pipe-separated) parsing
-- Distance/scoring tests use `_make_track()` helper that builds TrackFeatures from parameters
-- TrackFeatures DSP vector is 21 dimensions (10 curated spectral/rhythmic + 5 MFCCs + 6 tonnetz)
-- Registry tests cover key normalization, CSV round-trips, text normalization, resolver scoring
+## Safe Tuning Workflow
 
-## File conventions
+For tagger tuning:
 
-- Type hints throughout
-- Structured logging (logger per module)
-- Dataclasses for results and config
-- Constants centralized where possible, inline where formula-specific
-- No emojis in code or output
-- Git: runtime data (outputs/, files/, cache/, *.pkl, *.csv, *.m3u8) in .gitignore
+```bash
+dj run --no-grouping --no-tags
+dj vibe-audit
+```
 
-## When changing analyzers
+Then inspect:
 
-1. Update the analyzer code
-2. Bump `ANALYZER_VERSION` in `src/dj_tagger/cache.py` (invalidates tagger cache)
-3. Run `pytest tests/ -v` to verify
-4. Re-tag: `dj-tagger --write-tags --overwrite`
-5. Re-extract: `dj-grouper --force-extract --dry-run` to preview
-6. Check grouping quality before writing: look at group folder names and sizes
+- `outputs/registry/registry_overview.csv`
+- tagger signature columns in the overview
+- drift output from `dj vibe-audit`
 
-## When changing distance/scoring
+Expected behavior:
 
-1. Update distance.py or scoring.py
-2. Run tests
-3. No need to re-extract — just re-run: `dj-grouper --dry-run`
-4. Cache is reused; only clustering/recommendations recompute
+- settings or derived scorer changes re-derive from raw cache
+- raw extraction changes invalidate raw feature layers automatically
+- Songstats input changes refresh affected tagger entries automatically
 
-## When changing registry resolution
+Manual cache clearing is now mainly for debugging:
 
-1. Update resolver/key_resolver.py or config.py source_weights
-2. Run `pytest tests/test_registry_resolver.py -v`
-3. Re-run: `dj-registry resolve --force` (no re-scanning or API calls needed)
-4. Check `outputs/registry/registry_overview.csv` for results
+```bash
+dj-tagger --clear-cache
+dj-grouper --force-extract
+```
+
+## Key Design Notes
+
+- tagger canonical pipeline runs through `compute_tagger_artifacts()` in `src/dj_tagger/raw_features.py`
+- registry analysis stores full `tagger_*` values on `LogicalTrack`
+- `registry_overview.csv` exports tagger values plus provenance columns
+- `dj vibe-audit` audits the same registry-backed vibe truth written by `dj run`
+- current grouping defaults to constrained clustering, not the future redesign
+
+## Current Grouping Behavior
+
+As built today:
+
+- default algorithm: `constrained`
+- fallback algorithm: `agglomerative`
+- same key and direct Camelot neighbors are allowed
+- Camelot distance `2` is currently a relaxed fallback in constrained clustering
+- BPM spread above `bpm_group_max_spread_pct` is a hard grouping constraint
+- agglomerative mode applies post-clustering key/BPM/energy validation
+
+Do not document the proposed redesign as if it already exists.
+
+## Calibration-Sensitive Files
+
+### Tagger and cache behavior
+
+- `settings.toml`
+- `src/dj_tagger/settings.py`
+- `src/dj_tagger/raw_features.py`
+- `src/dj_tagger/derive.py`
+- `src/dj_tagger/vibe_scoring.py`
+- `src/dj_tagger/tagger_cache.py`
+- `src/dj_tagger/universal_cache.py`
+
+### Grouping and recommendation behavior
+
+- `src/dj_grouper/config.py`
+- `src/dj_grouper/grouping/constraints.py`
+- `src/dj_grouper/grouping/distance.py`
+- `src/dj_grouper/recommend/scoring.py`
+
+### Registry resolution behavior
+
+- `src/dj_registry/config.py`
+- `src/dj_registry/resolver/key_resolver.py`
+- `src/dj_registry/adapters/local_analysis.py`
+- `src/dj_registry/sync/export.py`
+
+## When Changing Tagger Logic
+
+1. update the code or `settings.toml`
+2. if a new helper file is introduced, add it to the relevant signature list
+3. run `pytest -q`
+4. run `dj run --no-grouping --no-tags`
+5. inspect `outputs/registry/registry_overview.csv`
+6. run `dj vibe-audit` if vibe-related
+
+Do not add instructions that tell contributors to bump a manual cache version.
+
+## Testing Notes
+
+- current suite size: `245` tests
+- tests use synthetic audio fixtures
+- registry, tagger, grouper, and cache behaviors all have direct coverage
+
+## Documentation References
+
+- `README.md`
+- `docs/technical_spec.md`
+- `docs/dj_grouping_recommendation_system_spec.md`
+- `docs/tagger_cache_and_experimentation.md`
+- `specs/track_registery.md`

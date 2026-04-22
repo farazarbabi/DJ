@@ -170,6 +170,13 @@ def test_layer_version_auto_set(cache):
     assert entry.version == LAYER_VERSIONS["tagger"]
 
 
+def test_versioned_raw_layers_are_checked(cache):
+    """Raw feature layers should miss when their extractor signature changes."""
+    key = cache.track_key("track.aiff", 180.5, "raw_analysis")
+    cache.put(key, {"tempo": 128.0}, version="old_raw_version")
+    assert cache.get_track("track.aiff", 180.5, "raw_analysis") is None
+
+
 def test_atomic_save_creates_files(tmp_path):
     """Atomic save should create raw and/or derived files."""
     path = str(tmp_path / "raw_cache.pkl")

@@ -7,7 +7,8 @@ import pytest
 
 from dj_grouper.scanner import TrackInfo
 from dj_grouper.cli import _run_extraction, _ExtractionStats
-from dj_tagger.universal_cache import reset_cache
+from dj_tagger.tagger_cache import hydrate_tagger_result
+from dj_tagger.universal_cache import get_cache, quick_duration, reset_cache
 
 
 @pytest.fixture(autouse=True)
@@ -119,3 +120,59 @@ class TestRunExtraction:
         assert tracks[0].vocal in ("V", "NV")
         assert "vibe" in tracks[0].confidences
         assert "vocal" in tracks[0].confidences
+
+    def test_extract_stores_canonical_raw_layers(self, tmp_path):
+        """Extraction should persist reusable raw layers plus hydrated tagger metadata."""
+        wav = str(tmp_path / "track.wav")
+        _make_wav(wav, duration_sec=5.0)
+        tracks = [TrackInfo(path=wav)]
+        cache_path = str(tmp_path / "cache.pkl")
+
+        _run_extraction(tracks, cache_path, workers=1, analyze_untagged=True)
+
+        ucache = get_cache(str(tmp_path / "raw_cache.pkl"))
+        cache_dur = quick_duration(wav)
+        assert ucache.get_track("track.wav", cache_dur, "dsp") is not None
+        assert ucache.get_track("track.wav", cache_dur, "raw_analysis") is not None
+        assert ucache.get_track("track.wav", cache_dur, "section_dsp") is not None
+
+        tagger = ucache.get_track("track.wav", cache_dur, "tagger")
+        assert tagger is not None
+        assert tagger["_tagger_version"]
+        assert tagger["_tagger_raw_sig"]
+        assert tagger["_tagger_derived_sig"]
+        assert tagger["_tagger_key_sig"]
+
+    def test_extract_preserves_richer_songstats_tagger(self, tmp_path):
+        """Grouper should not overwrite a current Songstats-aware tagger entry with DSP-only output."""
+        wav = str(tmp_path / "track.wav")
+        _make_wav(wav, duration_sec=5.0)
+        tracks = [TrackInfo(path=wav)]
+        cache_path = str(tmp_path / "cache.pkl")
+        ucache = get_cache(str(tmp_path / "raw_cache.pkl"))
+        cache_dur = quick_duration(wav)
+
+        richer = hydrate_tagger_result(
+            {
+                "camelot": "8A",
+                "key": "A minor",
+                "key_confidence": 0.9,
+                "energy": 3,
+                "vibe": "MEL",
+                "vocal": "NV",
+                "structure": "32H",
+                "bpm": 128.0,
+                "vibe_scores": {"MEL": 0.9},
+                "confidences": {"energy": 0.8, "vibe": 0.8, "vocal": 0.9, "structure": 0.7, "key": 0.9},
+            },
+            {"valence": 0.9, "energy": 0.6},
+        )
+        ucache.put_track("track.wav", cache_dur, "tagger", richer)
+        ucache.save()
+
+        _run_extraction(tracks, cache_path, workers=1)
+
+        tagger = ucache.get_track("track.wav", cache_dur, "tagger")
+        assert tagger is not None
+        assert tagger["vibe"] == "MEL"
+        assert tagger["_tagger_audio_features_sig"]

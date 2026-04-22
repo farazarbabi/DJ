@@ -5,7 +5,7 @@ Once a track is analyzed, it is never re-analyzed — any module can reuse
 results from any other module.
 
 Two cache files:
-  - cache/raw_cache.pkl     — permanent raw data (DSP, CLAP, API results)
+  - cache/raw_cache.pkl     — raw data (DSP, CLAP, API results; some layers versioned)
   - cache/derived_cache.pkl — versioned derived data (energy, vibe, vocal, structure)
 
 Key format:
@@ -42,8 +42,8 @@ DEFAULT_DERIVED_PATH = os.path.join("cache", "derived_cache.pkl")
 # Legacy — kept for migration only
 DEFAULT_CACHE_PATH = os.path.join("cache", "universal_cache.pkl")
 
-# Raw layers: permanent, never invalidated. No version checks.
-# These contain fixed algorithm outputs or external data.
+# Raw layers are stored in raw_cache.pkl. Some raw layers are versioned
+# automatically so feature-extraction changes invalidate stale entries.
 RAW_LAYERS = frozenset({
     "dsp",            # ~45 DSP features (librosa fixed algorithms)
     "section_dsp",    # per-section DSP features
@@ -56,12 +56,27 @@ RAW_LAYERS = frozenset({
     "analysis_librosa",   # registry librosa key analysis
     "analysis_essentia",  # registry essentia key analysis
 })
+VERSIONED_RAW_LAYERS = frozenset({
+    "dsp",
+    "section_dsp",
+    "raw_analysis",
+})
+
+
+def _get_raw_layer_versions() -> dict[str, str]:
+    """Get raw layer versions for feature extraction outputs."""
+    try:
+        from .settings import raw_version
+        ver = raw_version()
+    except Exception:
+        ver = "1"
+    return {layer: ver for layer in VERSIONED_RAW_LAYERS}
 
 def _get_derived_versions() -> dict[str, str]:
     """Get derived layer versions — auto-computed from settings.toml hash."""
     try:
-        from .settings import derived_version
-        ver = derived_version()
+        from .settings import tagger_version
+        ver = tagger_version()
     except Exception:
         ver = "5.1"  # fallback if settings.toml not found
     return {"tagger": ver}
@@ -70,13 +85,27 @@ def _get_derived_versions() -> dict[str, str]:
 # Derived layer versions — auto-recomputed from settings.toml hash.
 # No manual bumping needed: change any parameter in settings.toml and
 # the hash changes, invalidating the derived cache.
+RAW_LAYER_VERSIONS: dict[str, str] = _get_raw_layer_versions()
 DERIVED_VERSIONS: dict[str, str] = _get_derived_versions()
 
 # Combined for backward compat with code that checks LAYER_VERSIONS
-LAYER_VERSIONS: dict[str, str] = {
-    **{layer: "1" for layer in RAW_LAYERS},
-    **DERIVED_VERSIONS,
-}
+LAYER_VERSIONS: dict[str, str] = {}
+
+
+def refresh_layer_versions() -> dict[str, str]:
+    """Refresh layer versions after settings or code changes."""
+    global RAW_LAYER_VERSIONS, DERIVED_VERSIONS, LAYER_VERSIONS
+    RAW_LAYER_VERSIONS = _get_raw_layer_versions()
+    DERIVED_VERSIONS = _get_derived_versions()
+    LAYER_VERSIONS = {
+        **{layer: "1" for layer in RAW_LAYERS},
+        **RAW_LAYER_VERSIONS,
+        **DERIVED_VERSIONS,
+    }
+    return LAYER_VERSIONS
+
+
+refresh_layer_versions()
 
 
 @dataclass
@@ -138,9 +167,9 @@ class UniversalCache:
             # A dict with more keys (e.g. full tagger result) should overwrite
             # a partial entry (e.g. key-only result).
             if isinstance(existing.data, dict) and isinstance(data, dict):
-                if len(data) <= len(existing.data):
+                if len(data) <= len(existing.data) and all(existing.data.get(k) == v for k, v in data.items()):
                     return
-            elif not isinstance(data, dict):
+            elif existing.data == data:
                 return
         self._entries[key] = CacheEntry(version=version, mtime=mtime, data=data)
         layer = self._layer_from_key(key)
@@ -172,11 +201,12 @@ class UniversalCache:
     ) -> object | None:
         """Look up track data by filename + duration + layer.
 
-        Raw layers (dsp, clap, raw_analysis, etc.) are never version-checked
-        — they are permanent. Derived layers auto-check against DERIVED_VERSIONS.
+        Raw feature layers auto-check against their extractor signature when
+        applicable. Derived layers auto-check against the current tagger version.
         """
-        if version is None and layer not in RAW_LAYERS:
-            version = DERIVED_VERSIONS.get(layer)
+        if version is None:
+            refresh_layer_versions()
+            version = LAYER_VERSIONS.get(layer)
 
         key = self.track_key(filename, duration, layer)
         return self.get(key, version)
@@ -192,14 +222,12 @@ class UniversalCache:
     ) -> None:
         """Store track data.
 
-        Auto-sets version: raw layers get "1" (permanent), derived layers
-        get their version from DERIVED_VERSIONS.
+        Auto-sets version from the current layer signature map so both raw and
+        derived layers are invalidated safely when their logic changes.
         """
         if version is None:
-            if layer in RAW_LAYERS:
-                version = "1"
-            else:
-                version = DERIVED_VERSIONS.get(layer, "1")
+            refresh_layer_versions()
+            version = LAYER_VERSIONS.get(layer, "1")
 
         key = self.track_key(filename, duration, layer)
         self.put(key, data, version, mtime)
@@ -317,6 +345,7 @@ _instance: UniversalCache | None = None
 def get_cache(path: str = DEFAULT_CACHE_PATH) -> UniversalCache:
     """Get the singleton UniversalCache instance."""
     global _instance
+    refresh_layer_versions()
     if _instance is None or _instance.path != path:
         _instance = UniversalCache(path)
     return _instance

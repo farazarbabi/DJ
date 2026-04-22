@@ -35,7 +35,7 @@ def classify_resolution(
     analysis_sources = [s for s in top_sources if s.startswith("analysis_")]
     external_sources = [s for s in top_sources if s in ("rekordbox", "songstats")]
 
-    if len(top_sources) >= 3:
+    if not has_conflict:
         return AGREED_ALL_SOURCES
     if len(analysis_sources) == 2:
         return AGREED_ANALYSES
@@ -48,7 +48,8 @@ def classify_resolution(
     if len(top_sources) == 1:
         return SINGLE_HIGH_CONFIDENCE
 
-    return AGREED_ALL_SOURCES
+    # Multiple non-analysis sources agree (e.g., tag+rekordbox)
+    return "+".join(sorted(set(top_sources)))
 
 
 def format_evidence_summary(

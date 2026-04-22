@@ -86,16 +86,18 @@ def ingest_songstats(
     obs_cache: ObsCache | None = None,
     *,
     limit: int | None = None,
-) -> int:
+) -> dict:
     """Fetch Songstats metadata for tracks with ISRC.
 
     Uses pkl cache to avoid redundant API calls and JSON re-parsing.
-    Returns number of tracks successfully ingested.
+    Returns stats dict: {"total", "cached", "fetched", "candidates"}.
     """
+    stats = {"total": 0, "cached": 0, "fetched": 0, "candidates": 0}
+
     config.load_env()
     if not config.songstats_api_key:
         logger.info("Songstats: skipped (no API key)")
-        return 0
+        return stats
 
     client = SongstatsClient(config)
     tracks = store.load_tracks()
@@ -107,7 +109,9 @@ def ingest_songstats(
 
     if not candidates:
         logger.info("Songstats: no tracks with ISRC")
-        return 0
+        return stats
+
+    stats["candidates"] = len(candidates)
 
     logger.debug("Songstats: fetching %d tracks", len(candidates))
 
@@ -270,8 +274,11 @@ def ingest_songstats(
         store.save_payload_index(all_payloads)
 
     fetched = success_count - cache_hits
+    stats["total"] = success_count
+    stats["cached"] = cache_hits
+    stats["fetched"] = fetched
     if cache_hits:
         logger.info("Songstats: %d tracks (%d cached, %d fetched)", success_count, cache_hits, fetched)
     else:
         logger.info("Songstats: %d tracks fetched", success_count)
-    return success_count
+    return stats

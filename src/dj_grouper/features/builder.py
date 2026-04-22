@@ -48,14 +48,14 @@ def load_raw_cache(path: str) -> RawCache:
     """Load the grouper's in-memory raw cache.
 
     Returns an empty dict. The actual cache lookup happens per-track
-    in _run_extraction against raw_cache.pkl via the universal cache.
+    in _run_extraction against raw_cache.pkl.
     The path argument is kept for API compat.
     """
     return {}
 
 
 def save_raw_cache(raw_cache: RawCache, path: str) -> None:
-    """Flush the universal cache to disk (only writes if dirty)."""
+    """Flush the raw + derived cache to disk (only writes if dirty)."""
     from dj_tagger.universal_cache import get_cache
     ucache_path = str(Path(path).parent / "raw_cache.pkl")
     ucache = get_cache(ucache_path)

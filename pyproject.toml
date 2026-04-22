@@ -23,6 +23,7 @@ registry = ["httpx>=0.25", "lxml>=4.9", "python-dotenv>=1.0"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 [project.scripts]
+dj = "dj_tools.cli:main"
 dj-tagger = "dj_tagger.cli:main"
 dj-grouper = "dj_grouper.cli:main"
 dj-registry = "dj_registry.cli:main"

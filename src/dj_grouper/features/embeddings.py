@@ -38,7 +38,7 @@ def _get_clap_model():
     return _clap_model
 
 
-# ─── CLAP cache (via universal cache) ───────────────────────────────────────
+# ─── CLAP cache (via raw cache) ─────────────────────────────────────────────
 
 
 def extract_clap_incremental(
@@ -46,10 +46,10 @@ def extract_clap_incremental(
     cache_path: str,
     force: bool = False,
 ) -> NDArray[np.floating]:
-    """Extract CLAP embeddings incrementally using the universal cache.
+    """Extract CLAP embeddings incrementally using the raw cache.
 
     Only extracts embeddings for files not already cached.
-    Saves to universal cache after every batch.
+    Saves to raw cache after every batch.
 
     Returns array of shape (n_files, 512) aligned with file_paths order.
     """
@@ -57,11 +57,11 @@ def extract_clap_incremental(
     ucache_path = str(Path(cache_path).parent / "raw_cache.pkl")
     ucache = get_cache(ucache_path)
 
-    # Build in-memory cache from universal cache + legacy migration
+    # Build in-memory cache from raw cache + legacy migration
     cache: dict[str, NDArray] = {}
 
     if not force:
-        # Load from universal cache
+        # Load from raw cache
         for fpath in file_paths:
             filename = Path(fpath).name
             dur = quick_duration(fpath)

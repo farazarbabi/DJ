@@ -6,14 +6,9 @@ import logging
 from dataclasses import dataclass
 
 from .audio import load_audio_features
-from .analyzers.energy import analyze_energy
-from .analyzers.key import analyze_key
-from .analyzers.sections import analyze_sections
-from .analyzers.structure import analyze_structure
-from .analyzers.vibe import analyze_vibe
-from .analyzers.vocal import analyze_vocal
 from .formats import format_tag
 from .metadata import read_existing_tag, write_tag
+from .raw_features import compute_tagger_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +20,7 @@ class AnalysisConfig:
     use_essentia: bool = False
     verbose: bool = False
     max_duration: float | None = None
+    audio_features: dict[str, float] | None = None
 
 
 def analyze_track(path: str, config: AnalysisConfig) -> dict:
@@ -47,67 +43,47 @@ def analyze_track(path: str, config: AnalysisConfig) -> dict:
     # Load audio and precompute shared features
     track_audio = load_audio_features(path, max_duration=config.max_duration)
 
-    # Run each analyzer independently; catch failures per-analyzer
-    energy_result = _safe_analyze("energy", analyze_energy, track_audio)
-    key_result = _safe_analyze("key", analyze_key, track_audio, config.use_essentia)
-    structure_result = _safe_analyze("structure", analyze_structure, track_audio)
-    vibe_result = _safe_analyze("vibe", analyze_vibe, track_audio)
-    vocal_result = _safe_analyze("vocal", analyze_vocal, track_audio)
-    section_map = _safe_analyze("sections", analyze_sections, track_audio)
+    artifacts = compute_tagger_artifacts(
+        track_audio,
+        audio_features=config.audio_features,
+        use_essentia=config.use_essentia,
+    )
+    canonical = artifacts["tagger_result"]
 
     # Build tag string
-    bpm_rounded = round(track_audio.tempo) if track_audio.tempo > 0 else None
+    bpm_rounded = round(canonical["bpm"]) if canonical.get("bpm") else None
     tag = format_tag(
-        energy=energy_result.level if energy_result else None,
-        camelot=key_result.camelot if key_result else None,
+        energy=canonical.get("energy"),
+        camelot=canonical.get("camelot"),
         bpm=bpm_rounded,
-        structure=structure_result.formatted if structure_result else None,
-        vibe=vibe_result.label if vibe_result else None,
-        has_vocals=vocal_result.has_vocals if vocal_result else None,
+        structure=canonical.get("structure"),
+        vibe=canonical.get("vibe"),
+        has_vocals=canonical.get("has_vocals"),
     )
 
     # Write tag
     write_tag(path, tag, dry_run=config.dry_run)
 
-    # Collect confidences
-    confidences = {
-        "energy": energy_result.confidence if energy_result else 0.0,
-        "key": key_result.confidence if key_result else 0.0,
-        "structure": structure_result.confidence if structure_result else 0.0,
-        "vibe": vibe_result.confidence if vibe_result else 0.0,
-        "vocal": vocal_result.confidence if vocal_result else 0.0,
-    }
-
     result = {
         "file": path,
         "tag": tag,
-        "bpm": round(track_audio.tempo, 1),
-        "energy": energy_result.level if energy_result else None,
-        "key": key_result.key_name if key_result else None,
-        "camelot": key_result.camelot if key_result else None,
-        "structure": structure_result.formatted if structure_result else None,
-        "vibe": vibe_result.label if vibe_result else None,
-        "vocal": ("V" if vocal_result.has_vocals else "NV") if vocal_result else None,
-        "key_confidence": round(key_result.confidence, 3) if key_result else None,
-        "vocal_ratio": round(vocal_result.vocal_ratio, 3) if vocal_result else None,
-        # New: continuous vibe scores and confidences for grouper
-        "vibe_scores": {k: round(v, 4) for k, v in vibe_result.scores.items()} if vibe_result else {},
-        "confidences": {k: round(v, 3) for k, v in confidences.items()},
-        # Section info
-        "sections": [
-            {"label": s.label, "start": s.start_bar, "end": s.end_bar, "energy": round(s.energy, 3)}
-            for s in (section_map.sections if section_map else [])
-        ],
+        "bpm": canonical.get("bpm"),
+        "energy": canonical.get("energy"),
+        "key": canonical.get("key"),
+        "camelot": canonical.get("camelot"),
+        "structure": canonical.get("structure"),
+        "vibe": canonical.get("vibe"),
+        "vocal": canonical.get("vocal"),
+        "key_confidence": canonical.get("key_confidence"),
+        "vocal_ratio": canonical.get("vocal_ratio"),
+        "vibe_scores": canonical.get("vibe_scores", {}),
+        "confidences": canonical.get("confidences", {}),
+        "sections": canonical.get("sections", []),
     }
 
     if config.verbose:
-        if energy_result:
-            result["energy_details"] = {
-                k: round(v, 4) for k, v in energy_result.details.items()
-            }
-        if structure_result:
-            result["intro_bars"] = structure_result.intro_bars
-            result["flow_type"] = structure_result.flow_type
+        result["intro_bars"] = canonical.get("intro_bars")
+        result["flow_type"] = canonical.get("flow_type")
 
     return result
 

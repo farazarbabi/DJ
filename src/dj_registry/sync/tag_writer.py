@@ -1,4 +1,4 @@
-"""Write canonical key back to file tags (KEY field + COMMENT key portion)."""
+"""Write canonical key/BPM and tagger features back to file tags."""
 
 from __future__ import annotations
 
@@ -37,58 +37,57 @@ def _write_tkey(path: str, camelot: str) -> None:
         audio.save()
 
 
-def _update_comment_key(path: str, new_camelot: str) -> bool:
-    """Update the key portion of an existing dj-tagger COMMENT tag.
+def _write_full_tag(path: str, track) -> bool:
+    """Write a full dj-tagger COMMENT tag from LogicalTrack canonical + tagger fields.
 
-    Returns True if the COMMENT was updated, False if no existing tag found.
+    Returns True if written, False if insufficient data.
     """
-    from dj_tagger.metadata import read_existing_tag, write_tag
-    from dj_tagger.formats import parse_tag, format_tag
+    from dj_tagger.formats import format_tag
+    from dj_tagger.metadata import write_tag
 
-    existing = read_existing_tag(path)
-    if not existing:
+    # Need at least key or some tagger data to write a meaningful tag
+    camelot = track.canonical_key_camelot
+    if not camelot and not track.tagger_energy:
         return False
 
-    parsed = parse_tag(existing)
-    if not parsed:
-        return False
+    # Parse energy
+    energy = None
+    if track.tagger_energy:
+        try:
+            energy = int(track.tagger_energy)
+        except (ValueError, TypeError):
+            pass
 
-    # Reconstruct tag with new key
-    energy_str = parsed.get("energy", "?")
-    energy = int(energy_str) if energy_str.isdigit() else None
+    # Parse BPM — prefer canonical (multi-source resolved), fall back to tagger
+    bpm = None
+    bpm_str = track.canonical_bpm or track.tagger_bpm
+    if bpm_str:
+        try:
+            bpm = int(round(float(bpm_str)))
+        except (ValueError, TypeError):
+            pass
 
-    bpm_str = parsed.get("bpm", "???")
-    bpm = int(bpm_str) if bpm_str.isdigit() else None
+    # Key — use canonical (multi-source resolved)
+    if not camelot:
+        camelot = None
 
-    vibe = parsed.get("vibe")
-    if vibe == "??":
-        vibe = None
-
-    structure = parsed.get("structure")
-    if structure == "??":
-        structure = None
-
-    vocal_str = parsed.get("vocal", "??")
-    if vocal_str == "V":
+    # Vocal
+    has_vocals = None
+    if track.tagger_vocal == "V":
         has_vocals = True
-    elif vocal_str == "NV":
+    elif track.tagger_vocal == "NV":
         has_vocals = False
-    else:
-        has_vocals = None
 
-    group_id = parsed.get("group_id")
-
-    new_tag = format_tag(
+    tag_string = format_tag(
         energy=energy,
-        camelot=new_camelot,
+        camelot=camelot,
         bpm=bpm,
-        structure=structure,
-        vibe=vibe,
+        structure=track.tagger_structure or None,
+        vibe=track.tagger_vibe or None,
         has_vocals=has_vocals,
-        group_id=group_id,
     )
 
-    write_tag(path, new_tag, dry_run=False)
+    write_tag(path, tag_string, dry_run=False)
     return True
 
 
@@ -98,7 +97,11 @@ def sync_tags(
     dry_run: bool = True,
     only_changed: bool = True,
 ) -> tuple[int, int, int]:
-    """Write canonical key to file tags.
+    """Write canonical key/BPM and tagger features to file tags.
+
+    Writes:
+    1. TKEY tag — canonical Camelot key (for DJ software)
+    2. COMMENT tag — full tag string (KEY_ENERGY_VIBE_STRUCT_VOC_BPM)
 
     Returns (written, skipped, errors).
     """
@@ -113,49 +116,53 @@ def sync_tags(
 
     for frec in files:
         track = track_by_id.get(frec.track_id)
-        if not track or not track.canonical_key_camelot:
+        if not track:
             skipped += 1
             continue
 
-        canonical_cam = track.canonical_key_camelot
-
-        # Check if key already matches
-        if only_changed and frec.embedded_key_camelot == canonical_cam:
+        # Need at least a canonical key or tagger features to write
+        has_key = bool(track.canonical_key_camelot)
+        has_features = bool(track.tagger_energy)
+        if not has_key and not has_features:
             skipped += 1
             continue
 
         if dry_run:
+            canonical_cam = track.canonical_key_camelot or "??"
             logger.debug(
-                "Would write key %s to %s (was: %s)",
-                canonical_cam, frec.file_name,
-                frec.embedded_key_camelot or "none",
+                "Would write tag to %s (key=%s, energy=%s, vibe=%s)",
+                frec.file_name, canonical_cam,
+                track.tagger_energy, track.tagger_vibe,
             )
             skipped += 1
             continue
 
         try:
-            # Write standard KEY tag field
-            _write_tkey(frec.path_abs, canonical_cam)
+            # Write standard KEY tag field (TKEY)
+            if track.canonical_key_camelot:
+                _write_tkey(frec.path_abs, track.canonical_key_camelot)
 
-            # Update key in COMMENT tag (if exists)
-            _update_comment_key(frec.path_abs, canonical_cam)
+            # Write full COMMENT tag
+            _write_full_tag(frec.path_abs, track)
 
-            frec.embedded_key_camelot = canonical_cam
-            std = camelot_to_standard(canonical_cam)
-            if std:
-                frec.embedded_key_standard = std
+            # Update file record
+            if track.canonical_key_camelot:
+                frec.embedded_key_camelot = track.canonical_key_camelot
+                std = camelot_to_standard(track.canonical_key_camelot)
+                if std:
+                    frec.embedded_key_standard = std
             frec.tag_write_status = "ok"
             frec.tag_write_error = ""
             frec.last_tag_written_at = now_iso()
             written += 1
 
-            logger.debug("Wrote key %s to %s", canonical_cam, frec.file_name)
+            logger.debug("Wrote tag to %s", frec.file_name)
 
         except Exception as e:
             frec.tag_write_status = "error"
             frec.tag_write_error = str(e)
             errors += 1
-            logger.error("Failed to write key to %s: %s", frec.file_name, e)
+            logger.error("Failed to write tag to %s: %s", frec.file_name, e)
 
     store.save_files(files)
     if written or errors:

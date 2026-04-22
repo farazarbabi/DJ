@@ -89,8 +89,8 @@ def cmd_ingest_songstats(args: argparse.Namespace) -> int:
     store = CsvStore(config.output_dir)
     limit = getattr(args, "limit", None)
     only_missing = getattr(args, "only_missing", False)
-    count = ingest_songstats(config, store, limit=limit, only_missing=only_missing)
-    print(f"Fetched {count} tracks from Songstats")
+    stats = ingest_songstats(config, store, limit=limit, only_missing=only_missing)
+    print(f"Songstats: {stats['total']} tracks ({stats['cached']} cached, {stats['fetched']} fetched)")
     return 0
 
 
@@ -98,11 +98,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from .adapters.local_analysis import run_analysis
     config = _build_config(args)
     store = CsvStore(config.output_dir)
-    count = run_analysis(
+    stats = run_analysis(
         config, store,
         no_essentia=getattr(args, "no_essentia", False),
     )
-    print(f"Analyzed {count} tracks")
+    print(f"Analysis: {stats['total']} tracks ({stats['cached']} cached, {stats['analyzed']} analyzed, {stats['failed']} failed)")
     return 0
 
 
