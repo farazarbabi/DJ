@@ -145,6 +145,7 @@ def cmd_sync_tags(args: argparse.Namespace) -> int:
         store,
         dry_run=args.dry_run,
         only_changed=getattr(args, "only_changed", True),
+        write_key_tag=getattr(args, "write_key_tag", False),
     )
     print(f"Tags: {written} written, {skipped} skipped, {errors} errors")
     return 0
@@ -239,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     p_st.add_argument("--dry-run", action="store_true", default=True)
     p_st.add_argument("--write", dest="dry_run", action="store_false")
     p_st.add_argument("--only-changed", action="store_true", default=True)
+    p_st.add_argument("--write-key-tag", action="store_true", default=False,
+                      help="Also write canonical key to TKEY/InitialKey field (off by default)")
     p_st.add_argument("--output", default="./outputs/registry")
 
     # export

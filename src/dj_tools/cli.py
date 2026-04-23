@@ -51,6 +51,8 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Rekordbox XML path (default: auto-detect latest .xml in library dir)")
     p_run.add_argument("--no-songstats", action="store_true", help="Skip Songstats metadata fetch")
     p_run.add_argument("--no-tags", action="store_true", help="Skip writing tags to files")
+    p_run.add_argument("--write-key-tag", action="store_true",
+                       help="Also write canonical key to TKEY/InitialKey field (off by default)")
     p_run.add_argument("--no-grouping", action="store_true", help="Skip grouping phase")
     p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings in grouper")
     p_run.add_argument("--no-essentia", action="store_true", help="Skip essentia key analysis")
@@ -472,7 +474,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # Phase 5: Write tags
     t0 = time.perf_counter()
     if not args.no_tags:
-        sync_tags(store, dry_run=False)
+        sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False))
         logger.info("Pipeline: tags written in %s\n", _fmt_elapsed(time.perf_counter() - t0))
     else:
         logger.info("Tags: skipped (--no-tags)\n")
