@@ -97,11 +97,13 @@ def sync_tags(
     dry_run: bool = True,
     only_changed: bool = True,
 ) -> tuple[int, int, int]:
-    """Write canonical key/BPM and tagger features to file tags.
+    """Write tagger features to the COMMENT tag only.
+
+    Intentionally leaves TKEY untouched so the original key tag is
+    preserved as a validation signal (e.g. from Rekordbox or manual tagging).
 
     Writes:
-    1. TKEY tag — canonical Camelot key (for DJ software)
-    2. COMMENT tag — full tag string (KEY_ENERGY_VIBE_STRUCT_VOC_BPM)
+    1. COMMENT tag — full tag string (KEY_ENERGY_VIBE_STRUCT_VOC_BPM)
 
     Returns (written, skipped, errors).
     """
@@ -138,19 +140,9 @@ def sync_tags(
             continue
 
         try:
-            # Write standard KEY tag field (TKEY)
-            if track.canonical_key_camelot:
-                _write_tkey(frec.path_abs, track.canonical_key_camelot)
-
-            # Write full COMMENT tag
+            # Write full COMMENT tag only — TKEY is intentionally left untouched
             _write_full_tag(frec.path_abs, track)
 
-            # Update file record
-            if track.canonical_key_camelot:
-                frec.embedded_key_camelot = track.canonical_key_camelot
-                std = camelot_to_standard(track.canonical_key_camelot)
-                if std:
-                    frec.embedded_key_standard = std
             frec.tag_write_status = "ok"
             frec.tag_write_error = ""
             frec.last_tag_written_at = now_iso()

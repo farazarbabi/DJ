@@ -223,13 +223,11 @@ Tagger-derived fields are not voted across sources; they are stored directly fro
 
 ## Tag Sync
 
-`dj-registry sync-tags` writes:
+`dj-registry sync-tags` writes only the COMMENT tag:
 
-- canonical key to the dedicated key field
-- COMMENT tag built from:
-  - canonical key
-  - canonical BPM when available
-  - stored tagger energy/vibe/structure/vocal
+- COMMENT tag built from: canonical key, canonical BPM, stored tagger energy/vibe/structure/vocal
+
+The TKEY/InitialKey field is intentionally left untouched so the original embedded key (e.g. from Rekordbox analysis or manual tagging) is preserved as a validation signal for multi-source key resolution.
 
 By default `sync-tags` is dry-run unless `--write` is passed.
 

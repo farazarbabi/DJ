@@ -92,12 +92,15 @@ def run_full_pipeline(
         summary["isrcs_enriched"] = 0
         summary["songstats_fetched"] = 0
 
+    # Flush Songstats (and any other ISRC-keyed data) to the universal cache
+    # before analysis so the tagger can look up audio features during vibe scoring.
+    obs_cache.save()
+
     analysis_stats = run_analysis(config, store, no_essentia=no_essentia)
     summary["tracks_analyzed"] = analysis_stats["total"]
     summary["tracks_analyzed_cached"] = analysis_stats["cached"]
 
     _enrich_observations(store)
-    obs_cache.save()
 
     resolved, review = resolve_all_keys(config, store, force=True)
     summary["keys_resolved"] = resolved

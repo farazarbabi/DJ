@@ -62,7 +62,7 @@ drk_flux      = [0.20, 2.5, 2.5]     # spectral change rate. Offset nudged up fr
 # TRIB (Tribal): very high percussion-to-harmonic ratio with clean spectrum.
 # Typical: tribal house, afro-percussion-driven tracks.
 trib_perc_ratio = [0.70, 0.40, 0.15] # percussion dominance. Raise offset to require stronger percussion.
-trib_clean      = [0.30, 0.03, 0.02] # (inverse) low flatness = clean/tonal percussion, not noise.
+trib_clean      = [0.44, 0.03, 0.02] # (inverse) low flatness = clean/tonal percussion, not noise. Raised weight 0.30->0.44 to improve tribal house detection (tracks with clean production + bass mix).
 
 # RAW: non-electronic character. Sparse, low bass, low rhythmic variance.
 # Typical: organic/live recordings, acoustic elements, lo-fi.

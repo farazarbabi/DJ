@@ -175,7 +175,7 @@ def ingest_songstats(
         ss_release_date = track_info.get("release_date", "")
 
         # Genres: list of strings
-        genres = track_info.get("genres", [])
+        genres = track_info.get("genres") or []
         ss_genre = genres[0] if genres else ""
 
         # Labels: list of {"name": ..., "songstats_label_id": ...}
