@@ -242,7 +242,10 @@ def save_assignment(assignment: GroupAssignment, path: str) -> None:
 
 def load_assignment(path: str) -> GroupAssignment:
     with open(path, "rb") as f:
-        return pickle.load(f)
+        assignment = pickle.load(f)
+    for group in assignment.groups:
+        group.folder_name = _safe_folder(group.folder_name)
+    return assignment
 
 
 def _safe_mode(values: list, default):

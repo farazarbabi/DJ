@@ -21,8 +21,9 @@ def generate_group_playlists(
     out = Path(output_dir) / "groups"
     out.mkdir(parents=True, exist_ok=True)
 
+    _illegal = str.maketrans({c: "_" for c in r'<>:"/\|?*'})
     for group in assignment.groups:
-        playlist_path = out / f"{group.folder_name}.m3u8"
+        playlist_path = out / f"{group.folder_name.translate(_illegal)}.m3u8"
         lines = ["#EXTM3U"]
         for idx in group.member_indices:
             tf = tracks[idx]

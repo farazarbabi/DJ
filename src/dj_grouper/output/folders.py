@@ -29,8 +29,9 @@ def create_group_folders(
 
     fell_back_to_copy = False
 
+    _illegal = str.maketrans({c: "_" for c in r'<>:"/\|?*'})
     for group in assignment.groups:
-        folder = out / group.folder_name
+        folder = out / group.folder_name.translate(_illegal)
         if not dry_run:
             folder.mkdir(parents=True, exist_ok=True)
 
