@@ -17,6 +17,13 @@ from .medoid import compute_all_medoids
 
 logger = logging.getLogger(__name__)
 
+_WIN_ILLEGAL = str.maketrans({c: "_" for c in r'<>:"/\|?*'})
+
+
+def _safe_folder(name: str) -> str:
+    """Strip Windows-illegal characters from a folder/file name component."""
+    return name.translate(_WIN_ILLEGAL)
+
 
 @dataclass
 class GroupInfo:
@@ -74,7 +81,7 @@ def assign_group_ids(
         structures = [i.structure for i in infos if i.structure]
         vocals = [i.vocal for i in infos if i.vocal]
 
-        rep_key = _safe_mode(keys, "??")
+        rep_key = _safe_mode(keys, "NK")
         rep_energy = _safe_mode(energies, 3)
         rep_vibe = _safe_mode(vibes, "HYPN")
         rep_bpm = round(np.median(bpms)) if bpms else 128
@@ -101,7 +108,7 @@ def assign_group_ids(
     assignment = GroupAssignment()
     for i, group in enumerate(temp_groups):
         group.group_id = f"G{i + 1:03d}"
-        group.folder_name = (
+        group.folder_name = _safe_folder(
             f"{group.group_id}_{group.key}_E{group.energy}_{group.vibe}"
             f"_{group.structure}_{group.vocal}_{group.bpm}"
         )
@@ -190,7 +197,7 @@ def assign_new_tracks(
                 bpm=rep_bpm,
                 structure=rep_structure,
                 vocal=rep_vocal,
-                folder_name=f"{new_gid}_{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}",
+                folder_name=_safe_folder(f"{new_gid}_{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}"),
             )
             assignment.groups.append(new_group)
             assignment.track_to_group[path] = new_gid
