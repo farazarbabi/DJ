@@ -55,7 +55,9 @@ class TestResolveTrackKey:
         ]
         resolve_track_key(self.track, obs, self.config)
         assert self.track.needs_manual_review is True
-        assert "review" in self.track.key_evidence_summary
+        assert self.track.review_reason != ""
+        # Fallback: best-guess key must always be populated, never blank
+        assert self.track.canonical_key_camelot != ""
 
     def test_manual_override(self):
         obs = [

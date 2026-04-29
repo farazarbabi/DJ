@@ -158,10 +158,13 @@ def resolve_track_key(
         track.review_reason = ""
         track.last_resolved_at = now_iso()
     else:
-        track.canonical_key_standard = ""
-        track.canonical_key_camelot = ""
+        # Fallback: use the best-scoring candidate so downstream tools always
+        # have a key. The track is flagged for manual review so the conflict is
+        # visible, but an empty key is worse than a best-guess key.
+        track.canonical_key_standard = top.standard
+        track.canonical_key_camelot = top.camelot
         track.canonical_key_confidence = top_confidence
-        track.canonical_key_source = ""
+        track.canonical_key_source = "+".join(sorted(set(top.sources)))
 
         if not any(s.startswith("analysis_") for s in source_keys):
             track.canonical_key_resolution_reason = NO_ANALYSIS
@@ -173,8 +176,9 @@ def resolve_track_key(
             track.canonical_key_resolution_reason = LOW_CONFIDENCE_REVIEW
             track.review_reason = REVIEW_LOW_CONFIDENCE
 
-        track.key_evidence_summary = format_evidence_summary(source_keys, None)
+        track.key_evidence_summary = format_evidence_summary(source_keys, top.camelot)
         track.needs_manual_review = True
+        track.last_resolved_at = now_iso()
 
 
 def resolve_all_keys(
