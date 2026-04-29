@@ -494,6 +494,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         try:
             from dj_grouper.cli import main as grouper_main
             grouper_argv = list(args.paths)
+            grouper_argv.extend(["--registry-dir", config.output_dir])
             if args.no_clap:
                 grouper_argv.append("--no-clap")
             if args.force_extract:

@@ -58,6 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings")
     p_run.add_argument("--algorithm", choices=["constrained", "agglomerative"], default=_DEFAULTS.clustering_method, help="Clustering algorithm (default: constrained)")
     p_run.add_argument("--no-registry", action="store_true", help="Skip loading registry enrichment")
+    p_run.add_argument("--registry-dir", default=None, help="Registry output dir (default: <library>/outputs/registry)")
     p_run.add_argument("--playlists", default=_DEFAULTS.playlists_dir, help="Playlists dir")
     p_run.add_argument("--csv", default=_DEFAULTS.groups_file)
     p_run.add_argument("--recommendations-csv", default=_DEFAULTS.recommendations_file)
@@ -630,6 +631,12 @@ def _cmd_run(args) -> int:
         print(f"External input detected — outputs will be in {ext_out}/")
     else:
         out_dir = Path(_DEFAULTS.output_dir)
+
+    # Registry dir: explicit flag > auto-derived from library path > default
+    if getattr(args, "registry_dir", None):
+        config.registry_dir = args.registry_dir
+    elif is_external:
+        config.registry_dir = str(input_path / "outputs" / "registry")
 
     cpaths = _cache_paths(args.cache_dir)
 
