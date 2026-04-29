@@ -47,9 +47,11 @@ class TestResolveTrackKey:
         assert self.track.canonical_key_confidence == 1.0
 
     def test_conflict_sends_to_review(self):
+        # Two analysis sources disagree with scores too close to resolve (margin < threshold).
+        # librosa=1A: 0.80*0.75=0.60, essentia=2A: 0.85*0.75=0.638, margin=0.038 < 0.05
         obs = [
-            _make_obs("tag", "1A", "G# minor"),
-            _make_obs("analysis_librosa", "2A", "Eb minor", 0.6),
+            _make_obs("analysis_librosa", "1A", "G# minor", 0.75),
+            _make_obs("analysis_essentia", "2A", "Eb minor", 0.75),
         ]
         resolve_track_key(self.track, obs, self.config)
         assert self.track.needs_manual_review is True

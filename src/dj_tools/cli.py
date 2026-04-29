@@ -40,7 +40,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("vibe-audit", help="Audit vibe score distributions from cache")
+    p_va = sub.add_parser("vibe-audit", help="Audit vibe score distributions from cache")
+    p_va.add_argument("path", nargs="?", default="./files", metavar="PATH",
+                      help="Library root (default: ./files)")
+    p_va.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
 
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument(
@@ -58,7 +61,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-essentia", action="store_true", help="Skip essentia key analysis")
     p_run.add_argument("-w", "--workers", type=int, default=1, help="Analysis workers (default: 1)")
     p_run.add_argument("--force-extract", action="store_true", help="Force re-extraction in grouper")
-    p_run.add_argument("--output", default="./outputs/registry", help="Registry output dir")
+    p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
 
     return parser
 
@@ -115,9 +118,9 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{h}h{m:02d}m{s:02d}s"
 
 
-def _run_vibe_audit() -> int:
+def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
     """Audit canonical vibe output for the current registry and compare it to fresh derivation."""
-    return _run_vibe_audit_canonical()
+    return _run_vibe_audit_canonical(output_dir)
 
     # Collect all DSP entries
     dsp_entries: list[tuple[str, str, dict]] = []  # (key_prefix, name, dsp_data)
@@ -160,7 +163,7 @@ def _run_vibe_audit() -> int:
     ss_by_name: dict[str, dict[str, float]] = {}
     try:
         from dj_registry.store.csv_store import CsvStore
-        store = CsvStore(os.path.join("outputs", "registry"))
+        store = CsvStore(output_dir)
         tracks_list = store.load_tracks()
         files_list = store.load_files()
         file_by_id = {f.file_id: f for f in files_list}
@@ -263,7 +266,7 @@ def _run_vibe_audit() -> int:
     return 0
 
 
-def _run_vibe_audit_canonical() -> int:
+def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> int:
     """Audit the same registry-backed vibe truth that `dj run` writes."""
     from collections import Counter
 
@@ -275,7 +278,7 @@ def _run_vibe_audit_canonical() -> int:
     from dj_tagger.universal_cache import DERIVED_VERSIONS, get_cache, quick_duration
 
     ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
-    store = CsvStore(os.path.join("outputs", "registry"))
+    store = CsvStore(output_dir)
     tracks = store.load_tracks()
     files = store.load_files()
     file_by_id = {f.file_id: f for f in files}
@@ -422,7 +425,10 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         config.rekordbox_xml_path = _find_latest_xml(args.paths)
         if config.rekordbox_xml_path:
             logger.info("Rekordbox XML: auto-detected %s", config.rekordbox_xml_path)
-    config.output_dir = args.output
+    if args.output:
+        config.output_dir = args.output
+    else:
+        config.output_dir = os.path.join(args.paths[0], "outputs", "registry")
     config.load_env()
 
     run_id = uuid.uuid4().hex[:8]
@@ -526,7 +532,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "vibe-audit":
         try:
-            return _run_vibe_audit()
+            library = getattr(args, "path", "./files")
+            output = getattr(args, "output", None) or os.path.join(library, "outputs", "registry")
+            return _run_vibe_audit(output)
         except KeyboardInterrupt:
             return 130
         except Exception:

@@ -39,8 +39,8 @@ class RegistryConfig:
         "tag": 0.55,
         "songstats": 0.40,
     })
-    confidence_threshold: float = 0.70
-    margin_threshold: float = 0.20
+    confidence_threshold: float = 0.55  # librosa at 0.75 conf → score 0.60; needs headroom
+    margin_threshold: float = 0.05     # analysis vs tag margin is typically 0.05 at this score range
     agreement_boost: float = 0.15
     cross_type_boost: float = 0.10
 
