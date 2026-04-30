@@ -36,6 +36,25 @@ class LogicalTrack:
     canonical_bpm_confidence: float = 0.0
     canonical_genre: str = ""
 
+    # 3-level genre classification (curated static vocabulary + classifier)
+    genre_family: str = ""
+    genre: str = ""
+    subgenre: str = ""
+    genre_confidence: float = 0.0
+    genre_confidence_level: str = ""
+    genre_alternatives: str = ""
+    genre_evidence: str = ""
+    genre_warnings: str = ""
+    genre_taxonomy_version: str = ""
+
+    # Legacy DJ-functional taxonomy fields kept for downstream compatibility
+    taxonomy_id: str = ""
+    taxonomy_label: str = ""
+    taxonomy_confidence: float = 0.0
+    taxonomy_alternatives: str = ""
+    taxonomy_evidence: str = ""
+    taxonomy_version: str = ""
+
     # Tagger analysis features (single-source, stored directly)
     tagger_energy: str = ""
     tagger_vibe: str = ""

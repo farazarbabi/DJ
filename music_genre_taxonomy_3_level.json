@@ -1,0 +1,617 @@
+{
+  "House": {
+    "Classic / Root House": [
+      "Classic House",
+      "Chicago House",
+      "New York House",
+      "Piano House",
+      "Vocal House",
+      "Jackin House",
+      "Acid House",
+      "Soulful House",
+      "Gospel House",
+      "Jazzy House",
+      "Disco House",
+      "French House",
+      "Filter House",
+      "Funky House"
+    ],
+    "Deep / Minimal / Groove House": [
+      "Deep House",
+      "Jazzy Deep House",
+      "Late-Night Deep House",
+      "Vocal Deep House",
+      "Dubby Deep House",
+      "Minimal House",
+      "Microhouse",
+      "Romanian Minimal",
+      "Minimal Deep House",
+      "Deep Tech",
+      "Rolling Deep Tech",
+      "Dark Deep Tech"
+    ],
+    "Tech House": [
+      "Classic Tech House",
+      "Rolling Tech House",
+      "Minimal Tech House",
+      "Peak-Time Tech House",
+      "Deep Tech House",
+      "Bassline Tech House",
+      "Percussive Tech House",
+      "Latin Tech House",
+      "Funky Tech House",
+      "Groove Tech House",
+      "Disco-Tech House"
+    ],
+    "Organic / Afro / Tribal House": [
+      "Afro House",
+      "Deep Afro House",
+      "Afro Tech",
+      "Afro Melodic House",
+      "Percussive Afro House",
+      "Tribal House",
+      "Dark Tribal House",
+      "Latin Tribal House",
+      "Shamanic House",
+      "Organic House",
+      "Desert House",
+      "Ethnic Organic House",
+      "Sunset Organic House",
+      "Middle Eastern Organic House"
+    ],
+    "Melodic / Progressive House": [
+      "Progressive House",
+      "Deep Progressive House",
+      "Dark Progressive House",
+      "Hypnotic Progressive House",
+      "Melodic House",
+      "Deep Melodic House",
+      "Emotional Melodic House",
+      "Dark Melodic House",
+      "Organic Melodic House",
+      "Romantic Melodic House",
+      "Dream House",
+      "Balearic Dream House",
+      "Ambient House"
+    ],
+    "Dark / Indie-Adjacent House": [
+      "Dark House",
+      "Dark Deep House",
+      "Dark Progressive House",
+      "Nocturnal House",
+      "Indie House",
+      "Dark Indie House",
+      "New Wave House",
+      "Post-Punk House",
+      "Romantic House"
+    ],
+    "Commercial / Bass-Oriented House": [
+      "Bass House",
+      "UK Bass House",
+      "Electro Bass House",
+      "Dark Bass House",
+      "Future House",
+      "Deep Future House",
+      "Bouncy Future House",
+      "Slap House",
+      "Vocal Slap House"
+    ]
+  },
+  "Techno": {
+    "Classic / Foundational Techno": [
+      "Detroit Techno",
+      "Soulful Detroit Techno",
+      "Electro-Detroit Techno",
+      "Classic Techno",
+      "90s Techno",
+      "Warehouse Techno",
+      "Rave Techno",
+      "Raw Techno",
+      "Acid Techno",
+      "Hard Acid Techno",
+      "Acid Rave Techno"
+    ],
+    "Minimal / Hypnotic Techno": [
+      "Minimal Techno",
+      "Berlin Minimal",
+      "Loop Techno",
+      "Reduced Techno",
+      "Hypnotic Techno",
+      "Deep Hypnotic Techno",
+      "Mental Techno",
+      "Rolling Hypnotic Techno",
+      "Polyrhythmic Techno",
+      "Long-Form Techno",
+      "Dub Techno",
+      "Deep Dub Techno",
+      "Ambient Dub Techno",
+      "Chord Dub Techno"
+    ],
+    "Deep / Dark / Afterhours Techno": [
+      "Deep Techno",
+      "Atmospheric Deep Techno",
+      "Sub-Heavy Deep Techno",
+      "Nocturnal Techno",
+      "Dark Techno",
+      "Dark Minimal Techno",
+      "Dark Driving Techno",
+      "Gothic Techno",
+      "Ritual Techno",
+      "Afterhours Techno",
+      "Hypnotic Afterhours Techno",
+      "Dark Afterhours Techno"
+    ],
+    "Driving / Peak-Time Techno": [
+      "Driving Techno",
+      "Rolling Techno",
+      "Linear Techno",
+      "Functional Techno",
+      "Club Tool Techno",
+      "Peak-Time Techno",
+      "Big-Room Techno",
+      "Dramatic Peak-Time Techno",
+      "Drop-Oriented Techno",
+      "Hardgroove Techno",
+      "Funky Hardgroove",
+      "Latin Hardgroove",
+      "Percussive Hardgroove",
+      "Tribal Hardgroove"
+    ],
+    "Hard / Industrial Techno": [
+      "Hard Techno",
+      "Modern Hard Techno",
+      "Rave Hard Techno",
+      "Fast Hard Techno",
+      "Distorted Hard Techno",
+      "Industrial Techno",
+      "Metallic Industrial Techno",
+      "Noise Techno",
+      "EBM-Industrial Techno",
+      "Warehouse Industrial Techno",
+      "Schranz"
+    ],
+    "Melodic / Emotional Techno": [
+      "Melodic Techno",
+      "Dark Melodic Techno",
+      "Emotional Melodic Techno",
+      "Cinematic Techno",
+      "Progressive Melodic Techno",
+      "Arpeggiated Techno",
+      "Romantic Techno",
+      "Melancholic Techno",
+      "Dark Romantic Techno",
+      "Euphoric Techno",
+      "Trance-Influenced Techno",
+      "Uplifting Techno"
+    ],
+    "Hybrid / Leftfield Techno": [
+      "Broken Techno",
+      "Breakbeat Techno",
+      "Electro-Broken Techno",
+      "Psy-Techno",
+      "Progressive Psy-Techno",
+      "Dark Psy-Techno",
+      "EBM Techno",
+      "Body Techno",
+      "Post-Punk Techno",
+      "Coldwave Techno",
+      "Leftfield Techno",
+      "Experimental Techno",
+      "Sci-Fi Techno"
+    ]
+  },
+  "Indie Dance / Dark Disco / Nu-Disco": {
+    "Indie Dance": [
+      "Indie Dance",
+      "Dark Indie Dance",
+      "Minimal Indie Dance",
+      "Psychedelic Indie Dance",
+      "Romantic Indie Dance",
+      "New Wave Indie Dance",
+      "Post-Punk Indie Dance"
+    ],
+    "Dark Disco": [
+      "Dark Disco",
+      "Gothic Disco",
+      "EBM Disco",
+      "Cosmic Dark Disco",
+      "Acid Dark Disco"
+    ],
+    "Nu-Disco": [
+      "Nu-Disco",
+      "Funky Nu-Disco",
+      "French Nu-Disco",
+      "Balearic Nu-Disco",
+      "Italo Nu-Disco"
+    ],
+    "Italo / Cosmic": [
+      "Italo Disco",
+      "Dark Italo",
+      "Space Italo",
+      "Cosmic Disco",
+      "Space Disco",
+      "Psychedelic Disco"
+    ]
+  },
+  "Downtempo / Slow Electronic": {
+    "Downtempo": [
+      "Downtempo",
+      "Organic Downtempo",
+      "Deep Downtempo",
+      "Cinematic Downtempo",
+      "Romantic Downtempo",
+      "Noir Downtempo"
+    ],
+    "Trip-Hop / Chill": [
+      "Trip-Hop",
+      "Dark Trip-Hop",
+      "Jazzy Trip-Hop",
+      "Cinematic Trip-Hop",
+      "Chillout",
+      "Lounge",
+      "Balearic Chill",
+      "Ambient Chill"
+    ],
+    "Slow Club Music": [
+      "Slow House",
+      "Organic Slow House",
+      "Deep Slow House",
+      "Slow Techno",
+      "Dark Slow Techno",
+      "Hypnotic Slow Techno",
+      "Slow Disco",
+      "Cosmic Slow Disco"
+    ],
+    "Psychedelic / Ethnic Downtempo": [
+      "Psybient",
+      "Psychill",
+      "Ethno-Downtempo",
+      "Desert Downtempo",
+      "Middle Eastern Downtempo",
+      "Shamanic Downtempo",
+      "Tribal Downtempo"
+    ]
+  },
+  "Garage / UK Bass / Breaks": {
+    "UK Garage": [
+      "UK Garage",
+      "2-Step Garage",
+      "Speed Garage",
+      "Vocal Garage",
+      "Dark Garage",
+      "Minimal Garage",
+      "Future Garage"
+    ],
+    "Bassline / UK Bass": [
+      "Bassline",
+      "Dark Bassline",
+      "UK Bass",
+      "Garage Bass",
+      "Breaks Bass",
+      "Club Bass",
+      "Dark UK Bass"
+    ],
+    "Breaks": [
+      "Breakbeat",
+      "Nu-Skool Breaks",
+      "Progressive Breaks",
+      "Acid Breaks",
+      "Electro Breaks",
+      "Rave Breaks"
+    ],
+    "Grime / Funky": [
+      "Grime",
+      "Instrumental Grime",
+      "Dark Grime",
+      "UK Funky",
+      "Afro-Funky",
+      "Percussive UK Funky"
+    ]
+  },
+  "Donk / Hard Dance / Rave": {
+    "Donk / Bounce": [
+      "Donk",
+      "Classic Donk",
+      "Scouse House",
+      "Bouncy House",
+      "Hard Bounce"
+    ],
+    "Hard Dance": [
+      "Hard House",
+      "UK Hard House",
+      "NRG",
+      "Bouncy Hard House",
+      "Hard Trance",
+      "Acid Hard Trance",
+      "Rave Hard Trance"
+    ],
+    "Hardcore / Hardstyle": [
+      "Hardstyle",
+      "Euphoric Hardstyle",
+      "Rawstyle",
+      "Hardcore",
+      "Gabber",
+      "Happy Hardcore",
+      "UK Hardcore",
+      "Industrial Hardcore"
+    ],
+    "Rave": [
+      "Rave",
+      "Breakbeat Rave",
+      "Piano Rave",
+      "Acid Rave",
+      "Dark Rave",
+      "Rave Revival"
+    ]
+  },
+  "Trance / Progressive / Psy": {
+    "Trance": [
+      "Classic Trance",
+      "90s Trance",
+      "Balearic Trance",
+      "Vocal Trance",
+      "Uplifting Trance",
+      "Emotional Trance",
+      "Euphoric Trance",
+      "Tech Trance",
+      "Hard Tech Trance",
+      "Driving Tech Trance"
+    ],
+    "Progressive": [
+      "Progressive Trance",
+      "Deep Progressive Trance",
+      "Dark Progressive Trance",
+      "Melodic Progressive Trance",
+      "Progressive House",
+      "Deep Progressive House",
+      "Dark Progressive House"
+    ],
+    "Psytrance": [
+      "Psytrance",
+      "Full-On Psytrance",
+      "Progressive Psytrance",
+      "Dark Psytrance",
+      "Forest Psytrance",
+      "Goa Trance"
+    ]
+  },
+  "Drum & Bass / Jungle": {
+    "Jungle": [
+      "Jungle",
+      "Ragga Jungle",
+      "Atmospheric Jungle",
+      "Dark Jungle",
+      "Breakbeat Jungle"
+    ],
+    "Drum & Bass": [
+      "Drum & Bass",
+      "Liquid DnB",
+      "Deep DnB",
+      "Dark DnB",
+      "Neurofunk",
+      "Jump-Up",
+      "Minimal DnB",
+      "Techstep",
+      "Half-Time DnB"
+    ]
+  },
+  "Bass / Dubstep / Trap": {
+    "Dubstep": [
+      "Dubstep",
+      "Deep Dubstep",
+      "Dark Dubstep",
+      "Riddim",
+      "Brostep",
+      "Melodic Dubstep"
+    ],
+    "Trap / Wave": [
+      "Trap",
+      "EDM Trap",
+      "Hybrid Trap",
+      "Dark Trap",
+      "Wave",
+      "Hardwave",
+      "Emotional Wave"
+    ],
+    "Experimental Bass": [
+      "Leftfield Bass",
+      "Glitch Bass",
+      "Halftime Bass",
+      "Deconstructed Club",
+      "Midtempo Bass"
+    ]
+  },
+  "Electro / Synth / Retro": {
+    "Electro": [
+      "Electro",
+      "Detroit Electro",
+      "Breakbeat Electro",
+      "Acid Electro",
+      "Dark Electro",
+      "Robotic Electro"
+    ],
+    "Synth / Retro": [
+      "Synthwave",
+      "Darksynth",
+      "Outrun",
+      "Dreamwave",
+      "Vaporwave",
+      "Future Funk"
+    ],
+    "Cold / Dark Synth": [
+      "Darkwave",
+      "Coldwave",
+      "Minimal Synth",
+      "Gothic Synth",
+      "EBM Synth"
+    ]
+  },
+  "Rock / Metal / Guitar-Based": {
+    "Classic Rock": [
+      "Classic Rock",
+      "Blues Rock",
+      "Psychedelic Rock",
+      "Progressive Rock",
+      "Hard Rock",
+      "Southern Rock",
+      "Arena Rock"
+    ],
+    "Alternative Rock": [
+      "Alternative Rock",
+      "Indie Rock",
+      "College Rock",
+      "Post-Grunge",
+      "Britpop",
+      "Noise Rock",
+      "Dream Pop",
+      "Shoegaze"
+    ],
+    "Garage / Punk / Post-Punk": [
+      "Garage Rock",
+      "Garage Punk",
+      "Punk Rock",
+      "Post-Punk",
+      "Dance-Punk",
+      "Gothic Rock",
+      "New Wave",
+      "No Wave"
+    ],
+    "Post-Rock / Experimental Rock": [
+      "Post-Rock",
+      "Math Rock",
+      "Krautrock",
+      "Space Rock",
+      "Experimental Rock",
+      "Art Rock",
+      "Ambient Rock"
+    ],
+    "Metal": [
+      "Heavy Metal",
+      "NWOBHM",
+      "Speed Metal",
+      "Thrash Metal",
+      "Power Metal",
+      "Glam Metal",
+      "Hair Metal",
+      "Doom Metal",
+      "Stoner Metal",
+      "Sludge Metal",
+      "Industrial Metal",
+      "Gothic Metal",
+      "Progressive Metal",
+      "Alternative Metal"
+    ]
+  },
+  "Hip-Hop / Rap / R&B": {
+    "Hip-Hop": [
+      "Boom Bap",
+      "East Coast Boom Bap",
+      "Jazz Rap",
+      "Underground Hip-Hop",
+      "Trap Rap",
+      "Southern Trap",
+      "Dark Trap Rap",
+      "Melodic Trap",
+      "Drill",
+      "UK Drill",
+      "Chicago Drill",
+      "NY Drill"
+    ],
+    "Modern Internet Rap": [
+      "Cloud Rap",
+      "Emo Rap",
+      "Rage Rap",
+      "Hypertrap",
+      "Phonk",
+      "Memphis Phonk",
+      "Drift Phonk"
+    ],
+    "R&B": [
+      "Contemporary R&B",
+      "Alt-R&B",
+      "Dark R&B",
+      "Trap Soul",
+      "Neo-Soul",
+      "Future Soul"
+    ]
+  },
+  "Pop / Alternative / Hypermodern": {
+    "Pop": [
+      "Synth Pop",
+      "80s Synth Pop",
+      "Modern Synth Pop",
+      "Dark Synth Pop",
+      "Electropop",
+      "Dance Pop",
+      "Indie Electropop"
+    ],
+    "Alternative Pop": [
+      "Alt-Pop",
+      "Art Pop",
+      "Dark Pop",
+      "Bedroom Pop",
+      "Dream Pop"
+    ],
+    "Hypermodern Pop": [
+      "Hyperpop",
+      "Bubblegum Bass",
+      "Glitch Pop",
+      "Digicore"
+    ]
+  },
+  "Global / Regional Club": {
+    "African / Afro-Diasporic": [
+      "Amapiano",
+      "Soulful Amapiano",
+      "Private School Amapiano",
+      "Tech Amapiano",
+      "Afrobeats",
+      "Afro-Fusion",
+      "Afro-Pop",
+      "Afro-Dancehall",
+      "Gqom",
+      "Dark Gqom"
+    ],
+    "Latin / Caribbean": [
+      "Reggaeton",
+      "Classic Reggaeton",
+      "Pop Reggaeton",
+      "Dembow",
+      "Dominican Dembow",
+      "Baile Funk",
+      "Funk Carioca",
+      "Funk Bruxaria"
+    ],
+    "Middle Eastern / Balkan / Global Fusion": [
+      "Oriental Electronic",
+      "Oriental House",
+      "Middle Eastern Techno",
+      "Arabic Electronic",
+      "Persian Electronic",
+      "Balkan Beats",
+      "Anatolian Electronic",
+      "Anatolian Disco",
+      "Turkish Psych Disco"
+    ]
+  },
+  "Ambient / Experimental": {
+    "Ambient": [
+      "Ambient",
+      "Dark Ambient",
+      "Space Ambient",
+      "Drone Ambient",
+      "New Age Ambient"
+    ],
+    "Experimental Electronic": [
+      "IDM",
+      "Glitch IDM",
+      "Ambient IDM",
+      "Breakbeat IDM",
+      "Glitch",
+      "Electroacoustic",
+      "Musique Concrète",
+      "Field Recording",
+      "Sound Collage"
+    ]
+  }
+}

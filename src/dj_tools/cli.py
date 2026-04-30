@@ -411,6 +411,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     from dj_registry.store.obs_cache import ObsCache
     from dj_registry.sync.export import generate_reports
     from dj_registry.sync.tag_writer import sync_tags
+    from dj_registry.taxonomy.classifier import classify_all_taxonomies
 
     t_start = time.perf_counter()
 
@@ -486,6 +487,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         logger.info("Tags: skipped (--no-tags)\n")
 
     # Phase 6: Reports
+    classify_all_taxonomies(store)
     generate_reports(store, config.reports_dir)
 
     # Phase 7: Grouping

@@ -19,6 +19,7 @@ from ..store.csv_store import CsvStore
 from ..store.obs_cache import ObsCache
 from ..sync.export import generate_reports
 from ..sync.tag_writer import sync_tags
+from ..taxonomy.classifier import classify_all_taxonomies
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,8 @@ def run_full_pipeline(
         sync_tags(store, dry_run=True)
         summary["tags_written"] = 0
         summary["tags_errors"] = 0
+
+    summary["taxonomy_classified"] = classify_all_taxonomies(store)
 
     generate_reports(store, config.reports_dir)
     return summary

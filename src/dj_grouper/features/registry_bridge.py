@@ -44,13 +44,16 @@ class RegistryBridge:
 
         enrichments: dict[str, RegistryEnrichment] = {}
         try:
+            current_canonical = _load_tracks_master_canonical(Path(self._registry_dir))
             with open(overview_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     filename = row.get("file_name", "").strip()
                     if not filename:
                         continue
-                    enrichments[filename] = _parse_row(row)
+                    enr = _parse_row(row)
+                    _apply_current_canonical(enr, row.get("track_id", ""), current_canonical)
+                    enrichments[filename] = enr
         except Exception as e:
             logger.warning("Failed to load registry overview: %s", e)
             return {}
@@ -82,6 +85,39 @@ def match_enrichments(
     if n_total > 0:
         logger.info("Registry matched %d/%d tracks (%.0f%%)", n_matched, n_total, n_matched / n_total * 100)
     return matched
+
+
+def _load_tracks_master_canonical(registry_dir: Path) -> dict[str, tuple[str, int | None]]:
+    """Load fresher canonical key/BPM values keyed by track_id, if available."""
+    tracks_path = registry_dir / "tracks_master.csv"
+    if not tracks_path.exists():
+        return {}
+
+    canonical: dict[str, tuple[str, int | None]] = {}
+    with open(tracks_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            track_id = row.get("track_id", "").strip()
+            if not track_id:
+                continue
+            key = row.get("canonical_key_camelot", "").strip()
+            bpm = _parse_int(row.get("canonical_bpm"))
+            if key or bpm:
+                canonical[track_id] = (key, bpm)
+    return canonical
+
+
+def _apply_current_canonical(
+    enrichment: RegistryEnrichment,
+    track_id: str,
+    canonical: dict[str, tuple[str, int | None]],
+) -> None:
+    """Overlay tracks_master canonical values when overview values are stale/blank."""
+    key, bpm = canonical.get(track_id.strip(), ("", None))
+    if key and key != "??":
+        enrichment.canonical_key = key
+    if bpm and bpm > 0:
+        enrichment.canonical_bpm = bpm
 
 
 def apply_registry_upgrades(

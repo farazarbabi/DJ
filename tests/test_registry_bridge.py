@@ -93,6 +93,41 @@ def test_canonical_key_bpm(registry_csv):
     assert enrichments["track_a.aiff"].canonical_bpm == 126
 
 
+def test_tracks_master_overlays_stale_overview_canonical(tmp_path):
+    overview = tmp_path / "registry_overview.csv"
+    rows = [
+        {
+            "file_name": "track_a.aiff",
+            "track_id": "T-001",
+            "canonical_key": "",
+            "canonical_bpm": "",
+        }
+    ]
+    with open(overview, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    tracks_master = tmp_path / "tracks_master.csv"
+    track_rows = [
+        {
+            "track_id": "T-001",
+            "canonical_key_camelot": "8A",
+            "canonical_bpm": "123",
+        }
+    ]
+    with open(tracks_master, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(track_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(track_rows)
+
+    bridge = RegistryBridge(str(tmp_path))
+    enrichments = bridge.load()
+
+    assert enrichments["track_a.aiff"].canonical_key == "8A"
+    assert enrichments["track_a.aiff"].canonical_bpm == 123
+
+
 def test_match_enrichments_by_filename(registry_csv):
     bridge = RegistryBridge(str(registry_csv))
     raw = bridge.load()

@@ -160,6 +160,17 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_taxonomy(args: argparse.Namespace) -> int:
+    from .taxonomy.classifier import classify_all_taxonomies
+    from .sync.export import generate_reports
+    config = _build_config(args)
+    store = CsvStore(config.output_dir)
+    count = classify_all_taxonomies(store, taxonomy_path=getattr(args, "taxonomy", None))
+    generate_reports(store, config.reports_dir)
+    print(f"Genre taxonomy: {count} tracks classified; reports regenerated")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from .pipelines.orchestrator import run_full_pipeline
     config = _build_config(args)
@@ -248,6 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     p_ex = sub.add_parser("export", help="Generate reports")
     p_ex.add_argument("--output", default="./outputs/registry")
 
+    # taxonomy
+    p_tax = sub.add_parser("taxonomy", help="Classify tracks into 3-level genre taxonomy")
+    p_tax.add_argument("--taxonomy", default=None, help="Optional taxonomy JSON path")
+    p_tax.add_argument("--output", default="./outputs/registry")
+
     # run (full pipeline)
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument("paths", nargs="*", default=["./files"])
@@ -288,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         "import-reviews": cmd_import_reviews,
         "sync-tags": cmd_sync_tags,
         "export": cmd_export,
+        "taxonomy": cmd_taxonomy,
         "run": cmd_run,
     }
 

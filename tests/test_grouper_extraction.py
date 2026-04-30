@@ -6,7 +6,7 @@ import soundfile as sf
 import pytest
 
 from dj_grouper.scanner import TrackInfo
-from dj_grouper.cli import _run_extraction, _ExtractionStats
+from dj_grouper.cli import _run_extraction, _ExtractionStats, _apply_tagger_result
 from dj_tagger.tagger_cache import hydrate_tagger_result
 from dj_tagger.universal_cache import get_cache, quick_duration, reset_cache
 
@@ -120,6 +120,27 @@ class TestRunExtraction:
         assert tracks[0].vocal in ("V", "NV")
         assert "vibe" in tracks[0].confidences
         assert "vocal" in tracks[0].confidences
+
+    def test_cached_tagger_replaces_unknown_key_placeholder(self):
+        """A parsed ?? tag must not block a valid cached tagger key."""
+        track = TrackInfo(path="track.wav", key="??", energy=3)
+
+        _apply_tagger_result(
+            track,
+            {
+                "camelot": "9A",
+                "energy": 4,
+                "bpm": 126.0,
+                "structure": "16H",
+                "vibe": "DRK",
+                "vocal": "NV",
+                "confidences": {"key": 0.9},
+            },
+            analyze_untagged=True,
+        )
+
+        assert track.key == "9A"
+        assert track.confidences["key"] == 0.9
 
     def test_extract_stores_canonical_raw_layers(self, tmp_path):
         """Extraction should persist reusable raw layers plus hydrated tagger metadata."""

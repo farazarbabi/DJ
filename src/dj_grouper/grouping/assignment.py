@@ -18,11 +18,65 @@ from .medoid import compute_all_medoids
 logger = logging.getLogger(__name__)
 
 _WIN_ILLEGAL = str.maketrans({c: "_" for c in r'<>:"/\|?*'})
+_UNKNOWN_KEYS = {"", "??", "NK"}
 
 
 def _safe_folder(name: str) -> str:
     """Strip Windows-illegal characters from a folder/file name component."""
     return name.translate(_WIN_ILLEGAL)
+
+
+def _is_known_key(key: str | None) -> bool:
+    """Return true only for real Camelot keys, not unknown placeholders."""
+    if not key or key in _UNKNOWN_KEYS:
+        return False
+    if len(key) < 2 or key[-1] not in {"A", "B"}:
+        return False
+    if not key[:-1].isdigit():
+        return False
+    return 1 <= int(key[:-1]) <= 12
+
+
+def _folder_key(key: str | None) -> str:
+    """Use a filesystem-safe placeholder for unknown group keys."""
+    return key if _is_known_key(key) else "NK"
+
+
+def _build_folder_name(
+    group_id: str,
+    key: str | None,
+    energy: int,
+    vibe: str,
+    structure: str,
+    vocal: str,
+    bpm: int,
+) -> str:
+    return _safe_folder(
+        f"{group_id}_{_folder_key(key)}_E{energy}_{vibe}_{structure}_{vocal}_{bpm}"
+    )
+
+
+def _representative_values(
+    tracks: list[TrackFeatures],
+    members: list[int],
+) -> tuple[str, int, str, int, str, str]:
+    """Compute current group descriptor values from member track metadata."""
+    infos = [tracks[i].info for i in members]
+    keys = [i.key for i in infos if _is_known_key(i.key)]
+    energies = [i.energy for i in infos if i.energy is not None]
+    vibes = [i.vibe for i in infos if i.vibe]
+    bpms = [i.bpm for i in infos if i.bpm is not None]
+    structures = [i.structure for i in infos if i.structure]
+    vocals = [i.vocal for i in infos if i.vocal]
+
+    rep_key = _safe_mode(keys, "NK")
+    rep_energy = _safe_mode(energies, 3)
+    rep_vibe = _safe_mode(vibes, "HYPN")
+    rep_bpm = round(np.median(bpms)) if bpms else 128
+    rep_structure = _safe_mode(structures, "32H")
+    rep_vocal = _safe_mode(vocals, "NV")
+
+    return rep_key, rep_energy, rep_vibe, rep_bpm, rep_structure, rep_vocal
 
 
 @dataclass
@@ -49,7 +103,7 @@ class GroupAssignment:
 
 def _camelot_sort_key(key: str) -> tuple[int, int]:
     """Sort key for Camelot codes. Descending: 12B, 12A, 11B, 11A, ..., 1B, 1A."""
-    if not key or key == "??":
+    if not _is_known_key(key):
         return (0, 0)
     num = int(key[:-1])
     letter = 1 if key[-1] == "B" else 0  # B before A at same number
@@ -73,20 +127,9 @@ def assign_group_ids(
     for label in sorted(np.unique(labels)):
         members = list(np.where(labels == label)[0])
 
-        infos = [tracks[i].info for i in members]
-        keys = [i.key for i in infos if i.key]
-        energies = [i.energy for i in infos if i.energy is not None]
-        vibes = [i.vibe for i in infos if i.vibe]
-        bpms = [i.bpm for i in infos if i.bpm is not None]
-        structures = [i.structure for i in infos if i.structure]
-        vocals = [i.vocal for i in infos if i.vocal]
-
-        rep_key = _safe_mode(keys, "NK")
-        rep_energy = _safe_mode(energies, 3)
-        rep_vibe = _safe_mode(vibes, "HYPN")
-        rep_bpm = round(np.median(bpms)) if bpms else 128
-        rep_structure = _safe_mode(structures, "32H")
-        rep_vocal = _safe_mode(vocals, "NV")
+        rep_key, rep_energy, rep_vibe, rep_bpm, rep_structure, rep_vocal = (
+            _representative_values(tracks, members)
+        )
 
         temp_groups.append(GroupInfo(
             group_id="",  # assigned after sorting
@@ -108,9 +151,14 @@ def assign_group_ids(
     assignment = GroupAssignment()
     for i, group in enumerate(temp_groups):
         group.group_id = f"G{i + 1:03d}"
-        group.folder_name = _safe_folder(
-            f"{group.group_id}_{group.key}_E{group.energy}_{group.vibe}"
-            f"_{group.structure}_{group.vocal}_{group.bpm}"
+        group.folder_name = _build_folder_name(
+            group.group_id,
+            group.key,
+            group.energy,
+            group.vibe,
+            group.structure,
+            group.vocal,
+            group.bpm,
         )
         assignment.groups.append(group)
         for idx in group.member_indices:
@@ -142,7 +190,7 @@ def assign_new_tracks(
 
     if not new_paths and not deleted_paths:
         logger.info("No changes — all %d tracks already assigned", len(all_tracks))
-        return existing_assignment
+        return refresh_group_descriptors(all_tracks, existing_assignment)
 
     # Start from existing assignment
     assignment = GroupAssignment(
@@ -181,7 +229,7 @@ def assign_new_tracks(
             next_id = max((int(g.group_id[1:]) for g in assignment.groups), default=0) + 1
             new_gid = f"G{next_id:03d}"
             info = new_track.info
-            rep_key = info.key or "??"
+            rep_key = _folder_key(info.key)
             rep_energy = info.energy or 3
             rep_vibe = info.vibe or "HYPN"
             rep_bpm = info.bpm or 128
@@ -197,7 +245,15 @@ def assign_new_tracks(
                 bpm=rep_bpm,
                 structure=rep_structure,
                 vocal=rep_vocal,
-                folder_name=_safe_folder(f"{new_gid}_{rep_key}_E{rep_energy}_{rep_vibe}_{rep_structure}_{rep_vocal}_{rep_bpm}"),
+                folder_name=_build_folder_name(
+                    new_gid,
+                    rep_key,
+                    rep_energy,
+                    rep_vibe,
+                    rep_structure,
+                    rep_vocal,
+                    rep_bpm,
+                ),
             )
             assignment.groups.append(new_group)
             assignment.track_to_group[path] = new_gid
@@ -227,11 +283,45 @@ def assign_new_tracks(
         updated_groups.append(group)
 
     assignment.groups = updated_groups
+    refresh_group_descriptors(all_tracks, assignment)
 
     logger.info(
         "Incremental update: %d assigned to existing, %d new groups, %d deleted",
         n_assigned, n_new_groups, len(deleted_paths),
     )
+    return assignment
+
+
+def refresh_group_descriptors(
+    tracks: list[TrackFeatures],
+    assignment: GroupAssignment,
+) -> GroupAssignment:
+    """Refresh group key/energy/vibe/BPM descriptors from current track metadata.
+
+    Existing assignments can outlive key-resolution improvements. Recomputing
+    descriptors prevents stale ``??`` group keys from leaking into output names.
+    """
+    for group in assignment.groups:
+        if not group.member_indices:
+            continue
+        rep_key, rep_energy, rep_vibe, rep_bpm, rep_structure, rep_vocal = (
+            _representative_values(tracks, group.member_indices)
+        )
+        group.key = rep_key
+        group.energy = rep_energy
+        group.vibe = rep_vibe
+        group.bpm = rep_bpm
+        group.structure = rep_structure
+        group.vocal = rep_vocal
+        group.folder_name = _build_folder_name(
+            group.group_id,
+            group.key,
+            group.energy,
+            group.vibe,
+            group.structure,
+            group.vocal,
+            group.bpm,
+        )
     return assignment
 
 
@@ -244,7 +334,16 @@ def load_assignment(path: str) -> GroupAssignment:
     with open(path, "rb") as f:
         assignment = pickle.load(f)
     for group in assignment.groups:
-        group.folder_name = _safe_folder(group.folder_name)
+        group.key = _folder_key(group.key)
+        group.folder_name = _build_folder_name(
+            group.group_id,
+            group.key,
+            group.energy,
+            group.vibe,
+            group.structure,
+            group.vocal,
+            group.bpm,
+        )
     return assignment
 
 

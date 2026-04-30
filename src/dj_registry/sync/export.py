@@ -33,6 +33,23 @@ OVERVIEW_COLUMNS = [
     "songstats_bpm",
     "canonical_bpm",
     "bpm_confidence",
+    # 3-level genre classification
+    "genre_family",
+    "genre",
+    "subgenre",
+    "genre_confidence",
+    "genre_confidence_level",
+    "genre_alternatives",
+    "genre_evidence",
+    "genre_warnings",
+    "genre_taxonomy_version",
+    # Legacy DJ-functional taxonomy
+    "taxonomy_id",
+    "taxonomy_label",
+    "taxonomy_confidence",
+    "taxonomy_alternatives",
+    "taxonomy_evidence",
+    "taxonomy_version",
     # Metadata
     "rekordbox_genre",
     "rekordbox_label",
@@ -130,6 +147,23 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
                 "songstats_bpm": ss_obs.bpm if ss_obs else "",
                 "canonical_bpm": t.canonical_bpm,
                 "bpm_confidence": round(t.canonical_bpm_confidence, 2) if t.canonical_bpm_confidence else "",
+                # 3-level genre classification
+                "genre_family": t.genre_family,
+                "genre": t.genre,
+                "subgenre": t.subgenre,
+                "genre_confidence": round(t.genre_confidence, 2) if t.genre_confidence else "",
+                "genre_confidence_level": t.genre_confidence_level,
+                "genre_alternatives": t.genre_alternatives,
+                "genre_evidence": t.genre_evidence,
+                "genre_warnings": t.genre_warnings,
+                "genre_taxonomy_version": t.genre_taxonomy_version,
+                # Legacy DJ-functional taxonomy
+                "taxonomy_id": t.taxonomy_id,
+                "taxonomy_label": t.taxonomy_label,
+                "taxonomy_confidence": round(t.taxonomy_confidence, 2) if t.taxonomy_confidence else "",
+                "taxonomy_alternatives": t.taxonomy_alternatives,
+                "taxonomy_evidence": t.taxonomy_evidence,
+                "taxonomy_version": t.taxonomy_version,
                 # Metadata
                 "rekordbox_genre": rb_obs.genre if rb_obs else "",
                 "rekordbox_label": rb_obs.label if rb_obs else "",
@@ -187,4 +221,7 @@ def generate_reports(store: CsvStore, reports_dir: str) -> None:
     if top_outputs and top_outputs != output_dir:
         import shutil
         dest = os.path.join(top_outputs, "registry_overview.csv")
-        shutil.copy2(overview_path, dest)
+        try:
+            shutil.copy2(overview_path, dest)
+        except PermissionError:
+            logger.warning("Could not update %s because it is locked/open", dest)

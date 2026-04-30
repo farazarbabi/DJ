@@ -228,6 +228,7 @@ def _run_extraction(
     import os
     from pathlib import Path
     from .features.builder import RawCacheEntry, load_raw_cache, save_raw_cache
+    from .scanner import is_unknown_key
     from dj_tagger.universal_cache import get_cache as get_universal_cache, quick_duration
     from dj_tagger.tagger_cache import (
         hydrate_tagger_result,
@@ -266,7 +267,7 @@ def _run_extraction(
 
         # When force=True, skip cache and re-extract everything
         if force:
-            needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
+            needs_analysis = analyze_untagged and (t.energy is None or is_unknown_key(t.key))
             to_extract.append((i, t, mtime, needs_analysis))
             continue
 
@@ -313,7 +314,7 @@ def _run_extraction(
             continue
 
         # Need extraction — at least DSP, possibly full analysis
-        needs_analysis = analyze_untagged and (t.energy is None or t.key is None)
+        needs_analysis = analyze_untagged and (t.energy is None or is_unknown_key(t.key))
         if dsp_data and isinstance(dsp_data, dict):
             to_dsp_only.append((i, t, mtime))
         elif usable_tagger is not None:
@@ -453,7 +454,9 @@ def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
       vibe: str, vocal: "V"|"NV", vibe_scores: dict, vocal_ratio: float,
       confidences: {energy: float, key: float, structure: float, vibe: float, vocal: float}
     """
-    if analyze_untagged and (t.energy is None or t.key is None):
+    from .scanner import is_unknown_key
+
+    if analyze_untagged and (t.energy is None or is_unknown_key(t.key)):
         if "energy" in tagger_data:
             t.energy = tagger_data.get("energy")
         if "camelot" in tagger_data:
@@ -594,7 +597,11 @@ def _cmd_run(args) -> int:
     )
     from .grouping.distance import compute_distance_matrix, unified_distance_matrix
     from .grouping.assignment import (
-        assign_group_ids, save_assignment, load_assignment, assign_new_tracks,
+        assign_group_ids,
+        assign_new_tracks,
+        load_assignment,
+        refresh_group_descriptors,
+        save_assignment,
     )
     from .feedback.store import load_feedback
     from .feedback.apply import apply_feedback_to_distances
@@ -812,6 +819,7 @@ def _cmd_run(args) -> int:
         _t = _time.perf_counter()
         assignment = assign_group_ids(feature_tracks, labels, distance_matrix)
 
+    assignment = refresh_group_descriptors(feature_tracks, assignment)
     save_assignment(assignment, assignment_path)
 
     # ── Step 3: Groups ──

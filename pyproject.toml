@@ -31,5 +31,8 @@ dj-registry = "dj_registry.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+dj_registry = ["taxonomy/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,6 +12,12 @@ from dj_tagger.metadata import read_existing_tag
 logger = logging.getLogger(__name__)
 
 VIBE_LABELS = ["HYPN", "DRK", "RAW", "DEEP", "TRIB", "MEL", "ACID", "ATM"]
+UNKNOWN_KEYS = {"", "??", "NK"}
+
+
+def is_unknown_key(key: str | None) -> bool:
+    """Return true for missing/placeholder key values."""
+    return not key or key in UNKNOWN_KEYS
 
 
 @dataclass
@@ -49,7 +55,8 @@ def scan_library(paths: list[str], recursive: bool = True) -> list[TrackInfo]:
             parsed = parse_tag(tag_str)
             if parsed:
                 info.energy = int(parsed["energy"]) if parsed.get("energy", "?") != "?" else None
-                info.key = parsed.get("key")
+                parsed_key = parsed.get("key")
+                info.key = None if is_unknown_key(parsed_key) else parsed_key
                 if "bpm" in parsed and parsed["bpm"] != "???":
                     info.bpm = int(parsed["bpm"])
                 info.structure = parsed.get("structure")
