@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 from . import __version__
 from .config import RegistryConfig
@@ -306,7 +307,7 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
             seed=getattr(args, "seed", 42),
             show_progress=_show_progress(args),
         )
-        print(json.dumps(result, indent=2, sort_keys=True))
+        _print_dj_taxonomy_locations(result["model_dir"], include_training=True)
         return 0
 
     if command == "evaluate":
@@ -319,7 +320,7 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
             taxonomy_path=getattr(args, "taxonomy", None),
             show_progress=_show_progress(args),
         )
-        print(json.dumps(metrics, indent=2, sort_keys=True))
+        _print_dj_taxonomy_locations(getattr(args, "model_dir"), include_training=False)
         return 0
 
     if command == "test-api":
@@ -347,6 +348,18 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
     generate_reports(store, config.reports_dir, show_progress=_show_progress(args))
     print(f"DJ taxonomy: {count} tracks classified by internal and external models; reports regenerated")
     return 0
+
+
+def _print_dj_taxonomy_locations(model_dir: str, *, include_training: bool) -> None:
+    base = Path(model_dir)
+    if include_training:
+        print(f"DJ taxonomy models trained -> {base}")
+        print(f"Internal report -> {base / 'internal' / 'training_report.json'}")
+        print(f"External report -> {base / 'external' / 'training_report.json'}")
+    else:
+        print(f"DJ taxonomy evaluation complete -> {base}")
+    print(f"Comparison metrics -> {base / 'model_comparison.json'}")
+    print(f"Per-track comparison -> {base / 'model_comparison.csv'}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:

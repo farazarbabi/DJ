@@ -201,7 +201,7 @@ def test_generate_dj_ground_truth_legacy_files_out_redirects_to_registry_output(
     assert (tmp_path / "dj_taxonomy_ground_truth.csv").exists()
 
 
-def test_dj_taxonomy_cli_train_models(tmp_path):
+def test_dj_taxonomy_cli_train_models_prints_locations_only(tmp_path, capsys):
     store = _sample_store(tmp_path)
     labels_path = _write_dj_labels(tmp_path)
 
@@ -222,6 +222,49 @@ def test_dj_taxonomy_cli_train_models(tmp_path):
     assert rc == 0
     assert (tmp_path / "dj_model" / "internal" / "model.pkl").exists()
     assert (tmp_path / "dj_model" / "external" / "model.pkl").exists()
+    output = capsys.readouterr().out
+    assert "DJ taxonomy models trained" in output
+    assert "model_comparison.json" in output
+    assert '"comparison"' not in output
+    assert '"metrics"' not in output
+
+
+def test_dj_taxonomy_cli_evaluate_prints_locations_only(tmp_path, capsys):
+    store = _sample_store(tmp_path)
+    labels_path = _write_dj_labels(tmp_path)
+    cmd_dj_taxonomy(
+        Namespace(
+            dj_taxonomy_command="train-models",
+            output=str(tmp_path / "registry"),
+            labels=str(labels_path),
+            taxonomy=None,
+            model_dir=str(tmp_path / "dj_model"),
+            validation_split=0,
+            seed=42,
+            quiet=False,
+            no_progress=True,
+        )
+    )
+    capsys.readouterr()
+
+    rc = cmd_dj_taxonomy(
+        Namespace(
+            dj_taxonomy_command="evaluate",
+            output=str(tmp_path / "registry"),
+            labels=str(labels_path),
+            taxonomy=None,
+            model_dir=str(tmp_path / "dj_model"),
+            quiet=False,
+            no_progress=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "DJ taxonomy evaluation complete" in output
+    assert "model_comparison.json" in output
+    assert '"internal"' not in output
+    assert '"external"' not in output
 
 
 def test_dj_api_connection_success_with_fake_client():
