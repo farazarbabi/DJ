@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from pathlib import Path
@@ -78,6 +79,7 @@ def build_track_features(
     file_record: FileRecord | None = None,
     *,
     label_row: dict[str, str] | None = None,
+    feature_mode: str = "external",
 ) -> dict[str, float]:
     """Build a DictVectorizer-ready feature map from all available evidence.
 
@@ -91,8 +93,11 @@ def build_track_features(
 
     _add_identity_features(features, track, file_record, label_row)
     _add_tagger_features(features, track, observations, label_row)
-    _add_provider_features(features, observations, file_record, label_row)
-    _add_audio_features(features, observations)
+    if feature_mode not in {"internal", "external"}:
+        raise ValueError(f"Unsupported feature_mode: {feature_mode}")
+    if feature_mode == "external":
+        _add_provider_features(features, observations, file_record, label_row)
+        _add_audio_features(features, observations)
 
     return features
 
@@ -150,6 +155,9 @@ def _add_tagger_features(
     vibe = track.tagger_vibe or (tagger_obs.tagger_vibe if tagger_obs else "") or label_row.get("pred_Vibe_v1", "")
     vocal = track.tagger_vocal or (tagger_obs.tagger_vocal if tagger_obs else "") or label_row.get("pred_Vocal_v1", "")
     structure = track.tagger_structure or (tagger_obs.tagger_structure if tagger_obs else "") or label_row.get("structure", "")
+    vibe_scores = track.tagger_vibe_scores or (tagger_obs.tagger_vibe_scores if tagger_obs else "")
+    vocal_scores = track.tagger_vocal_scores or (tagger_obs.tagger_vocal_scores if tagger_obs else "")
+    confidences = track.tagger_confidences or (tagger_obs.tagger_confidences if tagger_obs else "")
     bpm = (
         _num(track.tagger_bpm)
         or _num(track.canonical_bpm)
@@ -178,11 +186,14 @@ def _add_tagger_features(
         features[f"tagger:vibe={token}"] = 1.0
         for cue in TAGGER_VIBE_CUES.get(token, []):
             _add_cue(features, cue)
+    _add_score_map_features(features, "tagger:mood_score", vibe_scores, normalizer=normalize_mood_code)
 
     for token in _split_vocal_codes(vocal):
         features[f"tagger:vocal={token}"] = 1.0
         for cue in TAGGER_VOCAL_CUES.get(token, []):
             _add_cue(features, cue)
+    _add_score_map_features(features, "tagger:vocal_score", vocal_scores, normalizer=normalize_vocal_profile)
+    _add_score_map_features(features, "tagger:confidence", confidences)
 
     structure_token = _normalize_code(structure)
     if structure_token:
@@ -279,6 +290,36 @@ def _add_text(features: dict[str, float], prefix: str, value: Any) -> None:
 def _add_numeric(features: dict[str, float], name: str, value: float | None) -> None:
     if value is not None:
         features[f"num:{name}"] = float(value)
+
+
+def _add_score_map_features(
+    features: dict[str, float],
+    prefix: str,
+    value: Any,
+    *,
+    normalizer: Any | None = None,
+) -> None:
+    if not value:
+        return
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return
+    if not isinstance(parsed, dict):
+        return
+    ranked: list[tuple[str, float]] = []
+    for key, raw_score in parsed.items():
+        norm_key = normalizer(key) if normalizer else _normalize_text(key).replace(" ", "_")
+        score = _num(raw_score)
+        if norm_key and score is not None:
+            ranked.append((norm_key, score))
+            features[f"num:{prefix}:{norm_key}"] = score
+            features[f"{prefix}_band:{norm_key}:{_value_band(score)}"] = 1.0
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    for rank, (key, _score) in enumerate(ranked[:3], start=1):
+        features[f"{prefix}:rank{rank}={key}"] = 1.0
 
 
 def _add_cue(features: dict[str, float], cue: str) -> None:

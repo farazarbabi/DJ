@@ -253,6 +253,102 @@ def cmd_taxonomy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
+    config = _build_config(args)
+    store = CsvStore(config.output_dir)
+
+    command = getattr(args, "dj_taxonomy_command", None) or "classify"
+    if command == "generate-ground-truth":
+        from .taxonomy.dj_ground_truth import generate_dj_ground_truth_csv
+
+        stats = generate_dj_ground_truth_csv(
+            store,
+            config=config,
+            files_dir=getattr(args, "files", "./files"),
+            output_path=getattr(args, "out", None),
+            taxonomy_path=getattr(args, "taxonomy", None),
+            model=getattr(args, "model", None),
+            limit=getattr(args, "limit", None),
+            force=getattr(args, "force", False),
+            fail_fast=not getattr(args, "keep_going", False),
+            show_progress=_show_progress(args),
+            cache_dir=getattr(args, "cache_dir", None),
+            collect=not getattr(args, "no_collect", False),
+            include_external=not getattr(args, "no_external", False),
+            include_songstats=not getattr(args, "no_songstats", False),
+            songstats_limit=getattr(args, "songstats_limit", None),
+            rekordbox_xml=getattr(args, "rekordbox_xml", None),
+            no_essentia=getattr(args, "no_essentia", False),
+            workers=getattr(args, "workers", None),
+        )
+        print(
+            "DJ taxonomy ground truth generated: "
+            f"{stats.rows_written} rows ({stats.generated} new, {stats.reused} reused, {stats.errors} errors) "
+            f"-> {stats.output_path}"
+        )
+        if stats.collection_summary:
+            print("Collection summary:")
+            for key, value in sorted(stats.collection_summary.items()):
+                print(f"  {key}: {value}")
+        if stats.error_message:
+            print(f"DJ taxonomy ground truth error: {stats.error_message}")
+        return 1 if stats.errors else 0
+
+    if command == "train-models":
+        from .taxonomy.dj_model import train_dj_taxonomy_models
+
+        result = train_dj_taxonomy_models(
+            store,
+            getattr(args, "labels"),
+            taxonomy_path=getattr(args, "taxonomy", None),
+            model_dir=getattr(args, "model_dir", None),
+            validation_split=getattr(args, "validation_split", 0.2),
+            seed=getattr(args, "seed", 42),
+            show_progress=_show_progress(args),
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if command == "evaluate":
+        from .taxonomy.dj_model import evaluate_dj_taxonomy_models
+
+        metrics = evaluate_dj_taxonomy_models(
+            store,
+            getattr(args, "labels"),
+            model_dir=getattr(args, "model_dir"),
+            taxonomy_path=getattr(args, "taxonomy", None),
+            show_progress=_show_progress(args),
+        )
+        print(json.dumps(metrics, indent=2, sort_keys=True))
+        return 0
+
+    if command == "test-api":
+        from .taxonomy.dj_ground_truth import test_dj_api_connection
+
+        result = test_dj_api_connection(model=getattr(args, "model", None))
+        if result.ok:
+            print(f"DJ taxonomy API connection ok: provider={result.provider} model={result.model}")
+            return 0
+        print(
+            "DJ taxonomy API connection failed: "
+            f"provider={result.provider} model={result.model} error={result.error_message}"
+        )
+        return 1
+
+    from .sync.export import generate_reports
+    from .taxonomy.dj_model import classify_all_dj_taxonomies
+
+    count = classify_all_dj_taxonomies(
+        store,
+        taxonomy_path=getattr(args, "taxonomy", None),
+        model_dir=getattr(args, "model_dir", None),
+        show_progress=_show_progress(args),
+    )
+    generate_reports(store, config.reports_dir, show_progress=_show_progress(args))
+    print(f"DJ taxonomy: {count} tracks classified by internal and external models; reports regenerated")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from .pipelines.orchestrator import run_full_pipeline
     config = _build_config(args)
@@ -403,6 +499,63 @@ def main(argv: list[str] | None = None) -> int:
     p_tax_api.add_argument("--model", default=None, help="OpenAI model to use (defaults to OPENAI_MODEL or gpt-5)")
     p_tax_api.add_argument("--output", default="./outputs/registry")
 
+    # dj-taxonomy
+    p_dj_tax = sub.add_parser("dj-taxonomy", help="Train and apply flat DJ-functional taxonomy models")
+    p_dj_tax.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
+    p_dj_tax.add_argument("--model-dir", default=None, help="Optional DJ taxonomy model directory")
+    p_dj_tax.add_argument("--output", default="./outputs/registry")
+    add_no_progress(p_dj_tax)
+    dj_tax_sub = p_dj_tax.add_subparsers(dest="dj_taxonomy_command")
+
+    p_dj_tax_classify = dj_tax_sub.add_parser("classify", help="Classify tracks with both DJ taxonomy models")
+    p_dj_tax_classify.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
+    p_dj_tax_classify.add_argument("--model-dir", default=None, help="Optional DJ taxonomy model directory")
+    p_dj_tax_classify.add_argument("--output", default="./outputs/registry")
+    add_no_progress(p_dj_tax_classify)
+
+    p_dj_tax_gt = dj_tax_sub.add_parser("generate-ground-truth", help="Generate GPT-5 seeded DJ taxonomy labels")
+    p_dj_tax_gt.add_argument("--files", default="./files", help="Folder of audio files to label")
+    p_dj_tax_gt.add_argument(
+        "--out",
+        default=None,
+        help="Output labels CSV path (defaults to OUTPUT/dj_taxonomy_ground_truth.csv)",
+    )
+    p_dj_tax_gt.add_argument("--model", default=None, help="OpenAI model to use (defaults to OPENAI_MODEL or gpt-5)")
+    p_dj_tax_gt.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
+    p_dj_tax_gt.add_argument("--limit", type=int, help="Maximum number of files to label")
+    p_dj_tax_gt.add_argument("--force", action="store_true", help="Regenerate rows and cache entries")
+    p_dj_tax_gt.add_argument("--keep-going", action="store_true", help="Continue after per-track API failures and write error rows")
+    p_dj_tax_gt.add_argument("--cache-dir", default=None, help="Optional response cache directory")
+    p_dj_tax_gt.add_argument("--no-collect", action="store_true", help="Do not run registry/tagger collection before GPT labeling")
+    p_dj_tax_gt.add_argument("--no-external", action="store_true", help="Collect internal registry/tagger data only")
+    p_dj_tax_gt.add_argument("--no-songstats", action="store_true", help="Skip Songstats enrichment even when configured")
+    p_dj_tax_gt.add_argument("--rekordbox-xml", dest="rekordbox_xml", help="Optional Rekordbox XML path to ingest before labeling")
+    p_dj_tax_gt.add_argument("--songstats-limit", type=int, help="Maximum Songstats tracks to fetch during collection")
+    p_dj_tax_gt.add_argument("--no-essentia", action="store_true")
+    p_dj_tax_gt.add_argument("-w", "--workers", type=int, default=1)
+    p_dj_tax_gt.add_argument("--output", default="./outputs/registry")
+    add_no_progress(p_dj_tax_gt)
+
+    p_dj_tax_train = dj_tax_sub.add_parser("train-models", help="Train internal and external DJ taxonomy models")
+    p_dj_tax_train.add_argument("--labels", required=True, help="DJ taxonomy ground-truth labels CSV")
+    p_dj_tax_train.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
+    p_dj_tax_train.add_argument("--model-dir", default=None, help="Output model directory")
+    p_dj_tax_train.add_argument("--validation-split", type=float, default=0.2)
+    p_dj_tax_train.add_argument("--seed", type=int, default=42)
+    p_dj_tax_train.add_argument("--output", default="./outputs/registry")
+    add_no_progress(p_dj_tax_train)
+
+    p_dj_tax_eval = dj_tax_sub.add_parser("evaluate", help="Evaluate both DJ taxonomy models against labels CSV")
+    p_dj_tax_eval.add_argument("--labels", required=True, help="DJ taxonomy ground-truth labels CSV")
+    p_dj_tax_eval.add_argument("--model-dir", required=True, help="Trained DJ taxonomy model directory")
+    p_dj_tax_eval.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
+    p_dj_tax_eval.add_argument("--output", default="./outputs/registry")
+    add_no_progress(p_dj_tax_eval)
+
+    p_dj_tax_api = dj_tax_sub.add_parser("test-api", help="Test OpenAI/Azure OpenAI DJ taxonomy labeling connection")
+    p_dj_tax_api.add_argument("--model", default=None, help="OpenAI model to use (defaults to OPENAI_MODEL or gpt-5)")
+    p_dj_tax_api.add_argument("--output", default="./outputs/registry")
+
     # run (full pipeline)
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument("paths", nargs="*", default=["./files"])
@@ -445,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         "sync-tags": cmd_sync_tags,
         "export": cmd_export,
         "taxonomy": cmd_taxonomy,
+        "dj-taxonomy": cmd_dj_taxonomy,
         "run": cmd_run,
     }
 

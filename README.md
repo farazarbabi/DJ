@@ -102,6 +102,11 @@ dj-registry taxonomy test-api
 dj-registry taxonomy generate-ground-truth --files ./files --out files/taxonomy_ground_truth.csv
 dj-registry taxonomy train-model --labels files/taxonomy_ground_truth.csv
 dj-registry taxonomy classify
+dj-registry dj-taxonomy test-api
+dj-registry dj-taxonomy generate-ground-truth --files ./files
+dj-registry dj-taxonomy train-models --labels outputs/registry/dj_taxonomy_ground_truth.csv
+dj-registry dj-taxonomy evaluate --labels outputs/registry/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
+dj-registry dj-taxonomy classify
 
 dj-grouper --dry-run
 dj-grouper --force-extract
@@ -223,6 +228,33 @@ The taxonomy workflow adds:
 Provider genres from Rekordbox, Spotify, Songstats, and embedded tags are used
 as model features, not as truth. See
 [docs/taxonomy_ground_truth_and_model.md](docs/taxonomy_ground_truth_and_model.md).
+
+The separate `dj-registry dj-taxonomy` workflow trains the flat DJ-functional
+category model from `src/dj_registry/taxonomy/dj_taxonomy.json`. It always trains
+and reports two models against the same GPT-seeded labels:
+
+- `internal`: file tags, tagger/librosa-derived values, filename/title/mix text
+- `external`: all internal features plus Rekordbox, Songstats, Spotify/source observations
+
+Classification always records both model predictions and confidences in
+`dj_taxonomy_internal_*` and `dj_taxonomy_external_*` columns. The primary
+`dj_taxonomy_*` metadata is expanded from the selected category ID, so moods,
+grooves, set roles, BPM/energy ranges, vocal profiles, source genres, and
+keywords remain bounded by `dj_taxonomy.json`.
+
+Methodology summary:
+
+- Ground truth is metadata-only GPT/Azure OpenAI labeling, constrained to allowed
+  `category_id` values from `dj_taxonomy.json`.
+- The ground-truth command first runs registry/tagger collection unless
+  `--no-collect` is used.
+- The internal model uses local file/tagger/librosa evidence only.
+- The external model uses the same local evidence plus Rekordbox, Songstats,
+  Spotify/source observations, provider genres, provider labels, and provider
+  audio features.
+- Both models use a sparse `DictVectorizer` plus balanced logistic regression,
+  then report top-1 accuracy, top-3 accuracy, F1, confidence buckets, agreement,
+  and external-improved/worsened counts.
 
 ### `dj-grouper`
 

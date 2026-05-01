@@ -253,6 +253,9 @@ Primary modules:
 - `features.py`: unified feature extraction for learned classification
 - `ground_truth.py`: GPT/Azure OpenAI label generation and API connection test
 - `model.py`: scikit-learn training, evaluation, artifact loading, and prediction
+- `dj_schema.py`: flat `dj_taxonomy.json` category loader and metadata expansion
+- `dj_ground_truth.py`: GPT/Azure OpenAI labels constrained to `dj_taxonomy.json`
+- `dj_model.py`: dual internal/external DJ category models and comparison reports
 
 The taxonomy reference is `music_genre_taxonomy_3_level.json`. Every output path
 must validate against this file.
@@ -274,6 +277,41 @@ taxonomy path. Deterministic evidence remains in `genre_evidence` for audit.
 
 Use `dj-registry taxonomy classify --no-model` to force deterministic-only
 classification.
+
+### Flat DJ-Functional Taxonomy
+
+`dj-registry dj-taxonomy` is separate from the 3-level genre workflow. It predicts
+one `category_id` from `src/dj_registry/taxonomy/dj_taxonomy.json` and expands all
+category metadata from that JSON rather than letting a model invent metadata.
+
+Ground truth generation runs registry/tagger collection first unless
+`--no-collect` is used. It can include configured Rekordbox and Songstats evidence,
+then asks GPT/Azure OpenAI for a strict JSON label bounded to the allowed category
+IDs. Provider genres are treated as hints only.
+
+Training writes two artifacts:
+
+- `outputs/registry/dj_taxonomy_model/internal/model.pkl`
+- `outputs/registry/dj_taxonomy_model/external/model.pkl`
+
+The internal model uses only file/embedded tags, local tagger/librosa-derived
+values, and identity text. The external model uses the same internal features plus
+Rekordbox, Songstats, Spotify/source observations, provider genres, labels, and
+provider audio features.
+
+Both models train on the same GPT/Azure OpenAI seeded labels so their metrics are
+directly comparable. The LLM labeler receives metadata only, not raw audio, and
+must return one allowed `category_id`; category metadata is expanded from
+`dj_taxonomy.json`.
+
+The current supervised baseline uses `DictVectorizer` plus balanced
+`LogisticRegression`. Reports include top-1/top-3 accuracy, macro and weighted
+F1, confidence buckets, per-category accuracy, model agreement, and external
+improved/worsened counts.
+
+Classification always runs both available models. It writes the primary
+`dj_taxonomy_*` metadata plus internal/external prediction columns so confidence
+and accuracy can be compared per track.
 
 ### Ground-Truth Labels
 

@@ -177,3 +177,199 @@ Classification writes these registry columns:
 - `genre_taxonomy_version`
 
 Legacy `taxonomy_*` columns are kept populated for downstream compatibility.
+
+## Flat DJ-Functional Category Model
+
+The newer `dj-registry dj-taxonomy` workflow is separate from the 3-level
+`family -> genre -> subgenre` classifier. It predicts one `category_id` from
+`src/dj_registry/taxonomy/dj_taxonomy.json`.
+
+The selected category controls all exported metadata:
+
+- `category_label`
+- `family`
+- `moods`
+- `grooves`
+- `set_roles`
+- `bpm_range`
+- `energy_range`
+- `vocal_profiles`
+- `source_genres`
+- `keywords`
+
+The model and GPT prompt cannot invent those values; they are expanded from the
+static JSON category.
+
+### Methodology
+
+The DJ-taxonomy workflow is designed to answer two separate questions:
+
+- How accurately can local/internal evidence classify a track?
+- How much do external sources improve or degrade that classification?
+
+To keep that comparison valid, both models train and evaluate against the same
+ground-truth CSV. The ground truth is created once with GPT/Azure OpenAI using
+all available evidence, but the resulting label is constrained to a single
+`category_id` from `dj_taxonomy.json`.
+
+The pipeline is:
+
+1. Collect registry data from the files folder.
+2. Run local tagger/librosa analysis and store internal evidence on the registry.
+3. Optionally ingest Rekordbox and Songstats/Spotify-style source observations.
+4. Build a metadata-only prompt for each track.
+5. Ask GPT/Azure OpenAI to choose exactly one allowed `category_id`.
+6. Validate the response against `dj_taxonomy.json`.
+7. Expand category metadata from JSON into the ground-truth CSV.
+8. Train one internal-only model and one internal+external model.
+9. Evaluate both models against the same labels and write comparison reports.
+
+Raw audio is not uploaded to the LLM. The prompt only includes registry metadata,
+tagger outputs, source observations, and derived numeric/audio feature values.
+
+### Commands
+
+Validate API credentials:
+
+```bash
+dj-registry dj-taxonomy test-api
+```
+
+Generate GPT-seeded category labels. This runs registry/tagger collection first
+unless `--no-collect` is passed:
+
+```bash
+dj-registry dj-taxonomy generate-ground-truth --files ./files
+```
+
+The default output is `outputs/registry/dj_taxonomy_ground_truth.csv`. Use
+`--out` only when you need a different location.
+
+Train both models:
+
+```bash
+dj-registry dj-taxonomy train-models --labels outputs/registry/dj_taxonomy_ground_truth.csv
+```
+
+Evaluate both models against the same labels:
+
+```bash
+dj-registry dj-taxonomy evaluate --labels outputs/registry/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
+```
+
+Classify registry tracks:
+
+```bash
+dj-registry dj-taxonomy classify
+```
+
+### Two Feature Modes
+
+The internal model uses only:
+
+- file and embedded tags
+- filename/path/title/artist/mix text
+- local tagger mood, vocal profile, energy, structure, BPM, key, and score maps
+- local Python/librosa-derived analysis already stored by the registry/tagger
+
+The external model uses all internal features plus:
+
+- Rekordbox observations
+- Songstats observations and audio features
+- Spotify/source IDs and provider metadata where available
+- provider genres, labels, comments, release dates, and `genres_all`
+
+The feature boundary is enforced in code. Internal mode intentionally excludes
+provider observations, provider genres, and provider audio features so the
+internal accuracy reflects what can be learned from local files and local
+analysis alone.
+
+Both models currently use the same baseline supervised architecture:
+
+- `DictVectorizer` converts sparse text, categorical, cue, and numeric features.
+- Balanced `LogisticRegression` predicts the flat `category_id`.
+- `predict_proba()` provides the confidence signal.
+- Top alternatives come from the next highest probability classes.
+
+This model choice is intentionally simple and auditable. It gives probabilities,
+works on small datasets, supports sparse text/categorical features, and makes it
+easy to compare internal versus external evidence before introducing more complex
+models.
+
+Both models are always run during `dj-taxonomy classify` when artifacts exist.
+The registry stores both predictions and confidences:
+
+- `dj_taxonomy_internal_id`
+- `dj_taxonomy_internal_confidence`
+- `dj_taxonomy_external_id`
+- `dj_taxonomy_external_confidence`
+- `dj_taxonomy_models_agree`
+- `dj_taxonomy_external_evidence_available`
+
+The primary `dj_taxonomy_id`, label, metadata, and confidence use the external
+model when available, while preserving the internal prediction for comparison.
+
+### Ground-Truth Guardrails
+
+The LLM prompt is bounded by the full `dj_taxonomy.json` category list. The
+response schema requires:
+
+- `category_id`
+- `confidence`
+- `alternate_category_ids`
+- `rationale`
+- `warnings`
+
+Every returned ID must exist in `dj_taxonomy.json`. Invalid outputs are retried
+once with validation feedback. The prompt explicitly treats Rekordbox, Spotify,
+Songstats, and embedded genres as hints rather than truth, because those source
+genres are often broad, inconsistent, or wrong for live-DJ use.
+
+The ground-truth CSV is fail-fast by default. On the first API, parsing, or
+validation error, the command stops and prints the failing track. Use
+`--keep-going` only when you intentionally want error rows. Existing error rows
+are retried on later runs and are not silently reused as labels.
+
+### Reports
+
+Training/evaluation writes:
+
+```text
+outputs/registry/dj_taxonomy_model/
+  internal/model.pkl
+  internal/training_report.json
+  internal/training_audit.csv
+  external/model.pkl
+  external/training_report.json
+  external/training_audit.csv
+  model_comparison.json
+  model_comparison.csv
+```
+
+The comparison report includes top-1 accuracy, top-3 accuracy, macro/weighted F1,
+confidence buckets, per-category support, model agreement rate, and tracks where
+external evidence improved or worsened the prediction.
+
+Interpret the reports as follows:
+
+- `internal/top1_accuracy`: how often local tags, filename/text, and tagger/librosa evidence alone matched ground truth.
+- `external/top1_accuracy`: how often the enriched feature set matched ground truth.
+- `agreement_rate`: how often both models chose the same category, regardless of correctness.
+- `external_improved`: tracks where external evidence fixed an internal-only miss.
+- `external_worsened`: tracks where external evidence moved a correct internal prediction to a wrong one.
+- `confidence_buckets`: calibration check; high-confidence buckets should be more accurate than low-confidence buckets.
+- `per_category`: support and accuracy by category, useful for spotting underrepresented or confused categories.
+
+`model_comparison.csv` is the most useful audit file when tuning the taxonomy or
+feature weights. It contains expected label, both predictions, both confidences,
+whether each model was correct, whether the models agreed, confidence delta, and
+whether external evidence was available.
+
+### Registry Outputs
+
+After `dj-registry dj-taxonomy classify`, `registry_overview.csv` includes:
+
+- primary category columns: `dj_taxonomy_id`, `dj_taxonomy_label`, `dj_taxonomy_family`
+- expanded metadata: `dj_taxonomy_moods`, `dj_taxonomy_grooves`, `dj_taxonomy_set_roles`, `dj_taxonomy_bpm_range`, `dj_taxonomy_energy_range`, `dj_taxonomy_vocal_profiles`, `dj_taxonomy_source_genres`, `dj_taxonomy_keywords`
+- model comparison columns: `dj_taxonomy_internal_id`, `dj_taxonomy_internal_confidence`, `dj_taxonomy_external_id`, `dj_taxonomy_external_confidence`, `dj_taxonomy_models_agree`, `dj_taxonomy_external_evidence_available`
+- audit columns: `dj_taxonomy_alternatives`, `dj_taxonomy_evidence`, `dj_taxonomy_version`

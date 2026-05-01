@@ -55,6 +55,32 @@ class LogicalTrack:
     taxonomy_evidence: str = ""
     taxonomy_version: str = ""
 
+    # Flat DJ-functional taxonomy ML fields from dj_taxonomy.json
+    dj_taxonomy_id: str = ""
+    dj_taxonomy_label: str = ""
+    dj_taxonomy_family: str = ""
+    dj_taxonomy_moods: str = ""
+    dj_taxonomy_grooves: str = ""
+    dj_taxonomy_set_roles: str = ""
+    dj_taxonomy_bpm_range: str = ""
+    dj_taxonomy_energy_range: str = ""
+    dj_taxonomy_vocal_profiles: str = ""
+    dj_taxonomy_source_genres: str = ""
+    dj_taxonomy_keywords: str = ""
+    dj_taxonomy_confidence: float = 0.0
+    dj_taxonomy_source_model: str = ""
+    dj_taxonomy_internal_id: str = ""
+    dj_taxonomy_internal_label: str = ""
+    dj_taxonomy_internal_confidence: float = 0.0
+    dj_taxonomy_external_id: str = ""
+    dj_taxonomy_external_label: str = ""
+    dj_taxonomy_external_confidence: float = 0.0
+    dj_taxonomy_models_agree: str = ""
+    dj_taxonomy_external_evidence_available: str = ""
+    dj_taxonomy_alternatives: str = ""
+    dj_taxonomy_evidence: str = ""
+    dj_taxonomy_version: str = ""
+
     # Tagger analysis features (single-source, stored directly)
     tagger_energy: str = ""
     tagger_vibe: str = ""
