@@ -10,6 +10,9 @@ from statistics import mode as stat_mode
 import numpy as np
 from numpy.typing import NDArray
 
+from dj_tagger.moods import normalize_mood_code
+from dj_tagger.vocals import normalize_vocal_profile
+
 from ..config import GrouperConfig
 from ..features.builder import TrackFeatures
 from .distance import blended_distance
@@ -64,17 +67,17 @@ def _representative_values(
     infos = [tracks[i].info for i in members]
     keys = [i.key for i in infos if _is_known_key(i.key)]
     energies = [i.energy for i in infos if i.energy is not None]
-    vibes = [i.vibe for i in infos if i.vibe]
+    vibes = [normalize_mood_code(i.vibe) for i in infos if normalize_mood_code(i.vibe)]
     bpms = [i.bpm for i in infos if i.bpm is not None]
     structures = [i.structure for i in infos if i.structure]
-    vocals = [i.vocal for i in infos if i.vocal]
+    vocals = [normalize_vocal_profile(i.vocal) for i in infos if normalize_vocal_profile(i.vocal)]
 
     rep_key = _safe_mode(keys, "NK")
     rep_energy = _safe_mode(energies, 3)
     rep_vibe = _safe_mode(vibes, "HYPN")
     rep_bpm = round(np.median(bpms)) if bpms else 128
     rep_structure = _safe_mode(structures, "32H")
-    rep_vocal = _safe_mode(vocals, "NV")
+    rep_vocal = _safe_mode(vocals, "INST")
 
     return rep_key, rep_energy, rep_vibe, rep_bpm, rep_structure, rep_vocal
 
@@ -231,10 +234,10 @@ def assign_new_tracks(
             info = new_track.info
             rep_key = _folder_key(info.key)
             rep_energy = info.energy or 3
-            rep_vibe = info.vibe or "HYPN"
+            rep_vibe = normalize_mood_code(info.vibe) or "HYPN"
             rep_bpm = info.bpm or 128
             rep_structure = info.structure or "32H"
-            rep_vocal = info.vocal or "NV"
+            rep_vocal = normalize_vocal_profile(info.vocal) or "INST"
             new_group = GroupInfo(
                 group_id=new_gid,
                 member_indices=[idx],
@@ -296,7 +299,7 @@ def refresh_group_descriptors(
     tracks: list[TrackFeatures],
     assignment: GroupAssignment,
 ) -> GroupAssignment:
-    """Refresh group key/energy/vibe/BPM descriptors from current track metadata.
+    """Refresh group key/energy/mood/BPM descriptors from current track metadata.
 
     Existing assignments can outlive key-resolution improvements. Recomputing
     descriptors prevents stale ``??`` group keys from leaking into output names.
@@ -335,6 +338,8 @@ def load_assignment(path: str) -> GroupAssignment:
         assignment = pickle.load(f)
     for group in assignment.groups:
         group.key = _folder_key(group.key)
+        group.vibe = normalize_mood_code(group.vibe) or "HYPN"
+        group.vocal = normalize_vocal_profile(group.vocal) or "INST"
         group.folder_name = _build_folder_name(
             group.group_id,
             group.key,

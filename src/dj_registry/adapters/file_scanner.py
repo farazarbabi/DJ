@@ -14,6 +14,7 @@ import soundfile as sf
 
 from ..config import RegistryConfig
 from ..models import FileRecord, SourceObservation, PayloadIndexEntry, now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from ..store.obs_cache import ObsCache
 from .tag_extractor import extract_tags
@@ -96,6 +97,8 @@ def scan_files(
     config: RegistryConfig,
     store: CsvStore,
     obs_cache: ObsCache | None = None,
+    *,
+    show_progress: bool = False,
 ) -> list[FileRecord]:
     """Scan library, create/update FileRecords, extract tags as observations.
 
@@ -115,8 +118,9 @@ def scan_files(
     new_payloads: list[PayloadIndexEntry] = []
     updated = 0
     skipped = 0
+    progress = ProgressBar(len(paths), label="Scan files", enabled=show_progress)
 
-    for path in paths:
+    for index, path in enumerate(paths, start=1):
         path_abs = str(path.resolve())
         stat = path.stat()
         mtime_str = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
@@ -143,6 +147,7 @@ def scan_files(
                     observed_at=existing.last_scanned_at,
                 ))
             skipped += 1
+            progress.update(index, path.name, new=len(new_files), updated=updated, skipped=skipped)
             continue
 
         # Compute file metadata
@@ -231,7 +236,9 @@ def scan_files(
             payload_path=os.path.relpath(snapshot_path, config.output_dir),
             fetched_at=now_iso(),
         ))
+        progress.update(index, path.name, new=len(new_files), updated=updated, skipped=skipped)
 
+    progress.finish()
     all_files = list(existing_files.values()) + new_files
 
     store.save_files(all_files)

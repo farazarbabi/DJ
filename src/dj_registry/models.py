@@ -62,6 +62,7 @@ class LogicalTrack:
     tagger_structure: str = ""
     tagger_bpm: str = ""
     tagger_vibe_scores: str = ""
+    tagger_vocal_scores: str = ""
     tagger_confidences: str = ""
     tagger_version: str = ""
     tagger_raw_signature: str = ""
@@ -182,6 +183,7 @@ class SourceObservation:
     tagger_vocal: str = ""
     tagger_structure: str = ""
     tagger_vibe_scores: str = ""
+    tagger_vocal_scores: str = ""
     tagger_confidences: str = ""
 
     # Platform IDs (for cross-referencing)

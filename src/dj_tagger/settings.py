@@ -32,6 +32,9 @@ _RAW_VERSION_FILES = (
 _DERIVED_VERSION_FILES = (
     "src/dj_tagger/derive.py",
     "src/dj_tagger/vibe_scoring.py",
+    "src/dj_tagger/moods.py",
+    "src/dj_tagger/vocals.py",
+    "src/dj_registry/taxonomy/dj_taxonomy.json",
 )
 _KEY_VERSION_FILES = (
     "src/dj_tagger/audio.py",

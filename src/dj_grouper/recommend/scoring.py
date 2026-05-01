@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dj_tagger.moods import normalize_mood_code
+from dj_tagger.vocals import has_vocal_content
+
 from ..config import GrouperConfig
 from ..features.builder import TrackFeatures
 from ..grouping.distance import blended_distance
@@ -58,9 +61,9 @@ def _bpm_penalty(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> f
 def _key_penalty(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> float:
     """Key penalty, weighted by vibe and vocal presence."""
     d = _camelot_distance(a.info.key, b.info.key)
-    vibe_a = a.info.vibe or "HYPN"
+    vibe_a = normalize_mood_code(a.info.vibe) or "HYPN"
     kw = config.key_weight_by_vibe.get(vibe_a, 0.2)
-    if a.info.vocal == "V":
+    if has_vocal_content(a.info.vocal):
         kw = min(1.0, kw + config.key_weight_vocal_boost)
     return d * kw * 0.15
 

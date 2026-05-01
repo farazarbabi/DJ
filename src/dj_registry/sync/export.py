@@ -6,6 +6,7 @@ import csv
 import logging
 import os
 
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore, _sanitize_cell
 
 logger = logging.getLogger(__name__)
@@ -69,11 +70,14 @@ OVERVIEW_COLUMNS = [
     "ss_valence",
     # Tagger analysis features
     "tagger_energy",
+    "tagger_mood",
     "tagger_vibe",
     "tagger_vocal",
     "tagger_structure",
     "tagger_bpm",
+    "tagger_mood_scores",
     "tagger_vibe_scores",
+    "tagger_vocal_scores",
     "tagger_confidences",
     "tagger_version",
     "tagger_raw_signature",
@@ -88,7 +92,7 @@ OVERVIEW_COLUMNS = [
 ]
 
 
-def generate_overview(store: CsvStore, output_dir: str) -> str:
+def generate_overview(store: CsvStore, output_dir: str, *, show_progress: bool = False) -> str:
     """Generate registry_overview.csv — one row per track, all sources as columns.
 
     Returns the path to the generated file.
@@ -112,11 +116,13 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
     path = os.path.join(output_dir, "registry_overview.csv")
     os.makedirs(output_dir, exist_ok=True)
 
+    progress = ProgressBar(len(tracks), label="Export overview", enabled=show_progress)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=OVERVIEW_COLUMNS, extrasaction="ignore")
         w.writeheader()
 
-        for t in sorted(tracks, key=lambda x: (x.artist_canonical, x.title_canonical)):
+        sorted_tracks = sorted(tracks, key=lambda x: (x.artist_canonical, x.title_canonical))
+        for index, t in enumerate(sorted_tracks, start=1):
             frec = file_by_track.get(t.track_id)
             tag_obs = obs_index.get((t.track_id, "tag"))
             rb_obs = obs_index.get((t.track_id, "rekordbox"))
@@ -183,11 +189,14 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
                 "ss_valence": ss_obs.valence if ss_obs else "",
                 # Tagger analysis features
                 "tagger_energy": t.tagger_energy,
+                "tagger_mood": t.tagger_vibe,
                 "tagger_vibe": t.tagger_vibe,
                 "tagger_vocal": t.tagger_vocal,
                 "tagger_structure": t.tagger_structure,
                 "tagger_bpm": t.tagger_bpm,
+                "tagger_mood_scores": t.tagger_vibe_scores,
                 "tagger_vibe_scores": t.tagger_vibe_scores,
+                "tagger_vocal_scores": getattr(t, "tagger_vocal_scores", ""),
                 "tagger_confidences": t.tagger_confidences,
                 "tagger_version": t.tagger_version,
                 "tagger_raw_signature": t.tagger_raw_signature,
@@ -201,12 +210,14 @@ def generate_overview(store: CsvStore, output_dir: str) -> str:
                 "track_id": t.track_id,
             }
             w.writerow({k: _sanitize_cell(str(v)) for k, v in row.items()})
+            progress.update(index, t.title_canonical)
 
+    progress.finish()
     logger.info("Overview: %s (%d tracks)", path, len(tracks))
     return path
 
 
-def generate_reports(store: CsvStore, reports_dir: str) -> None:
+def generate_reports(store: CsvStore, reports_dir: str, *, show_progress: bool = False) -> None:
     """Generate all reports including the overview.
 
     Writes registry_overview.csv both in the registry dir and in the
@@ -214,7 +225,7 @@ def generate_reports(store: CsvStore, reports_dir: str) -> None:
     """
     # Always generate the overview in the registry root
     output_dir = os.path.dirname(reports_dir) if reports_dir.endswith("reports") else reports_dir
-    overview_path = generate_overview(store, output_dir)
+    overview_path = generate_overview(store, output_dir, show_progress=show_progress)
 
     # Copy to top-level outputs/ for easy access
     top_outputs = os.path.dirname(output_dir)

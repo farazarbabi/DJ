@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dj_tagger.moods import normalize_mood_code
+
 from ..scanner import TrackInfo
 
 ROLES = ["TOOL", "DRIVER", "PEAK", "RESET", "BREAKDOWN", "BRIDGE"]
@@ -20,7 +22,7 @@ def infer_role(info: TrackInfo, dsp: dict[str, float]) -> str:
     """
     energy = info.energy or 3
     flow = info.flow_type or "H"
-    vibe = info.vibe or "HYPN"
+    vibe = normalize_mood_code(info.vibe) or "HYPN"
     dsp.get("onset_density", 0.0)
     dsp.get("rms_mean", 0.0)
 
@@ -33,7 +35,7 @@ def infer_role(info: TrackInfo, dsp: dict[str, float]) -> str:
         return "TOOL"
 
     # Reset: low energy + atmospheric/deep vibe
-    if energy <= 2 and vibe in ("ATM", "DEEP"):
+    if energy <= 2 and vibe in ("ATM", "CIN", "DEEP", "SUB", "SUN"):
         return "RESET"
 
     # Tool: low energy + sparse onset
@@ -45,7 +47,7 @@ def infer_role(info: TrackInfo, dsp: dict[str, float]) -> str:
         return "PEAK"
 
     # Bridge: E3 with melodic or atmospheric qualities, or mixed vibe signals
-    if energy == 3 and vibe in ("MEL", "ATM", "DEEP"):
+    if energy == 3 and vibe in ("MEL", "EMO", "EUP", "SOUL", "WARM", "ATM", "CIN", "DEEP", "SUN"):
         return "BRIDGE"
 
     # Driver: E3, steady groove (default for E3)

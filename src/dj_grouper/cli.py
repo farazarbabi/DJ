@@ -347,6 +347,7 @@ def _run_extraction(
                 energy=t.energy, camelot=t.key, bpm=t.bpm,
                 structure=t.structure, vibe=t.vibe,
                 has_vocals=tagger_result.get("has_vocals"),
+                vocal_profile=tagger_result.get("vocal_profile", tagger_result.get("vocal")),
             )
             _write_tag(t.path, base_tag, dry_run=False)
 
@@ -451,9 +452,12 @@ def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
 
     The tagger result dict has this structure:
       energy: int, camelot: str, bpm: float, structure: str,
-      vibe: str, vocal: "V"|"NV", vibe_scores: dict, vocal_ratio: float,
+      vibe/mood: str, vocal: taxonomy profile code, vibe_scores: dict, vocal_ratio: float,
       confidences: {energy: float, key: float, structure: float, vibe: float, vocal: float}
     """
+    from dj_tagger.moods import normalize_mood_code, normalize_mood_scores
+    from dj_tagger.vocals import normalize_vocal_profile, normalize_vocal_profile_scores
+
     from .scanner import is_unknown_key
 
     if analyze_untagged and (t.energy is None or is_unknown_key(t.key)):
@@ -475,14 +479,22 @@ def _apply_tagger_result(t, tagger_data: dict, analyze_untagged: bool) -> None:
                     pass
 
     # Vibe and vocal — always apply (these are analyzed regardless of tags)
-    if "vibe" in tagger_data:
-        t.vibe = tagger_data.get("vibe")
+    if "vibe" in tagger_data or "mood" in tagger_data:
+        t.vibe = normalize_mood_code(tagger_data.get("mood") or tagger_data.get("vibe"))
     if "vibe_scores" in tagger_data:
-        t.vibe_scores = tagger_data.get("vibe_scores", {})
+        t.vibe_scores = normalize_mood_scores(tagger_data.get("vibe_scores", {}))
+    elif "mood_scores" in tagger_data:
+        t.vibe_scores = normalize_mood_scores(tagger_data.get("mood_scores", {}))
     if "vocal" in tagger_data:
-        vocal = tagger_data.get("vocal")
-        if vocal in ("V", "NV"):
+        vocal = normalize_vocal_profile(tagger_data.get("vocal_profile") or tagger_data.get("vocal"))
+        if vocal:
             t.vocal = vocal
+    elif "vocal_profile" in tagger_data:
+        vocal = normalize_vocal_profile(tagger_data.get("vocal_profile"))
+        if vocal:
+            t.vocal = vocal
+    if "vocal_scores" in tagger_data:
+        t.vocal_scores = normalize_vocal_profile_scores(tagger_data.get("vocal_scores", {}))
 
     # Confidences — tagger stores as nested dict {"energy": 0.9, "key": 0.85, ...}
     confs = tagger_data.get("confidences")
@@ -506,6 +518,8 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
     Passes BPM values for post-clustering validation.
     """
     import numpy as np
+    from dj_tagger.vocals import has_vocal_content
+
     from .grouping.clustering import cluster_tracks
 
     n = len(feature_tracks)
@@ -514,9 +528,9 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
     all_keys = [t.info.key for t in feature_tracks]
     conf_threshold = config.vocal_confidence_threshold
 
-    confident_v = [i for i in range(n) if feature_tracks[i].info.vocal == "V"
+    confident_v = [i for i in range(n) if has_vocal_content(feature_tracks[i].info.vocal)
                    and feature_tracks[i].info.confidences.get("vocal", 1.0) >= conf_threshold]
-    confident_nv = [i for i in range(n) if feature_tracks[i].info.vocal != "V"
+    confident_nv = [i for i in range(n) if not has_vocal_content(feature_tracks[i].info.vocal)
                     or feature_tracks[i].info.confidences.get("vocal", 1.0) < conf_threshold]
 
     if len(confident_v) < 2:
@@ -542,7 +556,7 @@ def _cluster_with_soft_vocal(feature_tracks, distance_matrix, config):
     for i, idx in enumerate(confident_v):
         labels[idx] = sub_v_labels[i] + label_offset
 
-    print(f"  NV/uncertain: {len(confident_nv)} tracks, V (confident): {len(confident_v)} tracks")
+    print(f"  non-vocal/uncertain: {len(confident_nv)} tracks, vocal-profile (confident): {len(confident_v)} tracks")
     return labels
 
 
@@ -866,8 +880,8 @@ def _cmd_run(args) -> int:
                     new_tag = format_tag(
                         energy=info.energy, camelot=info.key, bpm=info.bpm,
                         structure=info.structure, vibe=info.vibe,
-                        has_vocals=info.vocal == "V",
                         group_id=group.group_id,
+                        vocal_profile=info.vocal,
                     )
                     existing = read_existing_tag(tf.path)
                     if existing == new_tag:
@@ -1062,8 +1076,8 @@ def _cmd_apply(args) -> int:
                 tag = format_tag(
                     energy=info.energy, camelot=info.key, bpm=info.bpm,
                     structure=info.structure, vibe=info.vibe,
-                    has_vocals=info.vocal == "V",
                     group_id=group.group_id,
+                    vocal_profile=info.vocal,
                 )
                 write_tag(tf.path, tag, dry_run=False)
         print(f"  Tags written to {len(tracks)} files")

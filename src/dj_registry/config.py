@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -87,8 +88,18 @@ class RegistryConfig:
         """Load environment variables from .env file."""
         try:
             from dotenv import load_dotenv
-            load_dotenv()
-        except ImportError:
+            candidates = [
+                Path.cwd() / ".env",
+                Path(__file__).resolve().parents[2] / ".env",
+            ]
+            loaded = False
+            for candidate in candidates:
+                if candidate.exists():
+                    load_dotenv(candidate, override=False)
+                    loaded = True
+            if not loaded:
+                load_dotenv()
+        except Exception:
             pass
         if not self.songstats_api_key:
             self.songstats_api_key = os.environ.get("SONGSTATS_API_KEY", "")

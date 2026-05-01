@@ -11,7 +11,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from dj_tagger.moods import MOOD_CUES_BY_CODE, normalize_mood_code
+from dj_tagger.vocals import (
+    VOCAL_PROFILE_CUES_BY_CODE,
+    has_vocal_content,
+    normalize_vocal_profile,
+)
+
 from ..models import FileRecord, LogicalTrack, SourceObservation
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 TAXONOMY_VERSION = "genre-taxonomy-3level-v1"
@@ -34,6 +42,12 @@ SOURCE_WEIGHTS = {
     "local_tagger_field": 0.50,
     "derived_dj_signal": 0.45,
 }
+
+TRIBAL_MOOD_CODES = {"TRIB", "ORG"}
+DEEP_MOOD_CODES = {"DEEP", "SUB", "MIN"}
+MELODIC_MOOD_CODES = {"MEL", "EMO", "EUP", "SOUL", "WARM", "CIN", "SUN"}
+DARK_MOOD_CODES = {"DRK", "TENS", "WHSE", "GRIT"}
+HYPNOTIC_MOOD_CODES = {"HYPN", "MIN"}
 
 BROAD_SUBGENRE_LABELS = {
     "Ambient",
@@ -881,7 +895,7 @@ class _Scorer:
                 0.24,
                 house_item,
             )
-            if evidence.tagger_vibes & {"TRIB", "ORG"}:
+            if evidence.tagger_vibes & TRIBAL_MOOD_CODES:
                 self._add_genre_prior(
                     "House",
                     "Organic / Afro / Tribal House",
@@ -905,7 +919,7 @@ class _Scorer:
                 self._add_subgenre_modifier(
                     "House",
                     "Deep / Minimal / Groove House",
-                    "Vocal Deep House" if "V" in evidence.tagger_vocals else "Deep House",
+                    "Vocal Deep House" if any(has_vocal_content(v) for v in evidence.tagger_vocals) else "Deep House",
                     0.28,
                     house_item,
                 )
@@ -983,6 +997,15 @@ class _Scorer:
         broken = structure.endswith("B") or structure == "BREAKS"
         low_valence = evidence.valence is not None and evidence.valence <= 0.30
         high_inst = evidence.instrumentalness is not None and evidence.instrumentalness >= 0.72
+        text_blob = " ".join(
+            value
+            for signal in evidence.text_signals
+            for value in signal.normalized_values
+        )
+        desert_text = any(
+            _contains_phrase(text_blob, term)
+            for term in ("desert", "middle eastern", "sunset", "ethnic")
+        )
 
         def item(reason: str) -> EvidenceItem:
             return EvidenceItem(
@@ -994,7 +1017,7 @@ class _Scorer:
                 explanation=reason,
             )
 
-        if "TRIB" in vibes or "ORG" in vibes:
+        if vibes & TRIBAL_MOOD_CODES:
             if bpm is not None and bpm < 112:
                 self._add_genre_prior(
                     "Downtempo / Slow Electronic",
@@ -1024,7 +1047,15 @@ class _Scorer:
                     0.46,
                     item("tribal/organic tagger cues support Organic / Afro / Tribal House"),
                 )
-                if energy is not None and energy <= 2:
+                if desert_text:
+                    self._add_subgenre_modifier(
+                        "House",
+                        "Organic / Afro / Tribal House",
+                        "Desert House",
+                        0.50,
+                        item("organic tagger cues with desert/middle-eastern text support Desert House"),
+                    )
+                elif energy is not None and energy <= 2:
                     self._add_subgenre_modifier(
                         "House",
                         "Organic / Afro / Tribal House",
@@ -1041,7 +1072,7 @@ class _Scorer:
                         item("rolling tribal tagger cues support Tribal House"),
                     )
 
-        if "DEEP" in vibes:
+        if vibes & DEEP_MOOD_CODES:
             if bpm is not None and bpm < 112:
                 self._add_family_prior(
                     "Downtempo / Slow Electronic",
@@ -1090,7 +1121,7 @@ class _Scorer:
                     item("deep techno-BPM tagger cue supports Deep Techno"),
                 )
 
-        if "MEL" in vibes:
+        if vibes & MELODIC_MOOD_CODES:
             if bpm is not None and bpm < 112:
                 self._add_family_prior(
                     "Downtempo / Slow Electronic",
@@ -1156,7 +1187,7 @@ class _Scorer:
                     item("melodic tagger cue supports Cinematic Downtempo when downtempo is otherwise likely"),
                 )
 
-        if "DRK" in vibes:
+        if vibes & DARK_MOOD_CODES:
             if bpm is not None and bpm <= 124:
                 self._add_genre_prior(
                     "House",
@@ -1187,7 +1218,7 @@ class _Scorer:
                     item(f"dark techno-BPM tagger cue supports {subgenre}"),
                 )
 
-        if ("HYP" in vibes or "HYPN" in vibes) and rolling:
+        if vibes & HYPNOTIC_MOOD_CODES and rolling:
             if bpm is not None and bpm >= 126:
                 self._add_genre_prior(
                     "Techno",
@@ -1239,7 +1270,7 @@ class _Scorer:
                     item("groovy instrumental house-BPM cues support Rolling Deep Tech"),
                 )
         if rolling and bpm is not None and 118 <= bpm <= 128:
-            if vibes & {"TRIB", "ORG"}:
+            if vibes & TRIBAL_MOOD_CODES:
                 self._add_subgenre_modifier(
                     "House",
                     "Tech House",
@@ -1262,7 +1293,7 @@ class _Scorer:
                 0.18,
                 item("loose tagger structure at slow BPM supports slow club music"),
             )
-            if vibes & {"TRIB", "ORG"}:
+            if vibes & TRIBAL_MOOD_CODES:
                 self._add_subgenre_modifier(
                     "Downtempo / Slow Electronic",
                     "Slow Club Music",
@@ -1349,9 +1380,26 @@ def load_taxonomy(path: str | None = None) -> GenreTaxonomy:
     return GenreTaxonomy(data)
 
 
-def classify_all_taxonomies(store: CsvStore, taxonomy_path: str | None = None) -> int:
+def classify_all_taxonomies(
+    store: CsvStore,
+    taxonomy_path: str | None = None,
+    *,
+    model_dir: str | None = None,
+    use_model: bool = True,
+    show_progress: bool = False,
+) -> int:
     """Classify all tracks and persist family/genre/subgenre fields."""
     taxonomy = load_taxonomy(taxonomy_path)
+    taxonomy_model = None
+    if use_model:
+        from .model import load_taxonomy_model_if_available
+
+        default_model_dir = Path(store.output_dir) / "taxonomy_model"
+        taxonomy_model = load_taxonomy_model_if_available(
+            model_dir or str(default_model_dir),
+            taxonomy_path=taxonomy_path,
+        )
+
     tracks = store.load_tracks()
     files = store.load_files()
     observations = store.load_observations()
@@ -1365,16 +1413,20 @@ def classify_all_taxonomies(store: CsvStore, taxonomy_path: str | None = None) -
             obs_by_track.setdefault(obs.track_id, []).append(obs)
 
     updated = 0
-    for track in tracks:
+    progress = ProgressBar(len(tracks), label="Classify taxonomy", enabled=show_progress)
+    for index, track in enumerate(tracks, start=1):
         result = classify_track(
             track,
             obs_by_track.get(track.track_id, []),
             primary_file_by_track.get(track.track_id),
             taxonomy=taxonomy,
+            taxonomy_model=taxonomy_model,
         )
         _persist_result(track, result)
         updated += 1
+        progress.update(index, track.title_canonical, classified=updated)
 
+    progress.finish()
     store.save_tracks(tracks)
     return updated
 
@@ -1385,6 +1437,7 @@ def classify_track(
     file_record: FileRecord | None = None,
     *,
     taxonomy: GenreTaxonomy | None = None,
+    taxonomy_model: Any | None = None,
 ) -> GenreClassificationResult:
     """Classify a track into family, genre, and optional subgenre."""
     taxonomy = taxonomy or load_taxonomy()
@@ -1400,6 +1453,29 @@ def classify_track(
     if not taxonomy.validate_path(selected.family, selected.genre, selected.subgenre):
         warnings.append("Classifier produced an invalid taxonomy path; result was reset.")
         selected = TaxonomyPath()
+
+    if taxonomy_model is not None:
+        model_prediction = taxonomy_model.predict(track, observations, file_record, taxonomy)
+        model_path = model_prediction.path
+        if taxonomy.validate_path(model_path.family, model_path.genre, model_path.subgenre):
+            model_warnings = list(model_prediction.warnings)
+            if selected.family and model_path != selected:
+                model_warnings.append("Trained model selected a taxonomy path that differs from deterministic rule scores.")
+            evidence_summary = scorer.evidence_summary(evidence, model_path)
+            for key, values in model_prediction.evidence.items():
+                evidence_summary[key] = _dedupe([*evidence_summary.get(key, []), *values])
+            return GenreClassificationResult(
+                track_id=track.track_id or None,
+                family=model_path.family,
+                genre=model_path.genre,
+                subgenre=model_path.subgenre,
+                confidence=model_prediction.confidence,
+                confidence_level=_confidence_level(model_prediction.confidence),
+                evidence=evidence_summary,
+                alternatives=model_prediction.alternatives or scorer.alternatives(model_path),
+                warnings=_dedupe([*warnings, *model_warnings]),
+            )
+        warnings.append("Trained taxonomy model produced an invalid path; deterministic classifier was used.")
 
     confidence = scorer.confidence(selected)
     return GenreClassificationResult(
@@ -1624,35 +1700,11 @@ def _add_tagger_cues(
 
     if vibe:
         evidence.tagger_signals.append(f"tagger_vibe={vibe}")
-        evidence.tagger_vibes.update(_split_tokens(vibe))
+        mood_tokens = _split_mood_tokens(vibe)
+        evidence.tagger_vibes.update(mood_tokens)
         terms = []
-        for token in _split_tokens(vibe):
-            terms.extend(
-                {
-                    "DRK": ["dark", "nocturnal", "gothic", "industrial"],
-                    "DEEP": ["deep", "minimal", "dub", "late night"],
-                    "HYP": ["hypnotic", "rolling", "rolling hypnotic", "loop", "mental"],
-                    "HYPN": ["hypnotic", "rolling", "rolling hypnotic", "loop", "mental"],
-                    "MEL": ["melodic", "emotional", "cinematic"],
-                    "ROM": ["romantic", "melancholic"],
-                    "PSY": ["psychedelic", "acid", "mental"],
-                    "ACID": ["acid", "psychedelic"],
-                    "ORG": [
-                        "organic",
-                        "tribal",
-                        "desert",
-                        "desert house",
-                        "ethnic",
-                        "middle eastern",
-                        "shamanic",
-                    ],
-                    "TRIB": ["tribal", "percussive", "shamanic", "chant"],
-                    "RAW": ["raw", "warehouse", "industrial"],
-                    "ATM": ["atmospheric", "cinematic", "ambient"],
-                    "EUP": ["euphoric", "uplifting"],
-                    "FUN": ["funky", "disco", "piano", "soulful"],
-                }.get(token, [])
-            )
+        for token in mood_tokens:
+            terms.extend(MOOD_CUES_BY_CODE.get(token, ()))
         if terms:
             evidence.cue_signals.append(
                 _Cue("tagger_vibe", vibe, terms, SOURCE_WEIGHTS["local_tagger_field"], "local_tagger_field")
@@ -1660,19 +1712,11 @@ def _add_tagger_cues(
 
     if vocal:
         evidence.tagger_signals.append(f"tagger_vocal={vocal}")
-        evidence.tagger_vocals.update(_split_tokens(vocal))
+        vocal_tokens = _split_vocal_tokens(vocal)
+        evidence.tagger_vocals.update(vocal_tokens)
         terms = []
-        for token in _split_tokens(vocal):
-            terms.extend(
-                {
-                    "V": ["vocal"],
-                    "LV": ["vocal"],
-                    "NV": ["instrumental", "tool", "dub"],
-                    "SPK": ["spoken"],
-                    "CHANT": ["chant", "ritual", "shamanic"],
-                    "DUB": ["dub", "dubby"],
-                }.get(token, [])
-            )
+        for token in vocal_tokens:
+            terms.extend(VOCAL_PROFILE_CUES_BY_CODE.get(token, ()))
         if terms:
             evidence.cue_signals.append(
                 _Cue("tagger_vocal", vocal, terms, SOURCE_WEIGHTS["local_tagger_field"], "local_tagger_field")
@@ -1803,6 +1847,9 @@ def _aliases_for(norm: str) -> list[str]:
         "melodic house and techno": ["Melodic House", "Melodic Techno", "Progressive House"],
         "melodic house techno": ["Melodic House", "Melodic Techno", "Progressive House"],
         "organic house": ["Organic House"],
+        "desert house": ["Desert House"],
+        "middle eastern": ["Middle Eastern Organic House"],
+        "sunset": ["Sunset Organic House"],
         "afro house": ["Afro House"],
         "tribal house": ["Tribal House"],
         "indie dance": ["Indie Dance"],
@@ -2016,6 +2063,14 @@ def _default_taxonomy_path() -> Path:
 
 def _split_tokens(value: str) -> list[str]:
     return [token for token in re.split(r"[,;/| ]+", (value or "").upper()) if token]
+
+
+def _split_mood_tokens(value: str) -> list[str]:
+    return [normalize_mood_code(token) for token in _split_tokens(value) if normalize_mood_code(token)]
+
+
+def _split_vocal_tokens(value: str) -> list[str]:
+    return [normalize_vocal_profile(token) for token in _split_tokens(value) if normalize_vocal_profile(token)]
 
 
 def _num(value: object) -> float | None:

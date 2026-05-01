@@ -63,10 +63,12 @@ Current dimensions:
 - key sin/cos: 2
 - intro bars: 1
 - flow type: 5
-- vibe scores: 8
-- vocal: 1
+- taxonomy mood scores: 22
+- taxonomy vocal-profile scores: 7
 
-Total: `19` dimensions.
+Total: `39` dimensions with the current `dj_taxonomy.json` mood and vocal-profile
+vocabularies. The mood slice is loaded through `src/dj_tagger/moods.py`; the
+vocal-profile slice is loaded through `src/dj_tagger/vocals.py`.
 
 Confidence values soften uncertain features toward neutral values instead of forcing hard one-hot decisions.
 
@@ -114,14 +116,14 @@ Current tag sub-distance weighting in `src/dj_grouper/grouping/distance.py`:
 - key: `0.10 * conditional key weight`
 - intro bars: `0.05`
 - flow type: `0.05`
-- vibe: `0.20`
-- vocal: `0.05`
+- mood: `0.20`
+- vocal profile: `0.05`
 
 Notes:
 
 - energy distance is amplified with exponent `1.5`
 - BPM distance is amplified quadratically
-- key weight depends on vibe and gets a boost for vocal tracks
+- key weight depends on the taxonomy mood code and gets a boost for vocal-content profiles
 
 ### DSP Distance
 
@@ -191,7 +193,7 @@ Current scoring combines:
 
 - blended similarity
 - soft BPM penalty with hard cutoff
-- vibe-weighted key penalty
+- mood-weighted key penalty
 - structure compatibility
 - intro usability
 - bass conflict risk

@@ -11,6 +11,12 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from dj_tagger.vocals import (
+    VOCAL_PROFILE_LABELS,
+    normalize_vocal_profile,
+    normalize_vocal_profile_scores,
+)
+
 from ..config import GrouperConfig
 from ..scanner import TrackInfo, VIBE_LABELS
 from .dsp import DSP_CURATED_NAMES
@@ -28,6 +34,17 @@ for i in range(1, 13):
 
 FLOW_TYPES = ["G", "H", "D", "B", "L"]
 ROLE_LABELS = ["TOOL", "DRIVER", "PEAK", "RESET", "BREAKDOWN", "BRIDGE"]
+TAG_ENERGY_IDX = 0
+TAG_BPM_IDX = 1
+TAG_KEY_SLICE = slice(2, 4)
+TAG_INTRO_BARS_IDX = 4
+TAG_FLOW_SLICE = slice(5, 10)
+TAG_MOOD_START = 10
+TAG_MOOD_SLICE = slice(TAG_MOOD_START, TAG_MOOD_START + len(VIBE_LABELS))
+TAG_VOCAL_START = TAG_MOOD_SLICE.stop
+TAG_VOCAL_SLICE = slice(TAG_VOCAL_START, TAG_VOCAL_START + len(VOCAL_PROFILE_LABELS))
+TAG_VOCAL_IDX = TAG_VOCAL_START
+TAG_VECTOR_DIM = TAG_VOCAL_SLICE.stop
 
 
 # ─── Per-track raw cache entry ──────────────────────────────────────────────
@@ -69,7 +86,7 @@ class TrackFeatures:
     """All features for one track, ready for distance computation."""
     path: str
     info: TrackInfo
-    tag_vector: NDArray[np.floating]       # encoded tags with continuous vibe
+    tag_vector: NDArray[np.floating]       # encoded tags with continuous mood scores
     dsp_vector: NDArray[np.floating]       # 10 curated DSP, z-score normalized
     raw_dsp: dict[str, float] = field(default_factory=dict)  # named features for scoring
     section_dsp: dict[str, dict[str, float]] = field(default_factory=dict)  # per-section
@@ -87,7 +104,7 @@ class FeatureCache:
     tracks: list[TrackFeatures] = field(default_factory=list)
     dsp_mean: NDArray | None = None
     dsp_std: NDArray | None = None
-    version: str = "5.0"
+    version: str = "7.0"
 
 
 # ─── Scaling ─────────────────────────────────────────────────────────────────
@@ -115,7 +132,7 @@ def _percentile_rank(matrix: NDArray) -> NDArray:
 def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
     """Encode tag metadata into a numeric vector.
 
-    Uses continuous vibe scores (8 floats) instead of one-hot.
+    Uses continuous taxonomy mood scores instead of one-hot.
     Confidence-weights uncertain features toward neutral.
     """
     v: list[float] = []
@@ -152,24 +169,37 @@ def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
         val = 1.0 if flow == ft else 0.0
         v.append(val * struct_conf + (1.0 / len(FLOW_TYPES)) * (1.0 - struct_conf))
 
-    # Vibe: continuous scores instead of one-hot
-    # If vibe_scores available, use them directly; else fall back to one-hot
+    # Mood/vibe: continuous taxonomy mood scores instead of one-hot.
+    # If vibe_scores are available, use them directly; else fall back to one-hot.
     vibe_conf = confs.get("vibe", 1.0)
     if info.vibe_scores:
         # Normalize scores to sum to 1
-        total = sum(info.vibe_scores.values()) + 1e-8
+        from dj_tagger.moods import normalize_mood_scores
+
+        mood_scores = normalize_mood_scores(info.vibe_scores)
+        total = sum(mood_scores.values()) + 1e-8
         for vl in VIBE_LABELS:
-            v.append(info.vibe_scores.get(vl, 0.0) / total)
+            v.append(mood_scores.get(vl, 0.0) / total)
     else:
-        vibe = info.vibe or "HYPN"
+        from dj_tagger.moods import normalize_mood_code
+
+        vibe = normalize_mood_code(info.vibe) or "HYPN"
         for vl in VIBE_LABELS:
             val = 1.0 if vibe == vl else 0.0
             v.append(val * vibe_conf + (1.0 / len(VIBE_LABELS)) * (1.0 - vibe_conf))
 
-    # Vocal: binary, confidence-weighted toward 0.5 (uncertain)
-    vocal_val = 1.0 if info.vocal == "V" else 0.0
+    # Vocal profile: continuous taxonomy profile scores instead of binary V/NV.
     vocal_conf = confs.get("vocal", 1.0)
-    v.append(vocal_val * vocal_conf + 0.5 * (1.0 - vocal_conf))
+    if info.vocal_scores:
+        profile_scores = normalize_vocal_profile_scores(info.vocal_scores)
+        total = sum(profile_scores.values()) + 1e-8
+        for profile in VOCAL_PROFILE_LABELS:
+            v.append(profile_scores.get(profile, 0.0) / total)
+    else:
+        profile = normalize_vocal_profile(info.vocal) or "INST"
+        for label in VOCAL_PROFILE_LABELS:
+            val = 1.0 if profile == label else 0.0
+            v.append(val * vocal_conf + (1.0 / len(VOCAL_PROFILE_LABELS)) * (1.0 - vocal_conf))
 
     return np.array(v, dtype=np.float32)
 
@@ -238,13 +268,13 @@ def build_unified_vector(
     registry: RegistryEnrichment | None,
     clap_pca_dims: int = 32,
 ) -> NDArray[np.floating]:
-    """Assemble the 80-dim unified feature vector for PCA fusion.
+    """Assemble the unified feature vector for PCA fusion.
 
     Layout:
-      [0:19]   tag_vector (energy, BPM, key, structure, vibe, vocal)
-      [19:40]  dsp_vector (21 curated DSP features, percentile-ranked)
-      [40:40+clap_pca_dims]  embed_vector (CLAP PCA, zero-fill if missing)
-      [40+clap_pca_dims:40+clap_pca_dims+6]  genre embedding (6-dim)
+      [0:TAG_VECTOR_DIM] tag_vector (energy, BPM, key, structure, mood, vocal profile)
+      [TAG_VECTOR_DIM:TAG_VECTOR_DIM+21]  dsp_vector (21 curated DSP features, percentile-ranked)
+      next clap_pca_dims  embed_vector (CLAP PCA, zero-fill if missing)
+      next 6  genre embedding
       [...]    danceability, valence (2 dims, 0.5 if missing)
     """
     parts: list[NDArray] = [tag_vector, dsp_vector]
@@ -300,7 +330,7 @@ def build_features_from_raw(
         if n_upgrades:
             logger.info("Registry upgraded %d key/bpm values before tag encoding", n_upgrades)
 
-    # Encode tags (with continuous vibe + confidence weighting)
+    # Encode tags (with continuous mood + confidence weighting)
     tag_vectors = np.array([encode_tags(info) for info in infos], dtype=np.float32)
 
     # Build DSP matrix from curated features, percentile rank scaling

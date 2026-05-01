@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from ..config import RegistryConfig
 from ..models import LogicalTrack, SourceObservation
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ def resolve_all_bpms(
     store: CsvStore,
     *,
     force: bool = False,
+    show_progress: bool = False,
 ) -> tuple[int, int]:
     """Resolve canonical BPM for all tracks.
 
@@ -95,10 +97,12 @@ def resolve_all_bpms(
 
     resolved = 0
     missing = 0
+    progress = ProgressBar(len(tracks), label="Resolve BPM", enabled=show_progress)
 
-    for track in tracks:
+    for index, track in enumerate(tracks, start=1):
         if not force and track.canonical_bpm:
             resolved += 1
+            progress.update(index, track.title_canonical, resolved=resolved, missing=missing)
             continue
 
         track_obs = obs_by_track.get(track.track_id, [])
@@ -108,7 +112,9 @@ def resolve_all_bpms(
             resolved += 1
         else:
             missing += 1
+        progress.update(index, track.title_canonical, resolved=resolved, missing=missing)
 
+    progress.finish()
     store.save_tracks(tracks)
     logger.info("BPM: %d resolved, %d missing", resolved, missing)
     return resolved, missing

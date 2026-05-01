@@ -113,7 +113,19 @@ Important current field groups:
 - `tagger_structure`
 - `tagger_bpm`
 - `tagger_vibe_scores`
+- `tagger_vocal_scores`
 - `tagger_confidences`
+
+`tagger_vibe` is the compatibility field name. Its values are taxonomy mood
+codes loaded from `src/dj_registry/taxonomy/dj_taxonomy.json`; `tagger_vibe_scores`
+stores the full mood-score map.
+
+`tagger_vocal` now stores a taxonomy vocal-profile code loaded from the same
+dictionary's `vocal_profiles` values. Current codes are `INST`, `VOC`, `FVOC`,
+`SPK`, `CHANT`, `DUB`, and `TOOL`; legacy tag values `V`/`NV` normalize to
+`VOC`/`INST`. `tagger_vocal_scores` stores the full profile-score map.
+
+The full mood and vocal-profile code dictionary is documented in `README.md`.
 
 ### Tagger provenance
 
@@ -225,7 +237,7 @@ Tagger-derived fields are not voted across sources; they are stored directly fro
 
 `dj-registry sync-tags` writes only the COMMENT tag:
 
-- COMMENT tag built from: canonical key, canonical BPM, stored tagger energy/vibe/structure/vocal
+- COMMENT tag built from: canonical key, canonical BPM, stored tagger energy/mood/structure/vocal
 
 The TKEY/InitialKey field is intentionally left untouched so the original embedded key (e.g. from Rekordbox analysis or manual tagging) is preserved as a validation signal for multi-source key resolution.
 
@@ -246,7 +258,7 @@ This is for canonical resolution issues, not for tagger score calibration.
 
 ## Recommended Calibration Workflow
 
-If the goal is tuning analysis fields such as vibe, energy, vocal, or structure:
+If the goal is tuning analysis fields such as mood/vibe, energy, vocal, or structure:
 
 1. edit `settings.toml` or the relevant scorer code
 2. run `dj run --no-grouping --no-tags` or `dj-registry analyze` then `dj-registry export`

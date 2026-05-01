@@ -2,6 +2,8 @@
 
 from dj_tagger.pipeline import AnalysisConfig, analyze_track
 from dj_tagger.formats import parse_tag
+from dj_tagger.moods import MOOD_LABELS
+from dj_tagger.vocals import VOCAL_PROFILE_LABELS
 
 
 def test_full_pipeline(sine_440hz):
@@ -13,8 +15,9 @@ def test_full_pipeline(sine_440hz):
     assert result["bpm"] is not None
     assert result["energy"] in (1, 2, 3, 4, 5)
     assert result["camelot"] is not None
-    assert result["vibe"] in ("HYPN", "DRK", "RAW", "DEEP", "TRIB", "MEL", "ACID", "ATM")
-    assert result["vocal"] in ("V", "NV")
+    assert result["vibe"] in MOOD_LABELS
+    assert result["vocal"] in VOCAL_PROFILE_LABELS
+    assert result["vocal_profile"] == result["vocal"]
 
 
 def test_pipeline_skip_existing(flac_file):

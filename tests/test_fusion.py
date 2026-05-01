@@ -3,8 +3,9 @@
 import numpy as np
 import pytest
 
-from dj_grouper.features.builder import TrackFeatures, encode_tags, build_unified_vector
+from dj_grouper.features.builder import TAG_VECTOR_DIM, TrackFeatures, encode_tags, build_unified_vector
 from dj_grouper.features.fusion import fit_unified_pca, apply_unified_pca
+from dj_grouper.features.genre_encoding import GENRE_DIM
 from dj_grouper.features.registry_bridge import RegistryEnrichment
 from dj_grouper.scanner import TrackInfo
 
@@ -58,7 +59,7 @@ def test_apply_pca_consistent():
 
 
 def test_unified_vector_shape():
-    """Unified vector should be 80 dims: 19 tag + 21 dsp + 32 clap + 6 genre + 2 songstats."""
+    """Unified vector should reflect the dynamic tag-vector mood slice."""
     info = TrackInfo(path="t.aiff", energy=3, key="9A", bpm=128,
                      structure="64H", intro_bars=64, flow_type="H",
                      vibe="HYPN", vocal="NV")
@@ -66,8 +67,8 @@ def test_unified_vector_shape():
     dsp_vec = np.zeros(21, dtype=np.float32)
     registry = RegistryEnrichment(danceability=0.5, valence=0.5, has_songstats=True)
     unified = build_unified_vector(tag_vec, dsp_vec, None, registry, clap_pca_dims=32)
-    # 19 + 21 + 32 + 6 + 2 = 80
-    assert unified.shape == (80,)
+    expected_dim = TAG_VECTOR_DIM + 21 + 32 + GENRE_DIM + 2
+    assert unified.shape == (expected_dim,)
 
 
 def test_unified_vector_no_registry():
@@ -78,10 +79,11 @@ def test_unified_vector_no_registry():
     tag_vec = encode_tags(info)
     dsp_vec = np.zeros(21, dtype=np.float32)
     unified = build_unified_vector(tag_vec, dsp_vec, None, None, clap_pca_dims=32)
-    assert unified.shape == (80,)
+    expected_dim = TAG_VECTOR_DIM + 21 + 32 + GENRE_DIM + 2
+    assert unified.shape == (expected_dim,)
     # Genre dims should be 0.5 (neutral)
-    genre_start = 19 + 21 + 32  # after tag + dsp + clap
-    np.testing.assert_array_almost_equal(unified[genre_start:genre_start+6], [0.5]*6)
+    genre_start = TAG_VECTOR_DIM + 21 + 32  # after tag + dsp + clap
+    np.testing.assert_array_almost_equal(unified[genre_start:genre_start+GENRE_DIM], [0.5]*GENRE_DIM)
     # Songstats dims should be 0.5 (neutral)
     np.testing.assert_array_almost_equal(unified[-2:], [0.5, 0.5])
 
@@ -96,4 +98,5 @@ def test_unified_vector_with_clap():
     clap_vec = np.ones(32, dtype=np.float32) * 0.3
     unified = build_unified_vector(tag_vec, dsp_vec, clap_vec, None, clap_pca_dims=32)
     # CLAP section should be 0.3
-    np.testing.assert_array_almost_equal(unified[40:72], [0.3]*32)
+    clap_start = TAG_VECTOR_DIM + 21
+    np.testing.assert_array_almost_equal(unified[clap_start:clap_start+32], [0.3]*32)

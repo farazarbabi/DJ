@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from ..config import RegistryConfig
 from ..models import ReviewItem, SourceObservation, now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 def build_review_queue(
     config: RegistryConfig,
     store: CsvStore,
+    *,
+    show_progress: bool = False,
 ) -> int:
     """Generate or refresh review_queue.csv for unresolved tracks.
 
@@ -33,9 +36,11 @@ def build_review_queue(
             obs_by_track[o.track_id].append(o)
 
     items: list[ReviewItem] = []
+    progress = ProgressBar(len(tracks), label="Review queue", enabled=show_progress)
 
-    for track in tracks:
+    for index, track in enumerate(tracks, start=1):
         if not track.needs_manual_review:
+            progress.update(index, track.title_canonical, items=len(items))
             continue
 
         key_obs = obs_by_track.get(track.track_id, [])
@@ -92,11 +97,13 @@ def build_review_queue(
             item.suggested_key_camelot = cam
 
         items.append(item)
+        progress.update(index, track.title_canonical, items=len(items))
 
     # Sort: high priority first, then by track_id
     priority_order = {"high": 0, "medium": 1, "low": 2}
     items.sort(key=lambda x: (priority_order.get(x.priority, 1), x.track_id))
 
     store.save_review_queue(items)
+    progress.finish()
     logger.debug("Review queue: %d items", len(items))
     return len(items)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..key_utils import camelot_to_standard
 from ..models import now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
@@ -71,20 +72,13 @@ def _write_full_tag(path: str, track) -> bool:
     if not camelot:
         camelot = None
 
-    # Vocal
-    has_vocals = None
-    if track.tagger_vocal == "V":
-        has_vocals = True
-    elif track.tagger_vocal == "NV":
-        has_vocals = False
-
     tag_string = format_tag(
         energy=energy,
         camelot=camelot,
         bpm=bpm,
         structure=track.tagger_structure or None,
         vibe=track.tagger_vibe or None,
-        has_vocals=has_vocals,
+        vocal_profile=track.tagger_vocal or None,
     )
 
     write_tag(path, tag_string, dry_run=False)
@@ -97,6 +91,7 @@ def sync_tags(
     dry_run: bool = True,
     only_changed: bool = True,
     write_key_tag: bool = False,
+    show_progress: bool = False,
 ) -> tuple[int, int, int]:
     """Write tagger features to file tags.
 
@@ -118,11 +113,13 @@ def sync_tags(
     written = 0
     skipped = 0
     errors = 0
+    progress = ProgressBar(len(files), label="Sync tags", enabled=show_progress)
 
-    for frec in files:
+    for index, frec in enumerate(files, start=1):
         track = track_by_id.get(frec.track_id)
         if not track:
             skipped += 1
+            progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
         # Need at least a canonical key or tagger features to write
@@ -130,6 +127,7 @@ def sync_tags(
         has_features = bool(track.tagger_energy)
         if not has_key and not has_features:
             skipped += 1
+            progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
         if dry_run:
@@ -140,6 +138,7 @@ def sync_tags(
                 track.tagger_energy, track.tagger_vibe,
             )
             skipped += 1
+            progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
         try:
@@ -164,7 +163,9 @@ def sync_tags(
             frec.tag_write_error = str(e)
             errors += 1
             logger.error("Failed to write tag to %s: %s", frec.file_name, e)
+        progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
 
+    progress.finish()
     store.save_files(files)
     if written or errors:
         logger.info("Tags: %d written, %d errors", written, errors)

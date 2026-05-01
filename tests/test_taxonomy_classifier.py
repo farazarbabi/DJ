@@ -306,6 +306,8 @@ def test_classify_all_persists_fields_and_overview(tmp_path):
     assert rows[0]["genre_family"] == "House"
     assert rows[0]["genre"] == "Tech House"
     assert rows[0]["subgenre"] == "Rolling Tech House"
+    assert "tagger_mood" in rows[0]
+    assert "tagger_mood_scores" in rows[0]
     assert rows[0]["taxonomy_label"] == "House > Tech House > Rolling Tech House"
 
 

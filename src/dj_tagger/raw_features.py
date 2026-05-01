@@ -97,6 +97,7 @@ def compute_tagger_artifacts(
         structure=derived.get("structure"),
         vibe=derived.get("vibe"),
         has_vocals=derived.get("has_vocals"),
+        vocal_profile=derived.get("vocal_profile"),
     )
 
     confidences = {k: round(v, 3) for k, v in derived["confidences"].items()}
@@ -110,10 +111,14 @@ def compute_tagger_artifacts(
         "camelot": key_result.camelot if key_result else None,
         "structure": derived["structure"],
         "vibe": derived["vibe"],
+        "mood": derived["mood"],
         "vocal": derived["vocal"],
+        "vocal_profile": derived["vocal_profile"],
         "key_confidence": round(key_result.confidence, 3) if key_result else None,
         "vocal_ratio": round(float(derived["vocal_ratio"]), 3),
+        "vocal_scores": {k: round(v, 4) for k, v in derived["vocal_scores"].items()},
         "vibe_scores": {k: round(v, 4) for k, v in derived["vibe_scores"].items()},
+        "mood_scores": {k: round(v, 4) for k, v in derived["mood_scores"].items()},
         "confidences": confidences,
         "intro_bars": derived["intro_bars"],
         "flow_type": derived["flow_type"],

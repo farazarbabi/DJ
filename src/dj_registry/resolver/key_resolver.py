@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from ..config import RegistryConfig
 from ..models import LogicalTrack, SourceObservation, now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from .explanation import (
     classify_resolution,
@@ -186,6 +187,7 @@ def resolve_all_keys(
     store: CsvStore,
     *,
     force: bool = False,
+    show_progress: bool = False,
 ) -> tuple[int, int]:
     """Resolve canonical keys for all tracks.
 
@@ -202,11 +204,13 @@ def resolve_all_keys(
 
     resolved = 0
     review = 0
+    progress = ProgressBar(len(tracks), label="Resolve keys", enabled=show_progress)
 
-    for track in tracks:
+    for index, track in enumerate(tracks, start=1):
         if not force and track.canonical_key_camelot and not track.needs_manual_review:
             # Already resolved and no new evidence needed
             resolved += 1
+            progress.update(index, track.title_canonical, resolved=resolved, review=review)
             continue
 
         track_obs = obs_by_track.get(track.track_id, [])
@@ -216,7 +220,9 @@ def resolve_all_keys(
             resolved += 1
         else:
             review += 1
+        progress.update(index, track.title_canonical, resolved=resolved, review=review)
 
+    progress.finish()
     store.save_tracks(tracks)
     logger.info("Resolve: %d keys resolved, %d need review", resolved, review)
     return resolved, review

@@ -18,10 +18,13 @@ class GrouperConfig:
 
     # --- Key weighting by vibe ---
     key_weight_by_vibe: dict[str, float] = field(default_factory=lambda: {
-        "MEL": 0.8, "ACID": 0.6,
-        "DEEP": 0.4, "ATM": 0.3,
-        "HYPN": 0.2, "TRIB": 0.2,
-        "DRK": 0.15, "RAW": 0.1,
+        "MEL": 0.8, "EMO": 0.8, "EUP": 0.75, "SOUL": 0.75,
+        "WARM": 0.6, "ACID": 0.6, "PSY": 0.6,
+        "DEEP": 0.4, "SUB": 0.4, "SUN": 0.4, "CIN": 0.35,
+        "ATM": 0.3, "ORG": 0.3,
+        "HYPN": 0.2, "MIN": 0.2, "TRIB": 0.2, "PLAY": 0.2,
+        "DRK": 0.15, "TENS": 0.15, "GRIT": 0.12,
+        "RAW": 0.1, "WHSE": 0.1,
     })
     key_weight_vocal_boost: float = 0.2
 

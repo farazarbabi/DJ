@@ -405,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                 structure=result.get("structure"),
                 vibe=result.get("vibe"),
                 has_vocals=has_voc,
+                vocal_profile=result.get("vocal_profile", result.get("vocal")),
             )
 
         results.append(result)
@@ -529,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
                 structure=result.get("structure"),
                 vibe=result.get("vibe"),
                 has_vocals=has_voc,
+                vocal_profile=result.get("vocal_profile", result.get("vocal")),
             )
 
         # Write tag to file
@@ -569,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
 def _write_csv(path: str, results: list[dict]) -> None:
     fieldnames = [
         "file", "tag", "bpm", "energy", "key", "camelot",
-        "structure", "vibe", "vocal", "key_confidence", "vocal_ratio",
+        "structure", "vibe", "vocal", "vocal_profile", "key_confidence", "vocal_ratio",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")

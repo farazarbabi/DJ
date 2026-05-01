@@ -12,6 +12,7 @@ import httpx
 from ..config import RegistryConfig
 from ..key_utils import parse_any_key
 from ..models import SourceObservation, PayloadIndexEntry, now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from ..store.obs_cache import ObsCache
 
@@ -86,6 +87,8 @@ def ingest_songstats(
     obs_cache: ObsCache | None = None,
     *,
     limit: int | None = None,
+    only_missing: bool = False,
+    show_progress: bool = False,
 ) -> dict:
     """Fetch Songstats metadata for tracks with ISRC.
 
@@ -102,7 +105,14 @@ def ingest_songstats(
     client = SongstatsClient(config)
     tracks = store.load_tracks()
 
-    candidates = [t for t in tracks if t.isrc_canonical]
+    existing_songstats = {
+        obs.track_id for obs in store.load_observations() if obs.source_system == "songstats"
+    }
+    candidates = [
+        t
+        for t in tracks
+        if t.isrc_canonical and (not only_missing or t.track_id not in existing_songstats)
+    ]
 
     if limit:
         candidates = candidates[:limit]
@@ -123,7 +133,8 @@ def ingest_songstats(
     success_count = 0
 
     cache_hits = 0
-    for track in candidates:
+    progress = ProgressBar(len(candidates), label="Songstats", enabled=show_progress)
+    for index, track in enumerate(candidates, start=1):
         isrc = track.isrc_canonical
 
         # Check pkl cache first — no file I/O or API needed
@@ -135,6 +146,7 @@ def ingest_songstats(
                 new_obs.append(cached)
                 cache_hits += 1
                 success_count += 1
+                progress.update(index, track.title_canonical or isrc, cached=cache_hits, fetched=success_count - cache_hits)
                 continue
 
         payload_path = os.path.join(raw_dir, f"{isrc}.json")
@@ -152,6 +164,7 @@ def ingest_songstats(
         if result is None:
             result = client.fetch_track_by_isrc(isrc)
             if result is None:
+                progress.update(index, track.title_canonical or isrc, cached=cache_hits, fetched=success_count - cache_hits)
                 continue
             with open(payload_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2)
@@ -264,7 +277,9 @@ def ingest_songstats(
             store.save_payload_index(all_payloads)
             new_payloads = []
             logger.debug("Songstats: %d/%d", success_count, len(candidates))
+        progress.update(index, track.title_canonical or isrc, cached=cache_hits, fetched=success_count - cache_hits)
 
+    progress.finish()
     # Final save
     if new_obs:
         store.add_observations(new_obs)

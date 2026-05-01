@@ -12,6 +12,7 @@ from defusedxml.lxml import parse as _safe_parse
 from ..config import RegistryConfig
 from ..key_utils import parse_any_key
 from ..models import SourceObservation, PayloadIndexEntry, now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from ..store.obs_cache import ObsCache
 
@@ -47,6 +48,8 @@ def ingest_rekordbox(
     config: RegistryConfig,
     store: CsvStore,
     obs_cache: ObsCache | None = None,
+    *,
+    show_progress: bool = False,
 ) -> int:
     """Parse Rekordbox XML and create source observations.
 
@@ -86,8 +89,10 @@ def ingest_rekordbox(
 
     new_obs: list[SourceObservation] = []
     matched = 0
+    track_elements = collection.findall("TRACK")
+    progress = ProgressBar(len(track_elements), label="Rekordbox", enabled=show_progress)
 
-    for track_el in collection.findall("TRACK"):
+    for index, track_el in enumerate(track_elements, start=1):
         rb_id = track_el.get("TrackID", "")
         name = track_el.get("Name", "")
         artist = track_el.get("Artist", "")
@@ -111,6 +116,7 @@ def ingest_rekordbox(
         except ValueError:
             duration = 0
         if duration < 30:
+            progress.update(index, name, matched=matched)
             continue
 
         # Match to local file
@@ -134,6 +140,7 @@ def ingest_rekordbox(
 
         if not track_id:
             logger.debug("Rekordbox track not matched: %s - %s", artist, name)
+            progress.update(index, name, matched=matched)
             continue
 
         matched += 1
@@ -178,7 +185,9 @@ def ingest_rekordbox(
         new_obs.append(obs)
         if obs_cache:
             obs_cache.put_by_file(local_path, float(total_time), "rekordbox", obs)
+        progress.update(index, name, matched=matched)
 
+    progress.finish()
     # Update label_canonical on tracks if we got label data
     tracks = store.load_tracks()
     track_by_id = {t.track_id: t for t in tracks}
@@ -202,7 +211,7 @@ def ingest_rekordbox(
         fetched_at=now_iso(),
     ))
 
-    xml_total = len(collection.findall("TRACK"))
+    xml_total = len(track_elements)
     unmatched = xml_total - matched
     logger.info("Rekordbox: %d matched, %d unmatched (of %d XML tracks)", matched, unmatched, xml_total)
     return matched

@@ -92,7 +92,7 @@ Fields may be missing. The classifier must handle sparse inputs gracefully.
   "embedded_artist": "Artist",
   "embedded_album": "Release Name",
   "embedded_genre": "Tech House",
-  "embedded_comment": "E4 HYP 16H NV"
+  "embedded_comment": "E4 HYPN 16H INST"
 }
 ```
 
@@ -190,8 +190,8 @@ Audio features should not override strong explicit metadata by themselves. They 
 ```json
 {
   "tagger_energy": "E4",
-  "tagger_vibe": "DRK,HYP",
-  "tagger_vocal": "NV",
+  "tagger_vibe": "DRK,HYPN",
+  "tagger_vocal": "INST",
   "tagger_structure": "16H",
   "tagger_bpm": 126.0
 }
@@ -212,26 +212,40 @@ E5 → peak, weapon, high-intensity
 #### Vibe
 
 ```text
+ACID → acidic, 303, squelchy, psychedelic pressure
+ATM → atmospheric, ambient, spacious, pad-led
+CIN → cinematic, dramatic, soundtrack-like
+DEEP → deep, late-night, subdued, dubby
 DRK → dark, tense, nocturnal, gothic, industrial
-HYP → hypnotic, repetitive, meditative
-MEL → melodic, emotional, cinematic
-ROM → romantic, sensual, melancholic
-PSY → psychedelic, trippy, acid, mental
+EMO → emotional, melancholic, romantic, expressive
+EUP → euphoric, uplifting, trance-like release
+GRIT → gritty, rough, distorted, abrasive
+HYPN → hypnotic, repetitive, rolling, meditative
+MEL → melodic, harmony-forward, lead-melody driven
+MIN → minimal, sparse, reduced, micro
 ORG → organic, earthy, tribal, desert
-RAW → raw, warehouse, gritty
-EUP → euphoric, uplifting, festival
-FUN → funky, playful, bright
+PLAY → playful, funky, bouncy, bright
+PSY → psychedelic, trippy, acid, mental
+RAW → raw, warehouse, industrial, rough machine feel
+SOUL → soulful, gospel, human warmth
+SUB → subby, bass-heavy, low-end pressure
+SUN → sunlit, sunset, balearic, outdoor warmth
+TENS → tense, suspenseful, pressure-building
+TRIB → tribal, percussive, ritual, chant-adjacent
+WARM → warm, rounded, smooth, inviting
+WHSE → warehouse, rave-room, concrete, peak industrial
 ```
 
 #### Vocal profile
 
 ```text
-V     → vocal-led
-LV    → low-vocal / vocal fragments
-NV    → instrumental / no vocal
+INST  → instrumental / no vocal
+VOC   → vocal-led
+FVOC  → featured vocal / vocal hook
 SPK   → spoken word
 CHANT → chant / ritual vocal
 DUB   → dub mix / reduced vocal / echo-heavy
+TOOL  → DJ tool / percussive track
 ```
 
 #### Structure
@@ -265,7 +279,7 @@ For each track, return a structured result:
     "source_genres_used": ["hypnotic techno", "raw techno"],
     "metadata_signals": ["rekordbox_genre=Hypnotic Techno"],
     "audio_feature_signals": ["energy high", "valence low", "instrumentalness high"],
-    "tagger_signals": ["tagger_vibe=HYP", "tagger_structure=16H", "tagger_energy=E4"]
+    "tagger_signals": ["tagger_vibe=HYPN", "tagger_structure=16H", "tagger_energy=E4"]
   },
   "alternatives": [
     {
@@ -619,9 +633,9 @@ Tech House + rolling/16H/E4 → Rolling Tech House
 Tech House + peak/E5/bass hook → Peak-Time Tech House
 Tribal House + chant/ORG/percussion → Shamanic Tribal House
 Organic House + desert/middle eastern/ORG → Desert House
-Techno + HYP + 16H + low vocal → Rolling Hypnotic Techno
+Techno + HYPN + 16H + low vocal → Rolling Hypnotic Techno
 Techno + DRK + RAW + E5 → Dark Driving Techno or Industrial Techno
-Melodic Techno + ROM/MEL + low valence → Dark Melodic Techno or Romantic Techno
+Melodic Techno + EMO/MEL + low valence → Dark Melodic Techno
 Garage + BREAKS + vocal chops → 2-Step Garage
 Rock + classic + blues/70s cues → Blues Rock or Classic Rock
 Rock + instrumental + long crescendo → Post-Rock
@@ -737,15 +751,28 @@ Derive DJ-relevant signals from tagger fields, filename, mix name, title, commen
 ### 15.1 Mood derivation
 
 ```text
+ACID → acidic, 303, squelchy, psychedelic pressure
+ATM → atmospheric, ambient, spacious, pad-led
+CIN → cinematic, dramatic, soundtrack-like
+DEEP → deep, late-night, subdued, dubby
 DRK → dark, tense, nocturnal, gothic, industrial
-HYP → hypnotic, repetitive, meditative, rolling
-MEL → melodic, emotional, cinematic
-ROM → romantic, sensual, melancholic
-PSY → psychedelic, trippy, acid, mental
+EMO → emotional, melancholic, romantic, expressive
+EUP → euphoric, uplifting, trance-like release
+GRIT → gritty, rough, distorted, abrasive
+HYPN → hypnotic, repetitive, rolling, meditative
+MEL → melodic, harmony-forward, lead-melody driven
+MIN → minimal, sparse, reduced, micro
 ORG → organic, earthy, tribal, desert
-RAW → raw, warehouse, gritty
-EUP → euphoric, uplifting, festival
-FUN → funky, playful, bright
+PLAY → playful, funky, bouncy, bright
+PSY → psychedelic, trippy, acid, mental
+RAW → raw, warehouse, industrial, rough machine feel
+SOUL → soulful, gospel, human warmth
+SUB → subby, bass-heavy, low-end pressure
+SUN → sunlit, sunset, balearic, outdoor warmth
+TENS → tense, suspenseful, pressure-building
+TRIB → tribal, percussive, ritual, chant-adjacent
+WARM → warm, rounded, smooth, inviting
+WHSE → warehouse, rave-room, concrete, peak industrial
 ```
 
 ### 15.2 Groove derivation
@@ -773,12 +800,13 @@ E5 → peak, weapon, high-intensity
 ### 15.4 Vocal profile derivation
 
 ```text
-V → vocal-led
-LV → low-vocal / vocal fragments
-NV → instrumental / no vocal
+INST → instrumental / no vocal
+VOC → vocal-led
+FVOC → featured vocal / vocal hook
 SPK → spoken word
 CHANT → chant / ritual vocal
 DUB → dub mix / reduced vocal / echo-heavy
+TOOL → DJ tool / percussive track
 ```
 
 Also parse text cues:
@@ -1314,8 +1342,8 @@ Input:
 ```json
 {
   "genres_all": ["Techno", "Hypnotic Techno"],
-  "tagger_vibe": "DRK,HYP",
-  "tagger_vocal": "NV",
+  "tagger_vibe": "DRK,HYPN",
+  "tagger_vocal": "INST",
   "tagger_structure": "16H",
   "tagger_energy": "E4",
   "tagger_bpm": 132,

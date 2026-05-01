@@ -1,4 +1,4 @@
-"""Vocal presence detection (V / NV) with confidence."""
+"""Vocal presence metrics used by taxonomy vocal-profile scoring."""
 
 from __future__ import annotations
 
@@ -94,6 +94,6 @@ def analyze_vocal(track_audio: TrackAudio) -> VocalResult:
 
     logger.debug(
         "Vocal: %s (score=%.3f, fraction=%.3f, temporal=%.2f, conf=%.2f)",
-        "V" if has_vocals else "NV", vocal_score, vocal_fraction, temporal_bonus, confidence,
+        "vocal" if has_vocals else "non-vocal", vocal_score, vocal_fraction, temporal_bonus, confidence,
     )
     return VocalResult(has_vocals=has_vocals, vocal_ratio=vocal_fraction, temporal_bonus=temporal_bonus, confidence=confidence)

@@ -1,4 +1,4 @@
-"""Vibe classification into one of 8 categories."""
+"""Mood/vibe classification using taxonomy-derived mood codes."""
 
 from __future__ import annotations
 
@@ -25,13 +25,13 @@ def analyze_vibe(
     track_audio: TrackAudio,
     audio_features: dict[str, float] | None = None,
 ) -> VibeResult:
-    """Classify the track's vibe using spectral heuristics + optional API features.
+    """Classify the track's mood/vibe using spectral heuristics + optional API features.
 
-    Labels: HYPN, DRK, RAW, DEEP, TRIB, MEL, ACID, ATM
+    Labels are taxonomy mood codes loaded from ``dj_taxonomy.json``.
 
     audio_features: optional dict with keys like 'valence', 'instrumentalness',
     'liveness', 'energy', 'acousticness' (0-1 scale). When provided, these
-    contribute additional scoring signals per vibe via [vibe.songstats] settings.
+    contribute additional scoring signals per mood via [vibe.songstats] settings.
     """
     y, sr = track_audio.y, track_audio.sr
     y_h = track_audio.y_harmonic
@@ -69,7 +69,7 @@ def analyze_vibe(
     flux_raw = np.diff(S, axis=1)
     flux = float(np.mean(np.sqrt(np.mean(flux_raw ** 2, axis=0))))
 
-    # --- Score each vibe (all params from settings.toml) ---
+    # --- Score each mood (all params from settings.toml) ---
     metrics = {
         "rms": rms,
         "centroid_mean": centroid_mean,

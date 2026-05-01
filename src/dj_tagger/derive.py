@@ -10,8 +10,8 @@ Raw inputs:
 
 Derived outputs:
   - energy: level (E1-E5), confidence
-  - vibe: label, scores (8 floats), confidence
-  - vocal: has_vocals (V/NV), confidence
+  - vibe: taxonomy mood code, mood-score map, confidence
+  - vocal: taxonomy vocal profile, has_vocals, profile scores, confidence
   - structure: intro_bars, flow_type, formatted, confidence
 """
 
@@ -23,6 +23,7 @@ import numpy as np
 
 from .settings import get, get_section
 from .vibe_scoring import vibe_metrics_from_dsp, score_vibe_metrics
+from .vocals import score_vocal_profile
 
 logger = logging.getLogger(__name__)
 
@@ -78,22 +79,34 @@ def derive_energy(dsp: dict) -> dict:
 # ── Vibe derivation ──────────────────────────────────────────────────────────
 
 def derive_vibe(dsp: dict, audio_features: dict[str, float] | None = None) -> dict:
-    """Recompute vibe from cached DSP features + optional API audio features.
+    """Recompute mood/vibe from cached DSP features + optional API audio features.
 
     audio_features: optional dict with keys like 'valence', 'instrumentalness',
     'liveness', 'energy', 'acousticness' (0-1 scale). When provided, these
-    contribute additional scoring signals per vibe via [vibe.songstats] settings.
+    contribute additional scoring signals per mood via [vibe.songstats] settings.
     """
     metrics = vibe_metrics_from_dsp(dsp)
     label, scores, confidence = score_vibe_metrics(metrics, audio_features=audio_features)
 
-    return {"vibe": label, "vibe_scores": scores, "vibe_confidence": confidence}
+    return {
+        "vibe": label,
+        "mood": label,
+        "vibe_scores": scores,
+        "mood_scores": scores,
+        "vibe_confidence": confidence,
+        "mood_confidence": confidence,
+    }
 
 
 # ── Vocal derivation ─────────────────────────────────────────────────────────
 
-def derive_vocal(raw_analysis: dict) -> dict:
-    """Recompute vocal V/NV from cached raw analysis features."""
+def derive_vocal(
+    raw_analysis: dict,
+    dsp: dict | None = None,
+    audio_features: dict[str, float] | None = None,
+    mood_scores: dict[str, float] | None = None,
+) -> dict:
+    """Recompute taxonomy vocal profile from cached raw analysis features."""
     s = get_section("vocal")
 
     vocal_ratio = raw_analysis.get("vocal_ratio", 0.0)
@@ -103,12 +116,24 @@ def derive_vocal(raw_analysis: dict) -> dict:
     threshold = s.get("frame_threshold", 0.20)
     conf_scale = s.get("confidence_scale", 0.15)
 
+    profile, profile_scores, has_vocals, profile_confidence = score_vocal_profile(
+        vocal_ratio=vocal_ratio,
+        temporal_bonus=temporal_bonus,
+        threshold=threshold,
+        base_weight=base_w,
+        temporal_weight=temp_w,
+        dsp=dsp,
+        audio_features=audio_features,
+        mood_scores=mood_scores,
+    )
     vocal_score = vocal_ratio * (base_w + temp_w * temporal_bonus)
-    has_vocals = vocal_score > threshold
-    confidence = min(1.0, abs(vocal_score - threshold) / conf_scale)
+    detector_confidence = min(1.0, abs(vocal_score - threshold) / conf_scale)
+    confidence = max(detector_confidence, profile_confidence)
 
     return {
-        "vocal": "V" if has_vocals else "NV",
+        "vocal": profile,
+        "vocal_profile": profile,
+        "vocal_scores": profile_scores,
         "has_vocals": has_vocals,
         "vocal_ratio": vocal_ratio,
         "vocal_confidence": confidence,
@@ -194,23 +219,33 @@ def derive_all(dsp: dict, raw_analysis: dict, audio_features: dict[str, float] |
     """Recompute all derived values from cached raw data."""
     energy = derive_energy(dsp)
     vibe = derive_vibe(dsp, audio_features=audio_features)
-    vocal = derive_vocal(raw_analysis)
+    vocal = derive_vocal(
+        raw_analysis,
+        dsp=dsp,
+        audio_features=audio_features,
+        mood_scores=vibe["mood_scores"],
+    )
     structure = derive_structure(raw_analysis)
 
     return {
         "energy": energy["energy"],
         "bpm": round(float(raw_analysis.get("tempo", 0.0)), 1) if raw_analysis.get("tempo") is not None else None,
         "vibe": vibe["vibe"],
+        "mood": vibe["mood"],
         "vocal": vocal["vocal"],
+        "vocal_profile": vocal["vocal_profile"],
         "has_vocals": vocal["has_vocals"],
         "vocal_ratio": vocal["vocal_ratio"],
+        "vocal_scores": vocal["vocal_scores"],
         "vibe_scores": vibe["vibe_scores"],
+        "mood_scores": vibe["mood_scores"],
         "structure": structure["structure"],
         "intro_bars": structure["intro_bars"],
         "flow_type": structure["flow_type"],
         "confidences": {
             "energy": energy["energy_confidence"],
             "vibe": vibe["vibe_confidence"],
+            "mood": vibe["mood_confidence"],
             "vocal": vocal["vocal_confidence"],
             "structure": structure["structure_confidence"],
         },

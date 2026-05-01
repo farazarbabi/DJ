@@ -1,14 +1,19 @@
 """Tests for tag formatting and parsing."""
 
 from dj_tagger.formats import format_tag, parse_tag
+from dj_tagger.moods import MOOD_LABELS
 
 
 def test_format_v3():
-    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "9A_E3_HYPN_64H_NV_126"
+    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "9A_E3_HYPN_64H_INST_126"
 
 
 def test_format_vocals():
-    assert format_tag(4, "5A", 130, "32D", "RAW", True) == "5A_E4_RAW_32D_V_130"
+    assert format_tag(4, "5A", 130, "32D", "RAW", True) == "5A_E4_RAW_32D_VOC_130"
+
+
+def test_format_explicit_vocal_profile():
+    assert format_tag(4, "5A", 130, "32D", "RAW", vocal_profile="featured_vocal") == "5A_E4_RAW_32D_FVOC_130"
 
 
 def test_format_missing_fields():
@@ -23,7 +28,7 @@ def test_parse_v3():
         "energy": "3",
         "vibe": "HYPN",
         "structure": "64H",
-        "vocal": "NV",
+        "vocal": "INST",
         "bpm": "126",
     }
 
@@ -37,7 +42,7 @@ def test_parse_v2_legacy():
         "bpm": "126",
         "structure": "64H",
         "vibe": "HYPN",
-        "vocal": "NV",
+        "vocal": "INST",
     }
 
 
@@ -60,11 +65,23 @@ def test_parse_v1_legacy():
 
 
 def test_parse_all_vibes_v3():
-    for vibe in ("HYPN", "DRK", "RAW", "DEEP", "TRIB", "MEL", "ACID", "ATM"):
-        tag = f"9A_E3_{vibe}_64H_NV_128"
+    for vibe in MOOD_LABELS:
+        tag = f"9A_E3_{vibe}_64H_INST_128"
         result = parse_tag(tag)
         assert result is not None
         assert result["vibe"] == vibe
+
+
+def test_parse_taxonomy_mood_v3():
+    result = parse_tag("9A_E3_WARM_64H_INST_128")
+    assert result is not None
+    assert result["vibe"] == "WARM"
+
+
+def test_parse_legacy_hyp_alias_v3():
+    result = parse_tag("9A_E3_HYP_64H_INST_128")
+    assert result is not None
+    assert result["vibe"] == "HYPN"
 
 
 def test_parse_invalid():
@@ -75,23 +92,23 @@ def test_parse_invalid():
 
 def test_parse_all_flow_types_v3():
     for flow in ("G", "H", "D", "B", "L"):
-        tag = f"9A_E3_HYPN_32{flow}_NV_130"
+        tag = f"9A_E3_HYPN_32{flow}_INST_130"
         result = parse_tag(tag)
         assert result is not None
         assert result["structure"] == f"32{flow}"
 
 
 def test_format_with_group_id():
-    assert format_tag(3, "9A", 126, "64H", "HYPN", False, "G001") == "9A_E3_HYPN_64H_NV_126_G001"
+    assert format_tag(3, "9A", 126, "64H", "HYPN", False, "G001") == "9A_E3_HYPN_64H_INST_126_G001"
 
 
 def test_format_without_group_id():
     """Without group_id, tag should not have trailing underscore."""
-    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "9A_E3_HYPN_64H_NV_126"
+    assert format_tag(3, "9A", 126, "64H", "HYPN", False) == "9A_E3_HYPN_64H_INST_126"
 
 
 def test_parse_v3_with_group():
-    result = parse_tag("9A_E3_HYPN_64H_NV_126_G017")
+    result = parse_tag("9A_E3_HYPN_64H_INST_126_G017")
     assert result is not None
     assert result["group_id"] == "G017"
     assert result["key"] == "9A"
@@ -100,6 +117,6 @@ def test_parse_v3_with_group():
 
 def test_parse_v3_without_group():
     """Tags without group_id should still parse and not have group_id key."""
-    result = parse_tag("9A_E3_HYPN_64H_NV_126")
+    result = parse_tag("9A_E3_HYPN_64H_INST_126")
     assert result is not None
     assert "group_id" not in result

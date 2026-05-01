@@ -34,8 +34,10 @@ rms_mean = [0.15, 0.20, 0.15]
 thresholds = [0.25, 0.42, 0.58, 0.75]
 
 
-# ─── Vibe Classification (8 categories) ─────────────────────────────────────
-# Each vibe is scored from DSP features. The highest-scoring vibe wins.
+# ─── Mood Classification (taxonomy-derived codes) ────────────────────────────
+# Each mood is scored from DSP features. The highest-scoring mood wins.
+# The legacy output field is still named "vibe" for tag compatibility, but the
+# code list is loaded from src/dj_registry/taxonomy/dj_taxonomy.json moods.
 # Parameters are [weight, offset, scale] unless noted otherwise.
 # Score = weight * clamp01((raw - offset) / scale)  for positive correlation
 # Score = weight * clamp01((offset - raw) / scale)  for inverse correlation
@@ -44,7 +46,7 @@ thresholds = [0.25, 0.42, 0.58, 0.75]
 # MEL (Melodic): must earn its score from features — no free baseline.
 # High chroma variance = strong melodic/harmonic content.
 # chroma_scale raised to 0.10 so only genuinely melodic tracks saturate.
-mel_base = 0.0                  # no free baseline — MEL competes on features like all vibes
+mel_base = 0.0                  # no free baseline — MEL competes on features like all moods
 mel_chroma_scale = 0.10         # chroma_var / this. At 0.065 most electronic music saturated; 0.10 spreads it out.
 mel_chroma_weight = 0.55        # melodic content is the primary MEL driver
 mel_lowflat_center = 0.025      # flatness below this = clean (not noisy) production
@@ -90,7 +92,7 @@ acid_centroid_var = [1.0, 0.75, 0.40] # centroid coefficient of variation. Only 
 atm_sparse = [0.50, 1.5, 1.0]  # (inverse) low onset density = few rhythmic events.
 atm_quiet  = [0.50, 0.20, 0.08] # (inverse) low loudness = quiet/ambient character.
 
-# Songstats audio feature contributions to vibe scores.
+# Songstats audio feature contributions to mood/vibe scores.
 # Only applied when Songstats/Spotify audio features are available for the track.
 # Tracks without API data fall back to DSP-only scoring (unaffected).
 # Format: [weight, threshold, scale] — same as DSP params above.
@@ -126,11 +128,12 @@ mel_valence = [0.15, 0.50, 0.30]     # valence > 0.50 → positive/melodic
 
 
 # ─── Vocal Detection ────────────────────────────────────────────────────────
-# Detects vocal presence (V) or absence (NV) based on spectral energy in the
-# vocal frequency band, combined with temporal consistency of vocal frames.
+# Detects vocal presence from spectral energy in the vocal frequency band, then
+# maps the result to taxonomy vocal profiles such as INST, VOC, FVOC, SPK,
+# CHANT, DUB, and TOOL.
 [vocal]
 
-# Decision boundary: vocal_score above this = V, below = NV.
+# Decision boundary: vocal_score above this = vocal-content profile.
 # Lower = more tracks classified as vocal. Higher = stricter detection.
 frame_threshold = 0.20
 

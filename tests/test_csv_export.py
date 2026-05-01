@@ -31,7 +31,9 @@ def test_groups_csv_export(tmp_path):
         rows = list(reader)
     assert len(rows) == 1
     assert rows[0]["group_id"] == "G001"
+    assert rows[0]["mood"] == "HYPN"
     assert rows[0]["vibe"] == "HYPN"
+    assert rows[0]["vocal_profile"] == "NV"
 
 
 def test_recommendations_csv_export(tmp_path):

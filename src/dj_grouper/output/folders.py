@@ -80,7 +80,7 @@ def _write_group_info(folder: Path, group, member_tracks) -> None:
         f"Tracks: {len(member_tracks)}",
         f"Key: {group.key}",
         f"Energy: E{group.energy}",
-        f"Vibe: {group.vibe}",
+        f"Mood: {group.vibe}",
         f"BPM: {group.bpm}",
         f"Structure: {group.structure}",
         f"Vocal: {group.vocal}",

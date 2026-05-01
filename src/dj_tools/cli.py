@@ -37,6 +37,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -62,6 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("-w", "--workers", type=int, default=1, help="Analysis workers (default: 1)")
     p_run.add_argument("--force-extract", action="store_true", help="Force re-extraction in grouper")
     p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
+    p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
 
     return parser
 
@@ -81,7 +83,7 @@ def _find_latest_xml(paths: list[str]) -> str:
     return str(latest)
 
 
-def _run_songstats(config, store, obs_cache) -> dict:
+def _run_songstats(config, store, obs_cache, *, show_progress: bool = False) -> dict:
     """Try Songstats ingest. Returns summary dict. Gracefully handles failures."""
     summary = {"isrcs_enriched": 0, "songstats_total": 0, "songstats_cached": 0, "songstats_fetched": 0}
 
@@ -91,13 +93,13 @@ def _run_songstats(config, store, obs_cache) -> dict:
 
     try:
         from dj_registry.adapters.spotify_isrc import enrich_isrcs
-        summary["isrcs_enriched"] = enrich_isrcs(store)
+        summary["isrcs_enriched"] = enrich_isrcs(store, show_progress=show_progress)
     except Exception:
         logger.warning("Songstats: ISRC enrichment failed, continuing", exc_info=True)
 
     try:
         from dj_registry.adapters.songstats import ingest_songstats
-        stats = ingest_songstats(config, store, obs_cache=obs_cache)
+        stats = ingest_songstats(config, store, obs_cache=obs_cache, show_progress=show_progress)
         summary["songstats_total"] = stats["total"]
         summary["songstats_cached"] = stats["cached"]
         summary["songstats_fetched"] = stats["fetched"]
@@ -136,6 +138,8 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
         name = name_parts[0] if name_parts else prefix
         dsp_entries.append((prefix, name, entry.data))
 
+    from dj_tagger.moods import MOOD_LABELS, normalize_mood_code
+
     # Check tagger cache state for each DSP entry
     n_tagger_hit = 0
     n_tagger_stale = 0
@@ -151,12 +155,12 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
         else:
             n_tagger_hit += 1
             if isinstance(tagger_entry.data, dict):
-                cached_vibes.append(tagger_entry.data.get("vibe", "?"))
+                cached_vibes.append(normalize_mood_code(tagger_entry.data.get("mood") or tagger_entry.data.get("vibe", "?")))
 
     print(f"Tagger cache: {n_tagger_hit} current, {n_tagger_stale} stale, {n_tagger_miss} missing")
     if cached_vibes:
         from collections import Counter as C
-        print(f"Cached tagger vibes: {dict(C(cached_vibes).most_common())}")
+        print(f"Cached tagger moods/vibes: {dict(C(cached_vibes).most_common())}")
 
     # Load Songstats features from raw cache (same path as pipeline)
     # Build filename → ISRC mapping from registry, then look up songstats by ISRC
@@ -191,7 +195,7 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
 
     # Run derive_vibe on each track (fresh, from DSP)
     labels: list[str] = []
-    all_scores: dict[str, list[float]] = {v: [] for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]}
+    all_scores: dict[str, list[float]] = {v: [] for v in MOOD_LABELS}
     near_misses: dict[str, int] = {v: 0 for v in all_scores}
     ss_count = 0
     mismatches: list[tuple[str, str, str]] = []  # (name, cached_vibe, derived_vibe)
@@ -206,11 +210,11 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
         for v, score in result["vibe_scores"].items():
             all_scores[v].append(score)
 
-        # Check if cached tagger vibe matches
+        # Check if cached tagger mood/vibe matches
         tagger_key = f"{prefix}|tagger"
         tagger_entry = ucache._entries.get(tagger_key)
         if tagger_entry and isinstance(tagger_entry.data, dict):
-            cached_label = tagger_entry.data.get("vibe", "")
+            cached_label = normalize_mood_code(tagger_entry.data.get("mood") or tagger_entry.data.get("vibe", ""))
             if cached_label and cached_label != derived_label:
                 mismatches.append((name, cached_label, derived_label))
 
@@ -225,13 +229,13 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
         return 1
 
     n = len(dsp_entries)
-    print(f"\nVibe Audit: {n} tracks ({ss_count} with Songstats data)\n")
+    print(f"\nMood/Vibe Audit: {n} tracks ({ss_count} with Songstats data)\n")
 
     # Label distribution (from fresh derive_vibe)
     print("Label Distribution (fresh derive_vibe):")
     from collections import Counter
     counts = Counter(labels)
-    for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+    for v in MOOD_LABELS:
         c = counts.get(v, 0)
         pct = 100.0 * c / n
         bar = "#" * int(pct / 2)
@@ -247,7 +251,7 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
 
     # Score stats
     print("\nScore Statistics (mean / p25 / p50 / p75 / max):")
-    for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+    for v in MOOD_LABELS:
         arr = np.array(all_scores[v])
         if len(arr) == 0:
             continue
@@ -258,7 +262,9 @@ def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
     mel_count = counts.get("MEL", 0)
     if mel_count > 0:
         print(f"\nNear-Misses (non-MEL vibes that lost to MEL by <0.10):")
-        for v in ["DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+        for v in MOOD_LABELS:
+            if v == "MEL":
+                continue
             c = near_misses[v]
             if c > 0:
                 print(f"  {v:5s}  {c:4d}  ({100.0 * c / mel_count:.1f}% of MEL tracks)")
@@ -275,6 +281,7 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
     from dj_registry.adapters.local_analysis import _lookup_audio_features
     from dj_registry.store.csv_store import CsvStore
     from dj_tagger.derive import derive_vibe
+    from dj_tagger.moods import MOOD_LABELS, normalize_mood_code
     from dj_tagger.universal_cache import DERIVED_VERSIONS, get_cache, quick_duration
 
     ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
@@ -302,7 +309,7 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
 
     canonical_labels: list[str] = []
     cached_vibes: list[str] = []
-    all_scores: dict[str, list[float]] = {v: [] for v in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]}
+    all_scores: dict[str, list[float]] = {v: [] for v in MOOD_LABELS}
     near_misses: dict[str, int] = {v: 0 for v in all_scores}
     mismatches: list[tuple[str, str, str]] = []
     n_tagger_hit = 0
@@ -322,10 +329,10 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
         else:
             n_tagger_hit += 1
             if isinstance(tagger_entry.data, dict):
-                cached_vibes.append(tagger_entry.data.get("vibe", "?"))
+                cached_vibes.append(normalize_mood_code(tagger_entry.data.get("mood") or tagger_entry.data.get("vibe", "?")))
 
         if track.tagger_vibe:
-            canonical_labels.append(track.tagger_vibe)
+            canonical_labels.append(normalize_mood_code(track.tagger_vibe))
 
         audio_features = _lookup_audio_features(ucache, track.isrc_canonical)
         if audio_features:
@@ -341,8 +348,9 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
         for vibe, score in result["vibe_scores"].items():
             all_scores[vibe].append(score)
 
-        if track.tagger_vibe and track.tagger_vibe != derived_label:
-            mismatches.append((filename, track.tagger_vibe, derived_label))
+        stored_label = normalize_mood_code(track.tagger_vibe)
+        if stored_label and stored_label != derived_label:
+            mismatches.append((filename, stored_label, derived_label))
 
         if derived_label == "MEL":
             mel_score = result["vibe_scores"]["MEL"]
@@ -352,15 +360,15 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
 
     print(f"Tagger cache: {n_tagger_hit} current, {n_tagger_stale} stale, {n_tagger_miss} missing")
     if cached_vibes:
-        print(f"Cached tagger vibes: {dict(Counter(cached_vibes).most_common())}")
+        print(f"Cached tagger moods/vibes: {dict(Counter(cached_vibes).most_common())}")
 
-    print(f"\nVibe Audit: {len(registry_rows)} registry tracks ({ss_count} with Songstats data)")
+    print(f"\nMood/Vibe Audit: {len(registry_rows)} registry tracks ({ss_count} with Songstats data)")
     if dsp_missing:
         print(f"DSP missing for {dsp_missing} track(s); drift checks skipped for those entries.")
 
     print("\nCanonical Label Distribution (registry / dj run):")
     counts = Counter(canonical_labels)
-    for vibe in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+    for vibe in MOOD_LABELS:
         count = counts.get(vibe, 0)
         pct = 100.0 * count / len(registry_rows)
         bar = "#" * int(pct / 2)
@@ -376,7 +384,7 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
         print("\nDrift Check (registry vs fresh derive): 0 mismatches")
 
     print("\nScore Statistics (mean / p25 / p50 / p75 / max):")
-    for vibe in ["MEL", "DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+    for vibe in MOOD_LABELS:
         arr = np.array(all_scores[vibe])
         if len(arr) == 0:
             continue
@@ -388,7 +396,9 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
     mel_count = counts.get("MEL", 0)
     if mel_count > 0:
         print("\nNear-Misses (non-MEL vibes that lost to MEL by <0.10):")
-        for vibe in ["DRK", "HYPN", "TRIB", "DEEP", "ATM", "RAW", "ACID"]:
+        for vibe in MOOD_LABELS:
+            if vibe == "MEL":
+                continue
             count = near_misses[vibe]
             if count > 0:
                 print(f"  {vibe:5s}  {count:4d}  ({100.0 * count / mel_count:.1f}% of MEL tracks)")
@@ -442,8 +452,9 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 
     # Phase 1: Scan + Link
     t0 = time.perf_counter()
-    files = scan_files(config, store, obs_cache=obs_cache)
-    link_files_to_tracks(config, store)
+    show_progress = not getattr(args, "quiet", False) and not getattr(args, "no_progress", False)
+    files = scan_files(config, store, obs_cache=obs_cache, show_progress=show_progress)
+    link_files_to_tracks(config, store, show_progress=show_progress)
     tracks = store.load_tracks()
     logger.info("Pipeline: scan + link done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
 
@@ -451,12 +462,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     t0 = time.perf_counter()
     if config.rekordbox_xml_path:
         from dj_registry.adapters.rekordbox_xml import ingest_rekordbox
-        ingest_rekordbox(config, store, obs_cache=obs_cache)
+        ingest_rekordbox(config, store, obs_cache=obs_cache, show_progress=show_progress)
     else:
         logger.info("Rekordbox: skipped (no .xml found in library dir)")
 
     if not args.no_songstats:
-        _run_songstats(config, store, obs_cache)
+        _run_songstats(config, store, obs_cache, show_progress=show_progress)
     else:
         logger.info("Songstats: skipped (--no-songstats)")
 
@@ -465,7 +476,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 
     # Phase 3: Analyze (full tagger pipeline)
     t0 = time.perf_counter()
-    run_analysis(config, store, no_essentia=args.no_essentia)
+    run_analysis(config, store, no_essentia=args.no_essentia, show_progress=show_progress)
     logger.info("Pipeline: analysis done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 4: Resolve canonical key + BPM
@@ -473,22 +484,22 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     from dj_registry.pipelines.orchestrator import _enrich_observations
     _enrich_observations(store)
 
-    resolve_all_keys(config, store, force=True)
-    resolve_all_bpms(config, store, force=True)
-    build_review_queue(config, store)
+    resolve_all_keys(config, store, force=True, show_progress=show_progress)
+    resolve_all_bpms(config, store, force=True, show_progress=show_progress)
+    build_review_queue(config, store, show_progress=show_progress)
     logger.info("Pipeline: resolve done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 5: Write tags
     t0 = time.perf_counter()
     if not args.no_tags:
-        sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False))
+        sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False), show_progress=show_progress)
         logger.info("Pipeline: tags written in %s\n", _fmt_elapsed(time.perf_counter() - t0))
     else:
         logger.info("Tags: skipped (--no-tags)\n")
 
     # Phase 6: Reports
-    classify_all_taxonomies(store)
-    generate_reports(store, config.reports_dir)
+    classify_all_taxonomies(store, show_progress=show_progress)
+    generate_reports(store, config.reports_dir, show_progress=show_progress)
 
     # Phase 7: Grouping
     if not args.no_grouping:

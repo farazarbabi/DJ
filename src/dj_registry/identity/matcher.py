@@ -7,6 +7,7 @@ import uuid
 
 from ..config import RegistryConfig
 from ..models import LogicalTrack
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from .normalize import normalize_artist, normalize_title, normalize_mix, extract_mix_from_title
 
@@ -32,6 +33,8 @@ def _identity_key(artist: str, title: str, mix: str) -> str:
 def link_files_to_tracks(
     config: RegistryConfig,
     store: CsvStore,
+    *,
+    show_progress: bool = False,
 ) -> None:
     """Resolve file-to-track identity mappings.
 
@@ -65,8 +68,9 @@ def link_files_to_tracks(
     unlinked = [f for f in files if not f.track_id]
     linked_count = 0
     new_track_count = 0
+    progress = ProgressBar(len(unlinked), label="Link files", enabled=show_progress)
 
-    for frec in unlinked:
+    for index, frec in enumerate(unlinked, start=1):
         matched_track: LogicalTrack | None = None
         method = ""
         score = 0.0
@@ -153,6 +157,7 @@ def link_files_to_tracks(
                 tracks_by_sha[frec.sha256] = track
 
             new_track_count += 1
+        progress.update(index, frec.file_name, matched=linked_count, new=new_track_count)
 
     # Assign track_ids to tag observations that were missing them
     obs = store.load_observations()
@@ -172,4 +177,5 @@ def link_files_to_tracks(
     if changed:
         store.save_observations(obs)
 
+    progress.finish()
     logger.info("Link: %d tracks (%d new, %d matched, %d existing)", len(tracks), new_track_count, linked_count, already_linked)

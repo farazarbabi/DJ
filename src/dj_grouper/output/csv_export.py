@@ -23,7 +23,7 @@ def export_groups_csv(
 
     fieldnames = [
         "file", "group_id", "group_folder", "bpm", "energy", "key",
-        "structure", "vibe", "vocal", "is_medoid",
+        "structure", "mood", "vibe", "vocal", "vocal_profile", "is_medoid",
     ]
 
     medoid_indices = {g.medoid_index for g in assignment.groups}
@@ -45,8 +45,10 @@ def export_groups_csv(
             "energy": tf.info.energy or "",
             "key": tf.info.key or "",
             "structure": tf.info.structure or "",
+            "mood": tf.info.vibe or "",
             "vibe": tf.info.vibe or "",
             "vocal": tf.info.vocal or "",
+            "vocal_profile": tf.info.vocal or "",
             "is_medoid": i in medoid_indices,
         })
 
@@ -102,7 +104,7 @@ def export_features_csv(
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-    base_fields = ["file", "energy", "key", "bpm", "structure", "vibe", "vocal"]
+    base_fields = ["file", "energy", "key", "bpm", "structure", "mood", "vibe", "vocal", "vocal_profile"]
     dsp_fields = sorted(dsp_features[0].keys()) if dsp_features else []
     fieldnames = base_fields + dsp_fields
 
@@ -114,8 +116,10 @@ def export_features_csv(
             "key": tf.info.key,
             "bpm": tf.info.bpm,
             "structure": tf.info.structure,
+            "mood": tf.info.vibe,
             "vibe": tf.info.vibe,
             "vocal": tf.info.vocal,
+            "vocal_profile": tf.info.vocal,
         }
         if i < len(dsp_features):
             row.update({k: round(v, 6) for k, v in dsp_features[i].items()})

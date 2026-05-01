@@ -1,6 +1,14 @@
 # Tagger Cache and Experimentation Workflow
 
-This document is for tuning `energy`, `vibe`, `vocal`, `structure`, `bpm`, or key logic without accidentally reading stale cached results.
+This document is for tuning `energy`, `vibe`/mood, `vocal`, `structure`, `bpm`, or key logic without accidentally reading stale cached results.
+
+`vibe` is the historical field name. Its values are now taxonomy mood codes from
+`src/dj_registry/taxonomy/dj_taxonomy.json`, loaded through
+`src/dj_tagger/moods.py`.
+
+`vocal` is likewise a taxonomy vocal-profile code loaded from the same
+dictionary through `src/dj_tagger/vocals.py`. Legacy `V`/`NV` values normalize
+to `VOC`/`INST`.
 
 ## Goal
 
@@ -220,7 +228,7 @@ If you create a brand-new module and the tagger starts depending on it, you must
 
 Examples:
 
-- new helper for raw vocal metrics
+- new helper for raw vocal metrics or vocal-profile scoring
 - new shared scorer module for energy or structure
 - new key-profile or key-postprocessing helper
 

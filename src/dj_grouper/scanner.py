@@ -8,10 +8,12 @@ from dataclasses import dataclass, field
 from dj_tagger.cli import find_audio_files
 from dj_tagger.formats import parse_tag
 from dj_tagger.metadata import read_existing_tag
+from dj_tagger.moods import MOOD_LABELS, normalize_mood_code
+from dj_tagger.vocals import normalize_vocal_profile
 
 logger = logging.getLogger(__name__)
 
-VIBE_LABELS = ["HYPN", "DRK", "RAW", "DEEP", "TRIB", "MEL", "ACID", "ATM"]
+VIBE_LABELS = list(MOOD_LABELS)
 UNKNOWN_KEYS = {"", "??", "NK"}
 
 
@@ -31,10 +33,11 @@ class TrackInfo:
     intro_bars: int | None = None
     flow_type: str | None = None
     vibe: str | None = None
-    vocal: str | None = None  # "V" or "NV"
+    vocal: str | None = None  # taxonomy vocal profile code
     group_id: str | None = None
     # Continuous vibe scores (from pipeline analysis)
     vibe_scores: dict[str, float] = field(default_factory=dict)
+    vocal_scores: dict[str, float] = field(default_factory=dict)
     # Per-analyzer confidence (0=uncertain, 1=confident)
     confidences: dict[str, float] = field(default_factory=dict)
     # Section info from analysis
@@ -63,8 +66,8 @@ def scan_library(paths: list[str], recursive: bool = True) -> list[TrackInfo]:
                 if info.structure and len(info.structure) >= 3:
                     info.intro_bars = int(info.structure[:-1])
                     info.flow_type = info.structure[-1]
-                info.vibe = parsed.get("vibe")
-                info.vocal = parsed.get("vocal")
+                info.vibe = normalize_mood_code(parsed.get("vibe"))
+                info.vocal = normalize_vocal_profile(parsed.get("vocal"))
                 info.group_id = parsed.get("group_id")
         tracks.append(info)
 

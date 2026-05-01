@@ -26,7 +26,7 @@ def print_review(
 
         print(f"  {group.group_id}  {group.folder_name}")
         print(f"  {'─' * 60}")
-        print(f"  Tracks: {len(members)}  |  Energy: E{group.energy}  |  Vibe: {group.vibe}")
+        print(f"  Tracks: {len(members)}  |  Energy: E{group.energy}  |  Mood: {group.vibe}")
         print(f"  BPM: {group.bpm}  |  Structure: {group.structure}  |  Vocal: {group.vocal}")
         print(f"  Medoid: {Path(medoid_path).name}")
         print()

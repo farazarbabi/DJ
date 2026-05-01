@@ -117,7 +117,7 @@ class TestRunExtraction:
         _run_extraction(tracks, cache_path, workers=1)
 
         assert tracks[0].vibe is not None
-        assert tracks[0].vocal in ("V", "NV")
+        assert tracks[0].vocal in {"CHANT", "DUB", "FVOC", "INST", "SPK", "TOOL", "VOC"}
         assert "vibe" in tracks[0].confidences
         assert "vocal" in tracks[0].confidences
 
@@ -140,6 +140,7 @@ class TestRunExtraction:
         )
 
         assert track.key == "9A"
+        assert track.vocal == "INST"
         assert track.confidences["key"] == 0.9
 
     def test_extract_stores_canonical_raw_layers(self, tmp_path):

@@ -4,6 +4,16 @@ from __future__ import annotations
 
 import re
 
+from .moods import mood_tag_pattern, normalize_mood_code
+from .vocals import (
+    normalize_vocal_profile,
+    vocal_profile_from_has_vocals,
+    vocal_profile_tag_pattern,
+)
+
+_MOOD_PATTERN = mood_tag_pattern()
+_VOCAL_PATTERN = vocal_profile_tag_pattern()
+
 
 def format_tag(
     energy: int | None,
@@ -13,18 +23,21 @@ def format_tag(
     vibe: str | None = None,
     has_vocals: bool | None = None,
     group_id: str | None = None,
+    *,
+    vocal_profile: str | None = None,
 ) -> str:
     """Build the final comment tag string.
 
-    Returns e.g. ``"9A_E3_HYPN_64H_NV_126"`` or ``"9A_E3_HYPN_64H_NV_126_G001"``
-    Order: KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM[_GID]
+    Returns e.g. ``"9A_E3_HYPN_64H_INST_126"`` or ``"9A_E3_HYPN_64H_INST_126_G001"``
+    Order: KEY_ENERGY_MOOD_STRUCTURE_VOCAL_BPM[_GID]
     """
+    vocal_code = normalize_vocal_profile(vocal_profile) or vocal_profile_from_has_vocals(has_vocals) or "??"
     parts = [
         camelot or "??",
         f"E{energy}" if energy is not None else "E?",
-        vibe or "??",
+        normalize_mood_code(vibe) or "??",
         structure or "??",
-        "V" if has_vocals else "NV" if has_vocals is not None else "??",
+        vocal_code,
         str(bpm) if bpm is not None else "???",
     ]
     if group_id:
@@ -32,17 +45,17 @@ def format_tag(
     return "_".join(parts)
 
 
-# Current format: KEY_ENERGY_VIBE_STRUCT_VOC_BPM[_GID]
+# Current format: KEY_ENERGY_MOOD_STRUCT_VOC_BPM[_GID]
 _TAG_PATTERN_V3 = re.compile(
     r"^(\d{1,2}[AB]|\?\?)"
     r"_"
     r"E([1-5?])"
     r"_"
-    r"(HYPN|DRK|RAW|DEEP|TRIB|MEL|ACID|ATM|\?\?)"
+    r"(" + _MOOD_PATTERN + r")"
     r"_"
     r"(\d{2}[GHDBL]|\?\?)"
     r"_"
-    r"(V|NV|\?\?)"
+    r"(" + _VOCAL_PATTERN + r")"
     r"_"
     r"(\d{2,3}|\?\?\?)"
     r"(?:_(G\d{3}))?$"
@@ -58,9 +71,9 @@ _TAG_PATTERN_V2 = re.compile(
     r"\s*\|\s*"
     r"(\d{2}[GHDBL]|\?\?)"
     r"\s*\|\s*"
-    r"(HYPN|DRK|RAW|DEEP|TRIB|MEL|ACID|ATM|\?\?)"
+    r"(" + _MOOD_PATTERN + r")"
     r"\s*\|\s*"
-    r"(V|NV|\?\?)"
+    r"(" + _VOCAL_PATTERN + r")"
     r"(?:\s*\|\s*(G\d{3}))?$"
 )
 
@@ -72,9 +85,9 @@ _TAG_PATTERN_V1 = re.compile(
     r"\s*\|\s*"
     r"(\d{2}[GHDBL]|\?\?)"
     r"\s*\|\s*"
-    r"(HYPN|DRK|RAW|DEEP|TRIB|MEL|ACID|ATM|\?\?)"
+    r"(" + _MOOD_PATTERN + r")"
     r"\s*\|\s*"
-    r"(V|NV|\?\?)$"
+    r"(" + _VOCAL_PATTERN + r")$"
 )
 
 
@@ -91,9 +104,9 @@ def parse_tag(tag_string: str) -> dict[str, str] | None:
         result = {
             "key": m.group(1),
             "energy": m.group(2),
-            "vibe": m.group(3),
+            "vibe": normalize_mood_code(m.group(3)),
             "structure": m.group(4),
-            "vocal": m.group(5),
+            "vocal": normalize_vocal_profile(m.group(5)),
             "bpm": m.group(6),
         }
         if m.group(7):
@@ -108,8 +121,8 @@ def parse_tag(tag_string: str) -> dict[str, str] | None:
             "key": m.group(2),
             "bpm": m.group(3),
             "structure": m.group(4),
-            "vibe": m.group(5),
-            "vocal": m.group(6),
+            "vibe": normalize_mood_code(m.group(5)),
+            "vocal": normalize_vocal_profile(m.group(6)),
         }
         if m.group(7):
             result["group_id"] = m.group(7)
@@ -122,8 +135,8 @@ def parse_tag(tag_string: str) -> dict[str, str] | None:
             "energy": m.group(1),
             "key": m.group(2),
             "structure": m.group(3),
-            "vibe": m.group(4),
-            "vocal": m.group(5),
+            "vibe": normalize_mood_code(m.group(4)),
+            "vocal": normalize_vocal_profile(m.group(5)),
         }
 
     return None

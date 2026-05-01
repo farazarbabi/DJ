@@ -50,6 +50,7 @@ def run_full_pipeline(
     songstats_limit: int | None = None,
     no_essentia: bool = False,
     analysis_workers: int | None = None,
+    show_progress: bool = False,
 ) -> dict:
     """Run the full registry pipeline.
 
@@ -70,22 +71,27 @@ def run_full_pipeline(
     # Clear stale observations — they'll be rebuilt from cache
     store.save_observations([])
 
-    files = scan_files(config, store, obs_cache=obs_cache)
+    files = scan_files(config, store, obs_cache=obs_cache, show_progress=show_progress)
     summary["files_scanned"] = len(files)
 
-    link_files_to_tracks(config, store)
+    link_files_to_tracks(config, store, show_progress=show_progress)
     tracks = store.load_tracks()
     summary["tracks_total"] = len(tracks)
 
     if include_rekordbox and config.rekordbox_xml_path:
-        summary["rekordbox_matched"] = ingest_rekordbox(config, store, obs_cache=obs_cache)
+        summary["rekordbox_matched"] = ingest_rekordbox(
+            config,
+            store,
+            obs_cache=obs_cache,
+            show_progress=show_progress,
+        )
     else:
         summary["rekordbox_matched"] = 0
 
     if include_songstats:
-        summary["isrcs_enriched"] = enrich_isrcs(store)
+        summary["isrcs_enriched"] = enrich_isrcs(store, show_progress=show_progress)
         ss_stats = ingest_songstats(
-            config, store, obs_cache=obs_cache, limit=songstats_limit
+            config, store, obs_cache=obs_cache, limit=songstats_limit, show_progress=show_progress
         )
         summary["songstats_fetched"] = ss_stats["total"]
         summary["songstats_cached"] = ss_stats["cached"]
@@ -97,31 +103,31 @@ def run_full_pipeline(
     # before analysis so the tagger can look up audio features during vibe scoring.
     obs_cache.save()
 
-    analysis_stats = run_analysis(config, store, no_essentia=no_essentia)
+    analysis_stats = run_analysis(config, store, no_essentia=no_essentia, show_progress=show_progress)
     summary["tracks_analyzed"] = analysis_stats["total"]
     summary["tracks_analyzed_cached"] = analysis_stats["cached"]
 
     _enrich_observations(store)
 
-    resolved, review = resolve_all_keys(config, store, force=True)
+    resolved, review = resolve_all_keys(config, store, force=True, show_progress=show_progress)
     summary["keys_resolved"] = resolved
     summary["keys_need_review"] = review
 
-    bpm_resolved, bpm_missing = resolve_all_bpms(config, store, force=True)
+    bpm_resolved, bpm_missing = resolve_all_bpms(config, store, force=True, show_progress=show_progress)
     summary["bpm_resolved"] = bpm_resolved
     summary["bpm_missing"] = bpm_missing
-    summary["review_items"] = build_review_queue(config, store)
+    summary["review_items"] = build_review_queue(config, store, show_progress=show_progress)
 
     if write_tags and not dry_run:
-        written, _, errors = sync_tags(store, dry_run=False)
+        written, _, errors = sync_tags(store, dry_run=False, show_progress=show_progress)
         summary["tags_written"] = written
         summary["tags_errors"] = errors
     else:
-        sync_tags(store, dry_run=True)
+        sync_tags(store, dry_run=True, show_progress=show_progress)
         summary["tags_written"] = 0
         summary["tags_errors"] = 0
 
-    summary["taxonomy_classified"] = classify_all_taxonomies(store)
+    summary["taxonomy_classified"] = classify_all_taxonomies(store, show_progress=show_progress)
 
-    generate_reports(store, config.reports_dir)
+    generate_reports(store, config.reports_dir, show_progress=show_progress)
     return summary

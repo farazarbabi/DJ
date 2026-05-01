@@ -22,8 +22,8 @@ KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM[_GID]
 Examples:
 
 ```text
-9A_E3_HYPN_64H_NV_126
-8A_E4_DRK_32D_V_130_G017
+9A_E3_HYPN_64H_INST_126
+8A_E4_DRK_32D_FVOC_130_G017
 ```
 
 Legacy pipe-separated tags are still parsed, but newly written tags use the underscore format.
@@ -98,6 +98,10 @@ dj-tagger --write-tags --no-registry
 dj-registry run --write-tags --songstats
 dj-registry analyze -w 4
 dj-registry export
+dj-registry taxonomy test-api
+dj-registry taxonomy generate-ground-truth --files ./files --out files/taxonomy_ground_truth.csv
+dj-registry taxonomy train-model --labels files/taxonomy_ground_truth.csv
+dj-registry taxonomy classify
 
 dj-grouper --dry-run
 dj-grouper --force-extract
@@ -124,10 +128,58 @@ Analyzes a track and produces:
 - `key` / `camelot`
 - `bpm`
 - `structure`
-- `vibe`
+- `vibe` / `mood`
 - `vocal`
-- `vibe_scores`
+- `vocal_profile`
+- `vocal_scores`
+- `vibe_scores` / `mood_scores`
 - `confidences`
+
+`vibe` is kept as the compatibility field used in tags and historical CSVs.
+Semantically it is now a taxonomy `mood` code loaded from
+`src/dj_registry/taxonomy/dj_taxonomy.json` moods. `vocal` is now a taxonomy
+`vocal_profile` code loaded from the same taxonomy `vocal_profiles` values.
+Legacy `HYP`, `V`, and `NV` tags are still parsed and normalized to `HYPN`,
+`VOC`, and `INST`.
+
+#### Mood Codes
+
+| Code | Mood | Meaning for DJ use |
+| --- | --- | --- |
+| `ACID` | acidic | Acid-line, 303-like, squelchy or psychedelic pressure. |
+| `ATM` | atmospheric | Spacious pads, ambience, texture, or float without a strong song hook. |
+| `CIN` | cinematic | Dramatic, soundtrack-like, wide or narrative tension. |
+| `DEEP` | deep | Late-night, submerged, dubby, restrained, or low-intensity depth. |
+| `DRK` | dark | Nocturnal, shadowy, industrial, gothic, or low-valence mood. |
+| `EMO` | emotional | Melancholic, romantic, expressive, or sentiment-forward. |
+| `EUP` | euphoric | Uplifting, triumphant, trance-leaning, or hands-up release. |
+| `GRIT` | gritty | Rough, distorted, noisy, overdriven, or abrasive texture. |
+| `HYPN` | hypnotic | Loop-driven, rolling, meditative, repetitive, or trance-inducing. |
+| `MEL` | melodic | Harmony-forward, lead-melody driven, or musically lyrical. |
+| `MIN` | minimal | Sparse, reduced, micro, stripped-back, or low-density arrangement. |
+| `ORG` | organic | Earthy, desert, ethnic, middle-eastern, wood/percussion oriented. |
+| `PLAY` | playful | Funky, bouncy, cheeky, bright, or light-footed. |
+| `PSY` | psychedelic | Trippy, psy, mental, acidic, or perception-bending. |
+| `RAW` | raw | Unpolished, hard-edged, warehouse, industrial, or rough machine feel. |
+| `SOUL` | soulful | Soul, gospel, warm vocal feeling, or emotionally human house feel. |
+| `SUB` | subby | Bass-heavy, low-end focused, sub-pressure, or weight-driven. |
+| `SUN` | sunlit | Sunset, balearic, outdoor, warm-day, or golden-hour feel. |
+| `TENS` | tense | Suspenseful, anxious, pressure-building, or unresolved. |
+| `TRIB` | tribal | Percussive, ritual, chant-adjacent, shamanic, or drum-circle energy. |
+| `WARM` | warm | Rounded, soft, inviting, soulful, or smooth-toned. |
+| `WHSE` | warehouse | Rave-room, concrete, peak industrial, dark-club or big-room rawness. |
+
+#### Vocal Profile Codes
+
+| Code | Profile | Meaning for DJ use |
+| --- | --- | --- |
+| `CHANT` | chant | Ritual, tribal, mantra-like, call-and-response, or chanted vocal content. |
+| `DUB` | dub | Dub mix, reduced vocal, echo-heavy version, or vocal treated as texture. |
+| `FVOC` | featured vocal | Featured singer, clear vocal hook, topline, or vocal-led chorus moment. |
+| `INST` | instrumental | No meaningful vocal content; voice is absent or not a mix-planning factor. |
+| `SPK` | spoken | Spoken word, speech sample, voiceover, MC phrase, or talk-like vocal. |
+| `TOOL` | tool | DJ tool, percussive/loop track, functional layer, usually non-vocal. |
+| `VOC` | vocal | General vocal-led or lyric-bearing track without a stronger specialized profile. |
 
 The canonical compute path is:
 
@@ -146,6 +198,7 @@ The registry is the source of truth for:
 - canonical key
 - canonical BPM
 - stored tagger outputs on `LogicalTrack`
+- 3-level genre taxonomy fields
 - exported review and audit reports
 
 `registry_overview.csv` is the main review file. It includes source columns, `tagger_*` columns, and provenance fields such as:
@@ -155,6 +208,21 @@ The registry is the source of truth for:
 - `tagger_derived_signature`
 - `tagger_key_signature`
 - `tagger_audio_features_signature`
+
+Registry batch commands show stderr progress bars by default. Use
+`--no-progress` on `dj-registry` or `dj run` commands when scripting or when a
+clean log stream is preferred.
+
+The taxonomy workflow adds:
+
+- GPT/Azure OpenAI seeded labels in `files/taxonomy_ground_truth.csv`
+- a local learned model in `outputs/registry/taxonomy_model/`
+- registry columns `genre_family`, `genre`, `subgenre`, confidence,
+  alternatives, evidence, and warnings
+
+Provider genres from Rekordbox, Spotify, Songstats, and embedded tags are used
+as model features, not as truth. See
+[docs/taxonomy_ground_truth_and_model.md](docs/taxonomy_ground_truth_and_model.md).
 
 ### `dj-grouper`
 
@@ -236,6 +304,8 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 ## Useful Outputs
 
 - `outputs/registry/registry_overview.csv`: main audit and review sheet
+- `files/taxonomy_ground_truth.csv`: GPT/manual seed labels for taxonomy training
+- `outputs/registry/taxonomy_model/`: trained taxonomy model artifacts
 - `outputs/groups.csv`: grouped tracks
 - `outputs/recommendations.csv`: directional recommendations
 - `outputs/Grouped/`: optional grouped folders
@@ -247,11 +317,12 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 pytest -q
 ```
 
-Current suite size: `245` tests.
+Current suite size: `291` tests.
 
 ## Documentation
 
 - [docs/technical_spec.md](docs/technical_spec.md): current as-built technical architecture
+- [docs/taxonomy_ground_truth_and_model.md](docs/taxonomy_ground_truth_and_model.md): genre taxonomy labels, GPT-5 seeding, learned model, and progress/failure behavior
 - [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommendation_system_spec.md): current grouping and recommendation behavior
 - [docs/tagger_cache_and_experimentation.md](docs/tagger_cache_and_experimentation.md): cache-safe tuning workflow
 - [specs/track_registery.md](specs/track_registery.md): current registry reference

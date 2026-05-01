@@ -24,6 +24,7 @@ audio files
 ```
 
 The registry is the source of truth for canonical key/BPM and for the stored `tagger_*` values used in reporting.
+It also stores the current 3-level genre taxonomy assignment.
 
 ## Canonical Tagger Pipeline
 
@@ -60,12 +61,35 @@ Produced by `src/dj_tagger/derive.py`:
 - `energy`
 - `bpm`
 - `vibe`
+- `mood`
 - `vocal`
+- `vocal_profile`
+- `vocal_scores`
 - `structure`
 - `vibe_scores`
+- `mood_scores`
 - `confidences`
 
 Key analysis is computed separately and merged into the final hydrated tagger result.
+
+`vibe` remains the stored/tag compatibility name. Semantically it is now a
+taxonomy mood code loaded from `src/dj_registry/taxonomy/dj_taxonomy.json`.
+`src/dj_tagger/moods.py` is the shared vocabulary source for tagger, grouper,
+registry taxonomy features, and tag parsing. Legacy codes are normalized through
+aliases, for example `HYP -> HYPN`.
+
+`vocal` is now the stored compatibility field for the taxonomy vocal profile.
+`src/dj_tagger/vocals.py` loads `vocal_profiles` from
+`src/dj_registry/taxonomy/dj_taxonomy.json`, currently producing `INST`, `VOC`,
+`FVOC`, `SPK`, `CHANT`, `DUB`, and `TOOL`. Legacy `V`/`NV` tags still parse and
+normalize to `VOC`/`INST`.
+
+The human-facing code dictionary is maintained in `README.md`. The runtime
+source of truth is:
+
+- moods: `src/dj_tagger/moods.py`
+- vocal profiles: `src/dj_tagger/vocals.py`
+- taxonomy input: `src/dj_registry/taxonomy/dj_taxonomy.json`
 
 ## Cache Architecture
 
@@ -181,12 +205,30 @@ Current track-level stored tagger fields:
 - `tagger_structure`
 - `tagger_bpm`
 - `tagger_vibe_scores`
+- `tagger_vocal_scores`
 - `tagger_confidences`
 - `tagger_version`
 - `tagger_raw_signature`
 - `tagger_derived_signature`
 - `tagger_key_signature`
 - `tagger_audio_features_signature`
+
+`registry_overview.csv` also exports `tagger_mood` and `tagger_mood_scores`
+as aliases of `tagger_vibe` and `tagger_vibe_scores`.
+
+Current track-level genre taxonomy fields:
+
+- `genre_family`
+- `genre`
+- `subgenre`
+- `genre_confidence`
+- `genre_confidence_level`
+- `genre_alternatives`
+- `genre_evidence`
+- `genre_warnings`
+- `genre_taxonomy_version`
+
+Legacy `taxonomy_*` columns are still populated for downstream compatibility.
 
 ### Analysis Path
 
@@ -200,6 +242,100 @@ Current track-level stored tagger fields:
 6. emits `analysis_librosa` observations
 
 This is the same truth later exported by `registry_overview.csv`.
+
+## Genre Taxonomy Architecture
+
+The taxonomy classifier lives under `src/dj_registry/taxonomy/`.
+
+Primary modules:
+
+- `classifier.py`: deterministic taxonomy scorer and registry persistence
+- `features.py`: unified feature extraction for learned classification
+- `ground_truth.py`: GPT/Azure OpenAI label generation and API connection test
+- `model.py`: scikit-learn training, evaluation, artifact loading, and prediction
+
+The taxonomy reference is `music_genre_taxonomy_3_level.json`. Every output path
+must validate against this file.
+
+### Evidence Strategy
+
+Provider genre fields are not trusted as truth. Rekordbox, Spotify, Songstats,
+embedded genre, and `genres_all` are model features alongside:
+
+- tagger energy/mood/vocal/structure/BPM
+- canonical BPM
+- Songstats audio features
+- filename/path, title, mix, label, artist, comments
+- rule-derived cues such as rolling, dark, tribal, breaks, warehouse, acid, and dub
+
+When a trained model exists, `classify_all_taxonomies()` loads it from
+`outputs/registry/taxonomy_model/model.pkl` and uses the model prediction as the
+taxonomy path. Deterministic evidence remains in `genre_evidence` for audit.
+
+Use `dj-registry taxonomy classify --no-model` to force deterministic-only
+classification.
+
+### Ground-Truth Labels
+
+`dj-registry taxonomy generate-ground-truth` creates `files/taxonomy_ground_truth.csv`
+from metadata-only GPT/Azure OpenAI calls. It does not upload raw audio.
+
+The command is fail-fast by default:
+
+- first API, parsing, or validation error stops the run
+- the error message includes the failing track
+- exit code is `1`
+- no new partial CSV is written for that failed run
+
+Use `--keep-going` only to intentionally continue after failures and write
+`gpt5_error` rows. Existing error rows are retried on later runs and are never
+silently reused as valid labels.
+
+Validate connectivity before long runs:
+
+```bash
+dj-registry taxonomy test-api
+```
+
+### Learned Model Artifacts
+
+`dj-registry taxonomy train-model --labels files/taxonomy_ground_truth.csv`
+writes:
+
+- `outputs/registry/taxonomy_model/model.pkl`
+- `outputs/registry/taxonomy_model/training_report.json`
+- `outputs/registry/taxonomy_model/training_audit.csv`
+
+The artifact records taxonomy hash, feature schema version, label CSV hash, and
+training timestamp. It refuses to load if the taxonomy or feature schema has
+changed.
+
+## Progress Reporting
+
+Registry batch operations use dependency-free stderr progress bars through
+`src/dj_registry/progress.py`.
+
+Progress is enabled by default for CLI runs and disabled by default for direct
+library calls.
+
+Covered workflows:
+
+- scan files
+- link files
+- Rekordbox ingest
+- Spotify ISRC enrichment
+- Songstats ingest
+- local analysis cache scan and audio analysis
+- key and BPM resolution
+- review queue generation
+- review decision import
+- tag sync
+- registry overview export
+- taxonomy classification
+- taxonomy ground-truth generation
+- taxonomy model training and evaluation
+
+Disable progress bars with `--no-progress`.
 
 ## Unified CLI
 
@@ -215,7 +351,11 @@ This is the same truth later exported by `registry_overview.csv`.
 8. export registry reports
 9. run grouping unless skipped
 
-`dj vibe-audit` compares registry-stored vibe labels against fresh `derive_vibe()` output from current DSP plus current Songstats audio features.
+The unified CLI passes progress settings into registry batch steps. `dj-grouper`
+and `dj-tagger` also have their own existing progress output for analysis and
+grouping-specific work.
+
+`dj vibe-audit` compares registry-stored mood/vibe labels against fresh `derive_vibe()` output from current DSP plus current Songstats audio features.
 
 ## Grouper Architecture
 
@@ -257,7 +397,7 @@ The registry sync path builds the COMMENT tag from:
 - canonical key
 - canonical BPM when available, otherwise tagger BPM
 - tagger energy
-- tagger vibe
+- tagger mood/vibe
 - tagger structure
 - tagger vocal
 
@@ -270,6 +410,9 @@ Main review and audit surfaces:
 - `outputs/registry/registry_overview.csv`
 - `dj vibe-audit`
 - hydrated tagger metadata in cache
+- `files/taxonomy_ground_truth.csv`
+- `outputs/registry/taxonomy_model/training_report.json`
+- taxonomy evidence and warnings in `registry_overview.csv`
 
 Recommended verification loop after tuning:
 

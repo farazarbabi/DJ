@@ -8,8 +8,20 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
+from dj_tagger.moods import normalize_mood_code
+from dj_tagger.vocals import has_vocal_content
+
 from ..config import GrouperConfig
-from ..features.builder import TrackFeatures
+from ..features.builder import (
+    TAG_BPM_IDX,
+    TAG_ENERGY_IDX,
+    TAG_FLOW_SLICE,
+    TAG_INTRO_BARS_IDX,
+    TAG_KEY_SLICE,
+    TAG_MOOD_SLICE,
+    TAG_VOCAL_SLICE,
+    TrackFeatures,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,52 +31,47 @@ _MAX_KEY_DIST = 2.0
 def tag_distance(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> float:
     """Custom distance for tag vectors with confidence weighting.
 
-    Tag vector layout (encode_tags):
-      [0]     energy (ordinal, confidence-weighted)
-      [1]     BPM (normalized)
-      [2:4]   key (sin/cos, confidence-weighted)
-      [4]     intro bars (ordinal, confidence-weighted)
-      [5:10]  flow type (confidence-weighted soft one-hot)
-      [10:18] vibe (continuous scores or confidence-weighted one-hot)
-      [18]    vocal (confidence-weighted)
+    Tag vector layout is defined by dynamic constants in features.builder.
+    Current length is TAG_VECTOR_DIM because the mood slice is taxonomy-driven.
     """
     va, vb = a.tag_vector, b.tag_vector
 
     # Energy distance: power 1.5 to amplify level differences
-    d_energy = abs(float(va[0] - vb[0])) ** 1.5
+    d_energy = abs(float(va[TAG_ENERGY_IDX] - vb[TAG_ENERGY_IDX])) ** 1.5
 
     # BPM distance: quadratic to amplify genre boundaries
-    d_bpm_raw = abs(float(va[1] - vb[1]))
+    d_bpm_raw = abs(float(va[TAG_BPM_IDX] - vb[TAG_BPM_IDX]))
     d_bpm = d_bpm_raw ** 2.0
 
     # Key distance: Euclidean on sin/cos, normalized to [0, 1]
-    d_key_raw = math.sqrt(float((va[2] - vb[2]) ** 2 + (va[3] - vb[3]) ** 2))
+    d_key_raw = math.sqrt(float(np.sum((va[TAG_KEY_SLICE] - vb[TAG_KEY_SLICE]) ** 2)))
     d_key = min(1.0, d_key_raw / _MAX_KEY_DIST)
 
     # Conditional key weight
-    vibe_a = a.info.vibe or "HYPN"
-    vibe_b = b.info.vibe or "HYPN"
+    vibe_a = normalize_mood_code(a.info.vibe) or "HYPN"
+    vibe_b = normalize_mood_code(b.info.vibe) or "HYPN"
     kw_a = config.key_weight_by_vibe.get(vibe_a, 0.2)
     kw_b = config.key_weight_by_vibe.get(vibe_b, 0.2)
-    if a.info.vocal == "V":
+    if has_vocal_content(a.info.vocal):
         kw_a = min(1.0, kw_a + config.key_weight_vocal_boost)
-    if b.info.vocal == "V":
+    if has_vocal_content(b.info.vocal):
         kw_b = min(1.0, kw_b + config.key_weight_vocal_boost)
     key_weight = (kw_a + kw_b) / 2.0
 
     # Intro bars: ordinal [0, 1]
-    d_bars = abs(float(va[4] - vb[4]))
+    d_bars = abs(float(va[TAG_INTRO_BARS_IDX] - vb[TAG_INTRO_BARS_IDX]))
 
     # Flow type: Euclidean on soft one-hot (captures confidence smoothing)
-    d_flow = float(np.sqrt(np.sum((va[5:10] - vb[5:10]) ** 2)))
+    d_flow = float(np.sqrt(np.sum((va[TAG_FLOW_SLICE] - vb[TAG_FLOW_SLICE]) ** 2)))
     d_flow = min(1.0, d_flow)
 
-    # Vibe: Euclidean on continuous scores — captures partial similarity
-    d_vibe = float(np.sqrt(np.sum((va[10:18] - vb[10:18]) ** 2)))
-    d_vibe = min(1.0, d_vibe)
+    # Mood: Euclidean on continuous scores; captures partial similarity.
+    d_mood = float(np.sqrt(np.sum((va[TAG_MOOD_SLICE] - vb[TAG_MOOD_SLICE]) ** 2)))
+    d_mood = min(1.0, d_mood)
 
-    # Vocal: [0, 1]
-    d_vocal = abs(float(va[18] - vb[18]))
+    # Vocal profile: Euclidean on continuous taxonomy profile scores.
+    d_vocal = float(np.sqrt(np.sum((va[TAG_VOCAL_SLICE] - vb[TAG_VOCAL_SLICE]) ** 2)))
+    d_vocal = min(1.0, d_vocal)
 
     # Weighted combination — BPM elevated to prevent unmixable groupings
     d = (
@@ -73,7 +80,7 @@ def tag_distance(a: TrackFeatures, b: TrackFeatures, config: GrouperConfig) -> f
         + key_weight * 0.10 * d_key
         + 0.05 * d_bars
         + 0.05 * d_flow
-        + 0.20 * d_vibe
+        + 0.20 * d_mood
         + 0.05 * d_vocal
     )
     return d

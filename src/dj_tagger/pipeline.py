@@ -59,6 +59,7 @@ def analyze_track(path: str, config: AnalysisConfig) -> dict:
         structure=canonical.get("structure"),
         vibe=canonical.get("vibe"),
         has_vocals=canonical.get("has_vocals"),
+        vocal_profile=canonical.get("vocal_profile", canonical.get("vocal")),
     )
 
     # Write tag
@@ -73,10 +74,14 @@ def analyze_track(path: str, config: AnalysisConfig) -> dict:
         "camelot": canonical.get("camelot"),
         "structure": canonical.get("structure"),
         "vibe": canonical.get("vibe"),
+        "mood": canonical.get("mood", canonical.get("vibe")),
         "vocal": canonical.get("vocal"),
+        "vocal_profile": canonical.get("vocal_profile", canonical.get("vocal")),
         "key_confidence": canonical.get("key_confidence"),
         "vocal_ratio": canonical.get("vocal_ratio"),
+        "vocal_scores": canonical.get("vocal_scores", {}),
         "vibe_scores": canonical.get("vibe_scores", {}),
+        "mood_scores": canonical.get("mood_scores", canonical.get("vibe_scores", {})),
         "confidences": canonical.get("confidences", {}),
         "sections": canonical.get("sections", []),
     }

@@ -3,7 +3,7 @@
 Uses raw cache (cache/raw_cache.pkl) and derived cache (cache/derived_cache.pkl)
 so files analyzed by any module are never re-analyzed.
 
-Runs the full tagger analysis (energy, vibe, vocal, structure, key) and stores
+Runs the full tagger analysis (energy, mood/vibe, vocal, structure, key) and stores
 all results in the registry as SourceObservations + LogicalTrack tagger fields.
 """
 
@@ -14,11 +14,18 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from dj_tagger.moods import normalize_mood_code, normalize_mood_scores
 from dj_tagger.universal_cache import quick_duration
+from dj_tagger.vocals import (
+    normalize_vocal_profile,
+    normalize_vocal_profile_scores,
+    vocal_profile_from_has_vocals,
+)
 
 from ..config import RegistryConfig
 from ..key_utils import parse_any_key
 from ..models import LogicalTrack, SourceObservation, PayloadIndexEntry, now_iso
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
@@ -36,7 +43,7 @@ def _lookup_audio_features(ucache, isrc: str) -> dict[str, float] | None:
     if not data or not isinstance(data, dict):
         return None
     features: dict[str, float] = {}
-    for key in ("valence", "instrumentalness", "energy", "liveness", "acousticness"):
+    for key in ("valence", "instrumentalness", "energy", "liveness", "acousticness", "speechiness"):
         val = data.get(key, "")
         if val != "" and val is not None:
             try:
@@ -129,21 +136,19 @@ def _extract_tagger_features(result: dict) -> dict:
     if energy is not None:
         features["energy"] = str(energy)
 
-    # Vibe
-    vibe = result.get("vibe")
+    # Mood/vibe. The registry field name is kept as tagger_vibe for compatibility.
+    vibe = result.get("mood") or result.get("vibe")
     if vibe:
-        features["vibe"] = vibe
+        features["vibe"] = normalize_mood_code(vibe)
 
     # Vocal — handle both formats
-    vocal = result.get("vocal")
-    if vocal in ("V", "NV"):
+    vocal = normalize_vocal_profile(result.get("vocal_profile") or result.get("vocal"))
+    if vocal:
         features["vocal"] = vocal
     else:
-        has_vocals = result.get("has_vocals")
-        if has_vocals is True:
-            features["vocal"] = "V"
-        elif has_vocals is False:
-            features["vocal"] = "NV"
+        fallback = vocal_profile_from_has_vocals(result.get("has_vocals"))
+        if fallback:
+            features["vocal"] = fallback
 
     # Structure
     structure = result.get("structure")
@@ -162,10 +167,16 @@ def _extract_tagger_features(result: dict) -> dict:
         features["key_name"] = result.get("key", "")
         features["key_confidence"] = result.get("key_confidence", 0.0)
 
-    # Vibe scores
-    vibe_scores = result.get("vibe_scores")
+    # Mood/vibe scores
+    vibe_scores = result.get("mood_scores") or result.get("vibe_scores")
     if vibe_scores and isinstance(vibe_scores, dict):
-        features["vibe_scores"] = json.dumps({k: round(v, 4) for k, v in vibe_scores.items()})
+        normalized_scores = normalize_mood_scores(vibe_scores)
+        features["vibe_scores"] = json.dumps({k: round(v, 4) for k, v in normalized_scores.items()})
+
+    vocal_scores = result.get("vocal_scores")
+    if vocal_scores and isinstance(vocal_scores, dict):
+        normalized_vocal_scores = normalize_vocal_profile_scores(vocal_scores)
+        features["vocal_scores"] = json.dumps({k: round(v, 4) for k, v in normalized_vocal_scores.items()})
 
     # Confidences
     confidences = result.get("confidences")
@@ -201,6 +212,8 @@ def _apply_tagger_to_track(track: LogicalTrack, features: dict) -> None:
         track.tagger_bpm = features["bpm"]
     if "vibe_scores" in features:
         track.tagger_vibe_scores = features["vibe_scores"]
+    if "vocal_scores" in features and hasattr(track, "tagger_vocal_scores"):
+        track.tagger_vocal_scores = features["vocal_scores"]
     if "confidences" in features:
         track.tagger_confidences = features["confidences"]
     if "tagger_version" in features:
@@ -249,6 +262,7 @@ def _build_observation(
     obs.tagger_vocal = features.get("vocal", "")
     obs.tagger_structure = features.get("structure", "")
     obs.tagger_vibe_scores = features.get("vibe_scores", "")
+    obs.tagger_vocal_scores = features.get("vocal_scores", "")
     obs.tagger_confidences = features.get("confidences", "")
 
     return obs
@@ -260,6 +274,7 @@ def run_analysis(
     *,
     track_ids: list[str] | None = None,
     no_essentia: bool = False,
+    show_progress: bool = False,
 ) -> dict:
     """Run full tagger analysis on tracks (energy, vibe, vocal, structure, key).
 
@@ -312,7 +327,8 @@ def run_analysis(
     cache_hits: list[tuple[str, str, str, dict]] = []  # (track_id, file_id, path, features)
     cache_misses: list[tuple[str, str, str, float, float]] = []
 
-    for track_id, file_id, path, mtime, duration in candidates:
+    cache_progress = ProgressBar(len(candidates), label="Analysis cache", enabled=show_progress)
+    for index, (track_id, file_id, path, mtime, duration) in enumerate(candidates, start=1):
         filename = os.path.basename(path)
         features: dict = {}
         track = track_by_id.get(track_id)
@@ -359,6 +375,8 @@ def run_analysis(
             cache_hits.append((track_id, file_id, path, features))
         else:
             cache_misses.append((track_id, file_id, path, mtime, duration))
+        cache_progress.update(index, os.path.basename(path), cached=len(cache_hits), analyze=len(cache_misses))
+    cache_progress.finish()
 
     if cache_misses:
         logger.info("Analysis: %d tracks (%d cached, %d to analyze)", len(candidates), len(cache_hits), len(cache_misses))
@@ -374,6 +392,7 @@ def run_analysis(
 
         if config.analysis_workers <= 1:
             raw_results = []
+            analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
             for i, p in enumerate(paths_to_analyze):
                 t0 = _time.perf_counter()
                 track_id = cache_misses[i][0]
@@ -384,9 +403,12 @@ def run_analysis(
                 raw_results.append(result)
                 fname = os.path.basename(p)
                 logger.info("  [%d/%d] %s (%.0fs)", i + 1, n_total, fname, elapsed)
+                analysis_progress.update(i + 1, fname)
+            analysis_progress.finish()
         else:
             raw_results = [None] * n_total
             done = 0
+            analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
             with ProcessPoolExecutor(max_workers=config.analysis_workers) as pool:
                 futures = {
                     pool.submit(
@@ -407,10 +429,13 @@ def run_analysis(
                         raw_results[idx] = future.result()
                         fname = os.path.basename(paths_to_analyze[idx])
                         logger.info("  [%d/%d] %s", done, n_total, fname)
+                        analysis_progress.update(done, fname)
                     except Exception as e:
                         raw_results[idx] = {"path": paths_to_analyze[idx], "error": str(e)}
                         fname = os.path.basename(paths_to_analyze[idx])
                         logger.info("  [%d/%d] %s FAILED", done, n_total, fname)
+                        analysis_progress.update(done, f"{fname} FAILED")
+            analysis_progress.finish()
 
         # Store results directly in universal cache with duration key.
         # This ensures results survive across runs — no mtime dependency.

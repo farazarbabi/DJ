@@ -11,6 +11,7 @@ import httpx
 
 from dj_tagger.cache import load_cache, save_cache, cache_key
 
+from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,7 @@ class SpotifyClient:
 TAGGER_CACHE_PATH = os.path.join("cache", "tagger_cache.pkl")
 
 
-def enrich_isrcs(store: CsvStore, limit: int | None = None) -> int:
+def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bool = False) -> int:
     """Look up ISRCs from Spotify for tracks missing them.
 
     Reads SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET from environment.
@@ -223,7 +224,8 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None) -> int:
 
     enriched = 0
     cache_dirty = False
-    for t in candidates:
+    progress = ProgressBar(len(candidates), label="Spotify ISRC", enabled=show_progress)
+    for index, t in enumerate(candidates, start=1):
         frec = file_by_track.get(t.track_id)
         dur = frec.audio_duration_sec if frec and frec.audio_duration_sec > 0 else 0.0
         result = client.search_track(t.artist_canonical, t.title_canonical, duration_sec=dur)
@@ -243,8 +245,10 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None) -> int:
         else:
             logger.debug("  No ISRC found for %s - %s", t.artist_canonical, t.title_canonical)
 
+        progress.update(index, t.title_canonical, cached=cache_hits, enriched=enriched)
         time.sleep(0.1)
 
+    progress.finish()
     store.save_tracks(tracks)
     if cache_dirty:
         save_cache(tagger_cache, TAGGER_CACHE_PATH)
