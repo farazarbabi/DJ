@@ -167,8 +167,38 @@ def test_generate_dj_ground_truth_default_out_is_registry_output(tmp_path):
         collect=False,
     )
 
-    assert stats.output_path == str(tmp_path / "registry" / "dj_taxonomy_ground_truth.csv")
-    assert (tmp_path / "registry" / "dj_taxonomy_ground_truth.csv").exists()
+    assert stats.output_path == str(tmp_path / "dj_taxonomy_ground_truth.csv")
+    assert (tmp_path / "dj_taxonomy_ground_truth.csv").exists()
+
+
+def test_generate_dj_ground_truth_legacy_files_out_redirects_to_registry_output(tmp_path):
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "Dark Driver.mp3").write_bytes(b"")
+    store = CsvStore(str(tmp_path / "registry"))
+
+    class FakeClient:
+        model = "gpt-5"
+
+        def label_track(self, context, taxonomy_json, validation_error=None):
+            return {
+                "category_id": "dark_tech_house_driver",
+                "confidence": 0.86,
+                "alternate_category_ids": [],
+                "rationale": "Dark E4 rolling club evidence.",
+                "warnings": "",
+            }
+
+    stats = generate_dj_ground_truth_csv(
+        store,
+        files_dir=str(files_dir),
+        output_path="files/dj_taxonomy_ground_truth.csv",
+        client=FakeClient(),
+        collect=False,
+    )
+
+    assert stats.output_path == str(tmp_path / "dj_taxonomy_ground_truth.csv")
+    assert (tmp_path / "dj_taxonomy_ground_truth.csv").exists()
 
 
 def test_dj_taxonomy_cli_train_models(tmp_path):

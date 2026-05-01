@@ -104,8 +104,8 @@ dj-registry taxonomy train-model --labels files/taxonomy_ground_truth.csv
 dj-registry taxonomy classify
 dj-registry dj-taxonomy test-api
 dj-registry dj-taxonomy generate-ground-truth --files ./files
-dj-registry dj-taxonomy train-models --labels outputs/registry/dj_taxonomy_ground_truth.csv
-dj-registry dj-taxonomy evaluate --labels outputs/registry/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
+dj-registry dj-taxonomy train-models --labels outputs/dj_taxonomy_ground_truth.csv
+dj-registry dj-taxonomy evaluate --labels outputs/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
 dj-registry dj-taxonomy classify
 
 dj-grouper --dry-run

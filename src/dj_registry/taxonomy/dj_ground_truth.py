@@ -263,7 +263,7 @@ def generate_dj_ground_truth_csv(
 ) -> DjGroundTruthStats:
     taxonomy = load_dj_taxonomy(taxonomy_path)
     taxonomy_json = taxonomy.as_prompt_json()
-    resolved_output_path = output_path or str(Path(store.output_dir) / "dj_taxonomy_ground_truth.csv")
+    resolved_output_path = _resolve_output_path(output_path, store.output_dir)
     collection_summary = None
     if collect:
         registry_config = config or RegistryConfig()
@@ -658,6 +658,20 @@ def _write_rows(path: str, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _resolve_output_path(output_path: str | None, output_dir: str) -> str:
+    if not output_path:
+        return str(_default_output_root(output_dir) / "dj_taxonomy_ground_truth.csv")
+    normalized = Path(output_path).as_posix().lower().strip("./")
+    if normalized in {"files/dj_taxonomy_ground_truth.csv", "outputs/registry/dj_taxonomy_ground_truth.csv"}:
+        return str(_default_output_root(output_dir) / "dj_taxonomy_ground_truth.csv")
+    return output_path
+
+
+def _default_output_root(output_dir: str) -> Path:
+    path = Path(output_dir)
+    return path.parent if path.name == "registry" else path
 
 
 def _cache_key(model: str, taxonomy_json: dict[str, Any], context: dict[str, Any]) -> str:

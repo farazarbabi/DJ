@@ -518,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     p_dj_tax_gt.add_argument(
         "--out",
         default=None,
-        help="Output labels CSV path (defaults to OUTPUT/dj_taxonomy_ground_truth.csv)",
+        help="Output labels CSV path (defaults to outputs/dj_taxonomy_ground_truth.csv)",
     )
     p_dj_tax_gt.add_argument("--model", default=None, help="OpenAI model to use (defaults to OPENAI_MODEL or gpt-5)")
     p_dj_tax_gt.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")

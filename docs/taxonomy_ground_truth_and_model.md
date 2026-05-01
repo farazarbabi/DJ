@@ -242,19 +242,19 @@ unless `--no-collect` is passed:
 dj-registry dj-taxonomy generate-ground-truth --files ./files
 ```
 
-The default output is `outputs/registry/dj_taxonomy_ground_truth.csv`. Use
+The default output is `outputs/dj_taxonomy_ground_truth.csv`. Use
 `--out` only when you need a different location.
 
 Train both models:
 
 ```bash
-dj-registry dj-taxonomy train-models --labels outputs/registry/dj_taxonomy_ground_truth.csv
+dj-registry dj-taxonomy train-models --labels outputs/dj_taxonomy_ground_truth.csv
 ```
 
 Evaluate both models against the same labels:
 
 ```bash
-dj-registry dj-taxonomy evaluate --labels outputs/registry/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
+dj-registry dj-taxonomy evaluate --labels outputs/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
 ```
 
 Classify registry tracks:
