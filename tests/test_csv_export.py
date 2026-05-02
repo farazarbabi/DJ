@@ -14,12 +14,12 @@ from dj_grouper.recommend.neighbors import Recommendation
 
 def test_groups_csv_export(tmp_path):
     info = TrackInfo(path="/music/a.aiff", energy=3, key="9A", bpm=126,
-                     structure="64H", vibe="HYPN", vocal="NV")
+                     structure="64H", vibe="HYPN", vocal="INST")
     tracks = [TrackFeatures("/music/a.aiff", info, np.zeros(19), np.zeros(21))]
     group = GroupInfo(
         group_id="G001", member_indices=[0], medoid_index=0,
         key="9A", energy=3, vibe="HYPN", structure="64H",
-        vocal="NV", bpm=126, folder_name="9A_E3_HYPN_64H_NV_126",
+        vocal="INST", bpm=126, folder_name="9A_126_E3_HYPN_INST",
     )
     assignment = GroupAssignment(groups=[group], track_to_group={"/music/a.aiff": "G001"})
 
@@ -33,7 +33,7 @@ def test_groups_csv_export(tmp_path):
     assert rows[0]["group_id"] == "G001"
     assert rows[0]["mood"] == "HYPN"
     assert rows[0]["vibe"] == "HYPN"
-    assert rows[0]["vocal_profile"] == "NV"
+    assert rows[0]["vocal_profile"] == "INST"
 
 
 def test_recommendations_csv_export(tmp_path):

@@ -185,13 +185,56 @@ def _progress_bar(done: int, total: int, width: int = 20) -> str:
     return f"[{bar}] {pct:>3}%"
 
 
+def _format_result_tag(
+    result: dict,
+    *,
+    camelot: str | None = None,
+    bpm=None,
+    category: str | None = None,
+) -> str:
+    """Build a current tag string from cached or freshly analyzed result fields."""
+    from .formats import format_tag
+
+    bpm_val = bpm if bpm is not None else result.get("bpm")
+    if bpm_val is not None:
+        try:
+            bpm_rounded = int(round(float(bpm_val)))
+        except (ValueError, TypeError):
+            bpm_rounded = None
+    else:
+        bpm_rounded = None
+    return format_tag(
+        energy=result.get("energy"),
+        camelot=camelot or result.get("camelot"),
+        bpm=bpm_rounded,
+        vibe=result.get("vibe"),
+        has_vocals=result.get("has_vocals"),
+        vocal_profile=result.get("vocal_profile", result.get("vocal")),
+        category=category or result.get("category"),
+    )
+
+
+def _tag_from_registry_result(result: dict, registry_result: dict) -> str:
+    """Prefer the registry-built COMMENT tag, falling back to canonical key/BPM."""
+    comment_tag = registry_result.get("comment_tag")
+    if comment_tag:
+        return comment_tag
+
+    canon_key = registry_result.get("canonical_key_camelot")
+    canon_bpm = registry_result.get("canonical_bpm")
+    category = registry_result.get("category")
+    if canon_key or canon_bpm or category:
+        return _format_result_tag(result, camelot=canon_key, bpm=canon_bpm, category=category)
+    return result.get("tag") or _format_result_tag(result)
+
+
 def _resolve_via_registry(
     file_paths: list[str],
     tagger_results: dict[str, dict],
 ) -> dict[str, dict]:
-    """Run minimal registry pipeline to get canonical key/BPM.
+    """Run minimal registry pipeline to get canonical key/BPM/category.
 
-    Returns {abs_path: {"canonical_key_camelot": str, "canonical_bpm": str}} or
+    Returns {abs_path: {"canonical_key_camelot": str, "canonical_bpm": str, ...}} or
     empty dict on failure.
     """
     try:
@@ -207,6 +250,7 @@ def _resolve_via_registry(
         from dj_registry.resolver.key_resolver import resolve_all_keys
         from dj_registry.store.csv_store import CsvStore
         from dj_registry.store.obs_cache import ObsCache
+        from dj_registry.sync.tag_writer import _build_comment_tag, _category_code_for_tag
     except ImportError:
         logger.warning("Registry not available (install with pip install -e '.[registry]')")
         return {}
@@ -286,6 +330,15 @@ def _resolve_via_registry(
     resolve_all_keys(config, store, force=True)
     resolve_all_bpms(config, store, force=True)
 
+    # Populate DJ category labels so dry-run/write output uses the same final
+    # COMMENT tag as the registry sync path.
+    try:
+        from dj_registry.taxonomy.dj_model import classify_all_dj_taxonomies
+
+        classify_all_dj_taxonomies(store, primary_model="internal")
+    except FileNotFoundError as exc:
+        logger.info("DJ taxonomy: skipped (%s)", exc)
+
     # Build result mapping: file path -> canonical values
     tracks = store.load_tracks()
     files = store.load_files()
@@ -297,6 +350,9 @@ def _resolve_via_registry(
             canonical[f.path_abs] = {
                 "canonical_key_camelot": track.canonical_key_camelot,
                 "canonical_bpm": track.canonical_bpm,
+                "category": _category_code_for_tag(track),
+                "category_label": track.dj_taxonomy_internal_label or track.dj_taxonomy_label,
+                "comment_tag": _build_comment_tag(track),
             }
 
     return canonical
@@ -346,7 +402,6 @@ def main(argv: list[str] | None = None) -> int:
     from .pipeline import analyze_track, AnalysisConfig
     from .cache import get_cached, put_cached, save_cache
     from .metadata import write_tag
-    from .formats import format_tag
 
     # Always analyze with dry_run=True — tags are written later after registry resolution
     analysis_config = AnalysisConfig(
@@ -392,21 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         n_cached += 1
         result = {**result, "file": str(fpath)}
 
-        # Ensure tag field exists for display
-        if "tag" not in result:
-            has_voc = result.get("has_vocals")
-            if has_voc is None and result.get("vocal") in ("V", "NV"):
-                has_voc = result["vocal"] == "V"
-            bpm_val = result.get("bpm")
-            result["tag"] = format_tag(
-                energy=result.get("energy"),
-                camelot=result.get("camelot"),
-                bpm=round(bpm_val) if bpm_val is not None else None,
-                structure=result.get("structure"),
-                vibe=result.get("vibe"),
-                has_vocals=has_voc,
-                vocal_profile=result.get("vocal_profile", result.get("vocal")),
-            )
+        result["tag"] = _format_result_tag(result)
 
         results.append(result)
         if not args.quiet and not args.json_output:
@@ -507,31 +548,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         canon = canonical.get(fpath, {})
-        canon_key = canon.get("canonical_key_camelot")
-        canon_bpm = canon.get("canonical_bpm")
-
-        # Rebuild tag if we have canonical values
-        if canon_key or canon_bpm:
-            has_voc = result.get("has_vocals")
-            if has_voc is None and result.get("vocal") in ("V", "NV"):
-                has_voc = result["vocal"] == "V"
-            bpm_val = canon_bpm or result.get("bpm")
-            if bpm_val is not None:
-                try:
-                    bpm = int(round(float(bpm_val)))
-                except (ValueError, TypeError):
-                    bpm = None
-            else:
-                bpm = None
-            result["tag"] = format_tag(
-                energy=result.get("energy"),
-                camelot=canon_key or result.get("camelot"),
-                bpm=bpm,
-                structure=result.get("structure"),
-                vibe=result.get("vibe"),
-                has_vocals=has_voc,
-                vocal_profile=result.get("vocal_profile", result.get("vocal")),
-            )
+        # Rebuild tag from registry output when available. This includes
+        # canonical key/BPM and DJ taxonomy category labels.
+        if canon:
+            result["tag"] = _tag_from_registry_result(result, canon)
 
         # Write tag to file
         if not dry_run and result.get("tag"):

@@ -54,8 +54,8 @@ def test_classify_dark_hypnotic_techno():
     track = LogicalTrack(
         track_id="T-002",
         tagger_energy="E4",
-        tagger_vibe="DRK,HYP",
-        tagger_vocal="NV",
+        tagger_vibe="DRK,HYPN",
+        tagger_vocal="INST",
         tagger_structure="16H",
         tagger_bpm="132",
     )
@@ -150,7 +150,7 @@ def test_generic_electronic_uses_tagger_and_audio_for_deep_downtempo():
         track_id="T-006",
         tagger_energy="E3",
         tagger_vibe="DEEP",
-        tagger_vocal="V",
+        tagger_vocal="VOC",
         tagger_structure="16H",
         tagger_bpm="109",
     )
@@ -179,7 +179,7 @@ def test_generic_dance_with_tribal_tagger_uses_ethnic_downtempo():
         track_id="T-007",
         tagger_energy="E3",
         tagger_vibe="TRIB",
-        tagger_vocal="V",
+        tagger_vocal="VOC",
         tagger_structure="16H",
         tagger_bpm="102",
     )
@@ -232,7 +232,7 @@ def test_analysis_tagger_fields_used_when_track_fields_are_blank():
             source_system="analysis_librosa",
             tagger_energy="2",
             tagger_vibe="DEEP",
-            tagger_vocal="V",
+            tagger_vocal="VOC",
             tagger_structure="16H",
             bpm="108",
         )

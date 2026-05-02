@@ -188,7 +188,7 @@ def encode_tags(info: TrackInfo) -> NDArray[np.floating]:
             val = 1.0 if vibe == vl else 0.0
             v.append(val * vibe_conf + (1.0 / len(VIBE_LABELS)) * (1.0 - vibe_conf))
 
-    # Vocal profile: continuous taxonomy profile scores instead of binary V/NV.
+    # Vocal profile: continuous taxonomy profile scores.
     vocal_conf = confs.get("vocal", 1.0)
     if info.vocal_scores:
         profile_scores = normalize_vocal_profile_scores(info.vocal_scores)

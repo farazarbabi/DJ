@@ -74,10 +74,12 @@ def compute_tagger_artifacts(
     track_audio: TrackAudio,
     *,
     audio_features: dict[str, float] | None = None,
+    dsp: dict[str, float] | None = None,
     use_essentia: bool = False,
 ) -> dict:
     """Compute canonical tagger outputs plus reusable raw artifacts."""
-    dsp = extract_dsp_features(track_audio)
+    if dsp is None:
+        dsp = extract_dsp_features(track_audio)
     raw_analysis = extract_raw_analysis(track_audio)
     section_map = analyze_sections(track_audio)
     section_dsp = extract_section_dsp(track_audio, section_map)
@@ -94,7 +96,6 @@ def compute_tagger_artifacts(
         energy=derived.get("energy"),
         camelot=key_result.camelot if key_result else None,
         bpm=round(bpm) if bpm > 0 else None,
-        structure=derived.get("structure"),
         vibe=derived.get("vibe"),
         has_vocals=derived.get("has_vocals"),
         vocal_profile=derived.get("vocal_profile"),

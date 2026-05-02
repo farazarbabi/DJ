@@ -3,7 +3,13 @@
 import json
 from pathlib import Path
 
-from dj_tagger.cli import _build_parser, find_audio_files, main
+from dj_tagger.cli import (
+    _build_parser,
+    _format_result_tag,
+    _tag_from_registry_result,
+    find_audio_files,
+    main,
+)
 
 
 def test_parser_defaults():
@@ -64,6 +70,53 @@ def test_main_no_files(tmp_path):
     """main() with an empty dir should return 0."""
     rc = main([str(tmp_path)])
     assert rc == 0
+
+
+def test_cached_result_tag_is_rebuilt_from_fields():
+    result = {
+        "tag": "stale",
+        "energy": 2,
+        "camelot": "9A",
+        "bpm": 118.0,
+        "vibe": "MEL",
+        "vocal": "VOC",
+    }
+
+    assert _format_result_tag(result) == "9A_118_E2_MEL_VOC"
+
+
+def test_result_tag_can_include_category_code():
+    result = {
+        "energy": 2,
+        "camelot": "9A",
+        "bpm": 118.0,
+        "vibe": "MEL",
+        "vocal": "VOC",
+    }
+
+    assert (
+        _format_result_tag(result, category="DRK.TECH.HOUS.DRV")
+        == "9A_118_E2_MEL_VOC_DRK.TECH.HOUS.DRV"
+    )
+
+
+def test_registry_comment_tag_wins_over_local_reformat():
+    result = {
+        "tag": "9A_118_E2_MEL_VOC",
+        "energy": 2,
+        "camelot": "9A",
+        "bpm": 118.0,
+        "vibe": "MEL",
+        "vocal": "VOC",
+    }
+    registry_result = {
+        "canonical_key_camelot": "9A",
+        "canonical_bpm": "118",
+        "category": "DRK.TECH.HOUS.DRV",
+        "comment_tag": "9A_118_E2_MEL_VOC_DRK.TECH.HOUS.DRV",
+    }
+
+    assert _tag_from_registry_result(result, registry_result) == registry_result["comment_tag"]
 
 
 def test_main_dry_run(sine_440hz, tmp_path):

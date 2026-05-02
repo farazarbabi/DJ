@@ -9,7 +9,7 @@ from dj_grouper.recommend.scoring import recommend_score
 
 
 def _make_track(energy=3, key="9A", bpm=128, structure="64H",
-                vibe="HYPN", vocal="NV", path="test.aiff"):
+                vibe="HYPN", vocal="INST", path="test.aiff"):
     info = TrackInfo(
         path=path, energy=energy, key=key, bpm=bpm,
         structure=structure, intro_bars=int(structure[:-1]),

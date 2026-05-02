@@ -116,14 +116,14 @@ Important current field groups:
 - `tagger_vocal_scores`
 - `tagger_confidences`
 
-`tagger_vibe` is the compatibility field name. Its values are taxonomy mood
-codes loaded from `src/dj_registry/taxonomy/dj_taxonomy.json`; `tagger_vibe_scores`
-stores the full mood-score map.
+`tagger_vibe` stores taxonomy mood codes loaded from
+`src/dj_registry/taxonomy/dj_taxonomy.json`; `tagger_vibe_scores` stores the
+full mood-score map.
 
 `tagger_vocal` now stores a taxonomy vocal-profile code loaded from the same
 dictionary's `vocal_profiles` values. Current codes are `INST`, `VOC`, `FVOC`,
-`SPK`, `CHANT`, `DUB`, and `TOOL`; legacy tag values `V`/`NV` normalize to
-`VOC`/`INST`. `tagger_vocal_scores` stores the full profile-score map.
+`SPK`, `CHANT`, `DUB`, and `TOOL`. `tagger_vocal_scores` stores the full
+profile-score map.
 
 The full mood and vocal-profile code dictionary is documented in `README.md`.
 
@@ -215,10 +215,14 @@ Relevant derived layer:
 The registry trusts a cached tagger result only when:
 
 - tagger version matches
-- raw signature matches
+- raw/DSP signatures match for the layers being reused
 - derived signature matches
 - key signature matches
 - Songstats audio-feature signature matches the current inputs
+
+Whole-track DSP, section-DSP, and raw-analysis cache entries have independent
+layer signatures. A tag/category/grouping change must not force DSP
+re-extraction when the cached DSP payload is compatible.
 
 ## Resolution
 
@@ -239,8 +243,12 @@ Tagger-derived fields are not voted across sources; they are stored directly fro
 
 - COMMENT tag built from: canonical key, canonical BPM, stored tagger energy/mood/vocal, and compact internal DJ taxonomy category label code
 - Current shape: `KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]`
+- `CATEGORY` is derived from the selected category label, not written as `category_id`
 
-The TKEY/InitialKey field is intentionally left untouched so the original embedded key (e.g. from Rekordbox analysis or manual tagging) is preserved as a validation signal for multi-source key resolution.
+The TKEY/InitialKey field is intentionally left untouched by default so the
+original embedded key (e.g. from Rekordbox analysis or manual tagging) is
+preserved as a validation signal for multi-source key resolution. Passing
+`--write-key-tag` writes the canonical Camelot key there for supported formats.
 
 By default `sync-tags` is dry-run unless `--write` is passed.
 

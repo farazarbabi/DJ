@@ -170,14 +170,59 @@ def main(argv: list[str] | None = None) -> int:
 # ─── Parallel extraction worker ──────────────────────────────────────────────
 
 
-def _extract_worker(track_path: str, needs_analysis: bool) -> dict:
+def _extract_worker(
+    track_path: str,
+    needs_analysis: bool,
+    cached_dsp: dict[str, float] | None = None,
+) -> dict:
     """Run the canonical tagger artifact pipeline for one track."""
     from dj_tagger.audio import load_audio_features
     from dj_tagger.raw_features import compute_tagger_artifacts
 
-    del needs_analysis  # kept for ProcessPoolExecutor/API compatibility
+    del needs_analysis  # kept for ProcessPoolExecutor/API compatibility.
     audio = load_audio_features(track_path)
-    return compute_tagger_artifacts(audio, use_essentia=False)
+    return compute_tagger_artifacts(audio, dsp=cached_dsp, use_essentia=False)
+
+
+def _extract_dsp_worker(track_path: str) -> dict:
+    """Extract only the raw DSP layers needed by grouper."""
+    from dj_tagger.audio import load_audio_features
+    from dj_tagger.analyzers.sections import analyze_sections
+    from .features.dsp import extract_dsp_features, extract_section_dsp
+
+    audio = load_audio_features(track_path)
+    section_map = analyze_sections(audio)
+    return {
+        "dsp": extract_dsp_features(audio),
+        "section_dsp": extract_section_dsp(audio, section_map),
+    }
+
+
+def _compatible_cached_raw_layer(ucache, filename: str, duration: float | None, layer: str):
+    """Return a compatible raw layer, restamping older cache entries when safe."""
+    data = ucache.get_track(filename, duration, layer)
+    if data is not None:
+        return data
+
+    data = ucache.get_track_any_version(filename, duration, layer)
+    if not _raw_layer_schema_matches(layer, data):
+        return None
+
+    ucache.put_track(filename, duration, layer, data)
+    logger.info("Reused compatible cached %s layer for %s", layer, filename)
+    return data
+
+
+def _raw_layer_schema_matches(layer: str, data) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if layer == "dsp":
+        from .features.dsp import DSP_CURATED_NAMES
+
+        return all(name in data for name in DSP_CURATED_NAMES)
+    if layer == "section_dsp":
+        return True
+    return False
 
 
 # ─── Shared extraction service ──────────────────────────────────────────────
@@ -251,7 +296,7 @@ def _run_extraction(
         _durations[t.path] = quick_duration(t.path)
 
     # Separate into: fully cached, needs DSP only, needs everything
-    to_extract: list[tuple[int, object, float, bool]] = []
+    to_extract: list[tuple[int, object, float, bool, dict[str, float] | None]] = []
     to_dsp_only: list[tuple[int, object, float]] = []
 
     for i, t in enumerate(tracks):
@@ -268,12 +313,12 @@ def _run_extraction(
         # When force=True, skip cache and re-extract everything
         if force:
             needs_analysis = analyze_untagged and (t.energy is None or is_unknown_key(t.key))
-            to_extract.append((i, t, mtime, needs_analysis))
+            to_extract.append((i, t, mtime, needs_analysis, None))
             continue
 
         # Check raw layers in universal cache (auto-invalidated when extractor logic changes)
-        dsp_data = ucache.get_track(filename, dur, "dsp")
-        section_dsp_data = ucache.get_track(filename, dur, "section_dsp")
+        dsp_data = _compatible_cached_raw_layer(ucache, filename, dur, "dsp")
+        section_dsp_data = _compatible_cached_raw_layer(ucache, filename, dur, "section_dsp")
         raw_analysis = ucache.get_track(filename, dur, "raw_analysis")
 
         # Check derived layer (versioned — returns None if stale)
@@ -315,12 +360,12 @@ def _run_extraction(
 
         # Need extraction — at least DSP, possibly full analysis
         needs_analysis = analyze_untagged and (t.energy is None or is_unknown_key(t.key))
-        if dsp_data and isinstance(dsp_data, dict):
+        if usable_tagger is not None:
             to_dsp_only.append((i, t, mtime))
-        elif usable_tagger is not None:
-            to_dsp_only.append((i, t, mtime))
+        elif dsp_data and isinstance(dsp_data, dict):
+            to_extract.append((i, t, mtime, needs_analysis, dsp_data))
         else:
-            to_extract.append((i, t, mtime, needs_analysis))
+            to_extract.append((i, t, mtime, needs_analysis, None))
 
     if stats.n_cached:
         print(f"  {stats.n_cached} tracks loaded from cache")
@@ -345,7 +390,7 @@ def _run_extraction(
         if needs_analysis and _format_tag and _write_tag:
             base_tag = _format_tag(
                 energy=t.energy, camelot=t.key, bpm=t.bpm,
-                structure=t.structure, vibe=t.vibe,
+                vibe=t.vibe,
                 has_vocals=tagger_result.get("has_vocals"),
                 vocal_profile=tagger_result.get("vocal_profile", tagger_result.get("vocal")),
             )
@@ -374,14 +419,25 @@ def _run_extraction(
             ucache.put_track(filename, dur, "tagger", tagger_result, mtime=mtime)
         stats.n_extracted += 1
 
+    def _apply_dsp_result(t, mtime, result):
+        """Apply DSP-only worker result to cache without touching tagger analysis."""
+        raw_cache[t.path] = RawCacheEntry(
+            mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
+        )
+        filename = Path(t.path).name
+        dur = _durations.get(t.path)
+        ucache.put_track(filename, dur, "dsp", result["dsp"], mtime=mtime)
+        ucache.put_track(filename, dur, "section_dsp", result["section_dsp"], mtime=mtime)
+        stats.n_extracted += 1
+
     # ── Phase 1: DSP-only extraction (tagger analysis already cached) ──
     if to_dsp_only:
         for j, (i, t, mtime) in enumerate(to_dsp_only):
             done = j + 1
             print(f"  [{done:>{len(str(len(to_dsp_only)))}}/{len(to_dsp_only)}] {Path(t.path).name}", end="", flush=True)
             try:
-                result = _extract_worker(t.path, needs_analysis=False)
-                _apply_result(t, mtime, False, result)
+                result = _extract_dsp_worker(t.path)
+                _apply_dsp_result(t, mtime, result)
                 print("  [DSP only]")
             except Exception as e:
                 raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
@@ -395,11 +451,11 @@ def _run_extraction(
     if n_todo == 0:
         pass
     elif actual_workers <= 1 or n_todo == 1:
-        for j, (i, t, mtime, needs_analysis) in enumerate(to_extract):
+        for j, (i, t, mtime, needs_analysis, cached_dsp) in enumerate(to_extract):
             done = j + 1
             print(f"  [{done:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}", end="", flush=True)
             try:
-                result = _extract_worker(t.path, needs_analysis)
+                result = _extract_worker(t.path, needs_analysis, cached_dsp)
                 _apply_result(t, mtime, needs_analysis, result)
                 status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
                 print(f"  {status}")
@@ -414,8 +470,8 @@ def _run_extraction(
         print(f"  Using {actual_workers} workers for {n_todo} tracks...")
         futures = {}
         with ProcessPoolExecutor(max_workers=actual_workers) as pool:
-            for i, t, mtime, needs_analysis in to_extract:
-                fut = pool.submit(_extract_worker, t.path, needs_analysis)
+            for i, t, mtime, needs_analysis, cached_dsp in to_extract:
+                fut = pool.submit(_extract_worker, t.path, needs_analysis, cached_dsp)
                 futures[fut] = (i, t, mtime, needs_analysis)
 
             done_count = 0
@@ -879,7 +935,7 @@ def _cmd_run(args) -> int:
                     info = tf.info
                     new_tag = format_tag(
                         energy=info.energy, camelot=info.key, bpm=info.bpm,
-                        structure=info.structure, vibe=info.vibe,
+                        vibe=info.vibe,
                         group_id=group.group_id,
                         vocal_profile=info.vocal,
                     )
@@ -1075,7 +1131,7 @@ def _cmd_apply(args) -> int:
                 info = tf.info
                 tag = format_tag(
                     energy=info.energy, camelot=info.key, bpm=info.bpm,
-                    structure=info.structure, vibe=info.vibe,
+                    vibe=info.vibe,
                     group_id=group.group_id,
                     vocal_profile=info.vocal,
                 )

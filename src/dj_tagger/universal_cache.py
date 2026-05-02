@@ -66,11 +66,14 @@ VERSIONED_RAW_LAYERS = frozenset({
 def _get_raw_layer_versions() -> dict[str, str]:
     """Get raw layer versions for feature extraction outputs."""
     try:
-        from .settings import raw_version
-        ver = raw_version()
+        from .settings import dsp_version, raw_analysis_version, section_dsp_version
     except Exception:
-        ver = "1"
-    return {layer: ver for layer in VERSIONED_RAW_LAYERS}
+        return {layer: "1" for layer in VERSIONED_RAW_LAYERS}
+    return {
+        "dsp": dsp_version(),
+        "section_dsp": section_dsp_version(),
+        "raw_analysis": raw_analysis_version(),
+    }
 
 def _get_derived_versions() -> dict[str, str]:
     """Get derived layer versions — auto-computed from settings.toml hash."""
@@ -210,6 +213,17 @@ class UniversalCache:
 
         key = self.track_key(filename, duration, layer)
         return self.get(key, version)
+
+    def get_track_any_version(
+        self,
+        filename: str,
+        duration: float | None,
+        layer: str,
+    ) -> object | None:
+        """Look up track data without applying layer-version checks."""
+        key = self.track_key(filename, duration, layer)
+        entry = self._entries.get(key)
+        return entry.data if entry is not None else None
 
     def put_track(
         self,

@@ -11,7 +11,7 @@ from dj_grouper.grouping.distance import (
 
 
 def _make_track(energy=3, key="9A", bpm=128, structure="64H",
-                vibe="HYPN", vocal="NV", path="test.aiff"):
+                vibe="HYPN", vocal="INST", path="test.aiff"):
     info = TrackInfo(
         path=path, energy=energy, key=key, bpm=bpm,
         structure=structure, intro_bars=int(structure[:-1]),
@@ -39,10 +39,10 @@ def test_different_vibe_increases_distance():
 
 def test_vocal_mismatch_increases_tag_distance():
     config = GrouperConfig()
-    a = _make_track(vocal="NV")
-    b = _make_track(vocal="V")
+    a = _make_track(vocal="INST")
+    b = _make_track(vocal="VOC")
     d_mismatch = tag_distance(a, b, config)
-    c = _make_track(vocal="NV")
+    c = _make_track(vocal="INST")
     d_match = tag_distance(a, c, config)
     assert d_mismatch > d_match
 

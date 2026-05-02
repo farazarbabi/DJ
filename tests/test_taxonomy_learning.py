@@ -35,7 +35,7 @@ def test_train_model_and_classify_with_sparse_non_provider_signals(tmp_path):
         [
             LogicalTrack(track_id="T1", artist_canonical="A", title_canonical="Rolling", tagger_energy="E4", tagger_structure="16H", tagger_bpm="126"),
             LogicalTrack(track_id="T2", artist_canonical="B", title_canonical="Peak", tagger_energy="E5", tagger_structure="16D", tagger_bpm="128"),
-            LogicalTrack(track_id="T3", artist_canonical="C", title_canonical="Hypnosis", tagger_energy="E4", tagger_vibe="HYP", tagger_structure="16H", tagger_bpm="132"),
+            LogicalTrack(track_id="T3", artist_canonical="C", title_canonical="Hypnosis", tagger_energy="E4", tagger_vibe="HYPN", tagger_structure="16H", tagger_bpm="132"),
             LogicalTrack(track_id="T4", artist_canonical="D", title_canonical="Desert", tagger_energy="E2", tagger_vibe="ORG", tagger_structure="16H", tagger_bpm="120"),
         ]
     )
@@ -97,8 +97,8 @@ def test_generate_ground_truth_csv_with_mocked_gpt_client(tmp_path):
                 "genre": "Tech House",
                 "subgenre": "Rolling Tech House",
                 "energy": "E4",
-                "vibe": "HYP",
-                "vocal": "NV",
+                "vibe": "HYPN",
+                "vocal": "INST",
                 "structure": "16H",
                 "set_role": "driver",
                 "bpm_hint": "126",
@@ -158,8 +158,8 @@ def test_generate_ground_truth_retries_existing_error_rows(tmp_path):
                 "genre": "Tech House",
                 "subgenre": "Rolling Tech House",
                 "energy": "E4",
-                "vibe": "HYP",
-                "vocal": "NV",
+                "vibe": "HYPN",
+                "vocal": "INST",
                 "structure": "16H",
                 "set_role": "driver",
                 "bpm_hint": "126",

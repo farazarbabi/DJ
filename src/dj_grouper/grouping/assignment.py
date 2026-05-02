@@ -10,6 +10,7 @@ from statistics import mode as stat_mode
 import numpy as np
 from numpy.typing import NDArray
 
+from dj_tagger.formats import format_tag
 from dj_tagger.moods import normalize_mood_code
 from dj_tagger.vocals import normalize_vocal_profile
 
@@ -55,7 +56,14 @@ def _build_folder_name(
     bpm: int,
 ) -> str:
     return _safe_folder(
-        f"{group_id}_{_folder_key(key)}_E{energy}_{vibe}_{structure}_{vocal}_{bpm}"
+        format_tag(
+            energy=energy,
+            camelot=_folder_key(key),
+            bpm=bpm,
+            vibe=vibe,
+            vocal_profile=vocal,
+            group_id=group_id,
+        )
     )
 
 

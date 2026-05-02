@@ -28,9 +28,7 @@ Examples:
 
 `CATEGORY` is a compact code derived from the DJ taxonomy category label: each
 label word becomes 3-4 uppercase characters separated by dots, for example
-`Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`. Legacy tags with structure and
-legacy pipe-separated tags are still parsed, but newly written tags omit
-structure.
+`Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`.
 
 ## Installation
 
@@ -124,7 +122,7 @@ The unified pipeline orchestrates:
 
 1. registry scan and file linking
 2. Rekordbox and Songstats ingest
-3. full tagger analysis
+3. local tagger analysis and cache refresh
 4. canonical key/BPM resolution
 5. internal DJ taxonomy category prediction
 6. tag writing
@@ -145,12 +143,10 @@ Analyzes a track and produces:
 - `vibe_scores` / `mood_scores`
 - `confidences`
 
-`vibe` is kept as the compatibility field used in tags and historical CSVs.
-Semantically it is now a taxonomy `mood` code loaded from
-`src/dj_registry/taxonomy/dj_taxonomy.json` moods. `vocal` is now a taxonomy
-`vocal_profile` code loaded from the same taxonomy `vocal_profiles` values.
-Legacy `HYP`, `V`, and `NV` tags are still parsed and normalized to `HYPN`,
-`VOC`, and `INST`.
+`vibe` is the tag field for taxonomy `mood` codes loaded from
+`src/dj_registry/taxonomy/dj_taxonomy.json` moods. `vocal` is the tag field for
+taxonomy `vocal_profile` codes loaded from the same taxonomy `vocal_profiles`
+values.
 
 #### Mood Codes
 
@@ -201,6 +197,9 @@ audio -> TrackAudio -> compute_tagger_artifacts()
       -> hydrated tagger result
 ```
 
+`structure` remains an internal analysis field for registry exports, taxonomy
+features, grouping, and recommendations. It is not written into the COMMENT tag.
+
 ### `dj-registry`
 
 The registry is the source of truth for:
@@ -247,7 +246,8 @@ classification defaults the primary `dj_taxonomy_*` metadata to the external
 model when available; the tag-writing workflow uses the internal model as primary.
 The selected category ID expands to bounded moods, grooves, set roles,
 BPM/energy ranges, vocal profiles, source genres, and keywords from
-`dj_taxonomy.json`.
+`dj_taxonomy.json`. COMMENT tags use a compact code derived from the selected
+category label; they do not write the internal `category_id`.
 
 Methodology summary:
 
@@ -271,12 +271,14 @@ Current grouping pipeline:
 
 1. load tagger results from shared cache when current
 2. fall back to raw cache and re-derive when only derived logic changed
-3. extract missing DSP/raw artifacts through the canonical tagger pipeline
-4. build tag, DSP, optional CLAP, and optional registry-enrichment feature layers
-5. cluster with either:
+3. reuse cached DSP whenever its payload is compatible, even if downstream signatures changed
+4. extract only missing DSP/section-DSP when analysis is already cached
+5. run the canonical tagger pipeline only when analysis/raw-analysis must be refreshed
+6. build tag, DSP, optional CLAP, and optional registry-enrichment feature layers
+7. cluster with either:
    - `constrained` (default)
    - `agglomerative`
-6. write `groups.csv`, `recommendations.csv`, playlists, and optional grouped folders
+8. write `groups.csv`, `recommendations.csv`, playlists, and optional grouped folders
 
 ## Cache Model
 
@@ -296,7 +298,10 @@ Stores reusable raw artifacts and external data:
 - `spotify`
 - analysis observations
 
-Important: raw layers are no longer treated as permanently valid. The tagger computes a raw extractor signature from the relevant source files, and versioned raw layers miss automatically if that logic changes.
+Important: DSP is cached at the extraction boundary. Downstream changes such as
+tag formatting, category labels, grouping, or derived scoring do not force DSP
+extraction. Only DSP extractor inputs/code should invalidate `dsp`;
+`section_dsp` and `raw_analysis` have their own signatures.
 
 ### `cache/derived_cache.pkl`
 
@@ -307,7 +312,8 @@ Stores derived tagger results:
 Each tagger record carries metadata describing the build used to compute it:
 
 - tagger version
-- raw signature
+- aggregate raw signature
+- per-layer DSP/raw signatures
 - derived signature
 - key signature
 - Songstats audio-feature signature
@@ -316,15 +322,22 @@ Each tagger record carries metadata describing the build used to compute it:
 
 If you change `settings.toml` or derived scoring logic, the derived signature changes automatically and tagger results are re-derived from cached raw layers on the next run.
 
-If you change raw extraction logic, the raw signature changes automatically and those raw layers are recomputed instead of being silently reused.
+If you change raw extraction logic, the affected raw-layer signature changes automatically and that layer is recomputed instead of being silently reused.
 
 You do not need to manually bump a cache version string anymore.
 
-The main exception is when you add a brand-new Python module that affects tagger computation. In that case, add the new file to the relevant signature list in `src/dj_tagger/settings.py`:
+The main exception is when you add a brand-new Python module that affects tagger
+or raw-layer computation. In that case, add the new file to the relevant
+signature list in `src/dj_tagger/settings.py`:
 
-- `_RAW_VERSION_FILES`
+- `_DSP_VERSION_FILES`
+- `_SECTION_DSP_VERSION_FILES`
+- `_RAW_ANALYSIS_VERSION_FILES`
 - `_DERIVED_VERSION_FILES`
 - `_KEY_VERSION_FILES`
+
+`_RAW_VERSION_FILES` is kept as the aggregate tagger raw signature input; add
+new files to the specific per-layer list first.
 
 For a focused workflow reference, see [docs/tagger_cache_and_experimentation.md](docs/tagger_cache_and_experimentation.md).
 
@@ -356,7 +369,7 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 pytest -q
 ```
 
-Current suite size: `291` tests.
+Current suite size: `309` tests.
 
 ## Documentation
 

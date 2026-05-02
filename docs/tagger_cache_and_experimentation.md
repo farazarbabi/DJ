@@ -7,8 +7,7 @@ This document is for tuning `energy`, `vibe`/mood, `vocal`, `structure`, `bpm`, 
 `src/dj_tagger/moods.py`.
 
 `vocal` is likewise a taxonomy vocal-profile code loaded from the same
-dictionary through `src/dj_tagger/vocals.py`. Legacy `V`/`NV` values normalize
-to `VOC`/`INST`.
+dictionary through `src/dj_tagger/vocals.py`.
 
 ## Goal
 
@@ -40,6 +39,9 @@ Relevant raw layers:
 - `section_dsp`
 
 These are reusable inputs for re-deriving tagger outputs without decoding audio again.
+`dsp` is the stable audio-extraction boundary. Tag formatting, category labels,
+grouping code, and derived scorer changes do not force DSP extraction when a
+compatible DSP payload is already cached.
 
 ### Derived Layer
 
@@ -75,14 +77,14 @@ Effect:
 
 ### 3. Raw feature extraction changes
 
-If you change code used to produce `dsp`, `raw_analysis`, or `section_dsp`, the raw signature changes automatically.
+If you change code used to produce `dsp`, `raw_analysis`, or `section_dsp`, that layer's raw signature changes automatically.
 
-Current coverage is driven by `_RAW_VERSION_FILES` in `src/dj_tagger/settings.py`.
+Current coverage is driven by `_DSP_VERSION_FILES`, `_SECTION_DSP_VERSION_FILES`, and `_RAW_ANALYSIS_VERSION_FILES` in `src/dj_tagger/settings.py`.
 
 Effect:
 
-- versioned raw layers miss
-- fresh extraction runs
+- affected versioned raw layers miss
+- fresh extraction runs only for the missing layer
 - derived tagger output is rebuilt from the new raw features
 
 ### 4. Key-analysis changes
@@ -101,7 +103,7 @@ If the Songstats-derived audio features that influence vibe scoring change, the 
 
 Effect:
 
-- old tagger entries are refreshed instead of silently reused
+- stale tagger entries are refreshed instead of silently reused
 
 ## What Is Stored on Each Tagger Result
 
@@ -222,9 +224,14 @@ Useful signals from `dj vibe-audit`:
 
 If you create a brand-new module and the tagger starts depending on it, you must add that file to one of the signature lists in `src/dj_tagger/settings.py`:
 
-- `_RAW_VERSION_FILES`
+- `_DSP_VERSION_FILES`
+- `_SECTION_DSP_VERSION_FILES`
+- `_RAW_ANALYSIS_VERSION_FILES`
 - `_DERIVED_VERSION_FILES`
 - `_KEY_VERSION_FILES`
+
+`_RAW_VERSION_FILES` is kept as the aggregate tagger raw signature input. Add
+new extractor files to the specific per-layer list first.
 
 Examples:
 

@@ -15,14 +15,14 @@ def test_vocal_profiles_loaded_from_taxonomy():
     assert VOCAL_PROFILE_NAME_BY_CODE["FVOC"] == "featured_vocal"
 
 
-def test_legacy_vocal_aliases_normalize_to_profiles():
-    assert normalize_vocal_profile("NV") == "INST"
-    assert normalize_vocal_profile("V") == "VOC"
+def test_named_vocal_aliases_normalize_to_profiles():
+    assert normalize_vocal_profile("instrumental") == "INST"
+    assert normalize_vocal_profile("vocal") == "VOC"
     assert normalize_vocal_profile("featured vocal") == "FVOC"
 
 
-def test_legacy_score_maps_expand_to_full_profile_space():
-    scores = normalize_vocal_profile_scores({"NV": 0.7, "V": 0.2})
+def test_score_maps_expand_to_full_profile_space():
+    scores = normalize_vocal_profile_scores({"INST": 0.7, "VOC": 0.2})
     assert set(scores) == set(VOCAL_PROFILE_LABELS)
     assert scores["INST"] == 0.7
     assert scores["VOC"] == 0.2

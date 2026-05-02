@@ -58,9 +58,10 @@ Example:
 ```
 
 `CATEGORY` is the compact no-space DJ taxonomy category label code: each label
-word becomes 3-4 uppercase characters separated by dots. Legacy tags with
-structure and legacy pipe-separated tags are still parsed, but new writes omit
-structure.
+word becomes 3-4 uppercase characters separated by dots.
+
+`structure` remains an internal analysis/grouping field, but it is not part of
+the COMMENT tag format.
 
 ## Cache Architecture
 
@@ -85,10 +86,12 @@ Relevant derived layer:
 
 Important current behavior:
 
-- raw layers `dsp`, `section_dsp`, and `raw_analysis` are versioned
+- raw layers `dsp`, `section_dsp`, and `raw_analysis` are versioned independently
+- cached `dsp` is reused across downstream tag/category/grouping changes
 - tagger results are hydrated with provenance metadata
 - registry and grouper reuse the same canonical tagger/raw cache
 - grouper preserves richer Songstats-aware tagger entries instead of downgrading them
+- grouper uses a lightweight DSP-only path when tagger analysis is already cached
 
 ## Automatic Cache Invalidation
 
@@ -97,6 +100,9 @@ Do not rely on manual version bumps.
 `src/dj_tagger/settings.py` computes:
 
 - `raw_version()`
+- `dsp_version()`
+- `section_dsp_version()`
+- `raw_analysis_version()`
 - `derived_version()`
 - `key_version()`
 - `tagger_version()`
@@ -105,9 +111,14 @@ These signatures hash both:
 
 - relevant sections of `settings.toml`
 - relevant source files listed in:
-  - `_RAW_VERSION_FILES`
+  - `_DSP_VERSION_FILES`
+  - `_SECTION_DSP_VERSION_FILES`
+  - `_RAW_ANALYSIS_VERSION_FILES`
   - `_DERIVED_VERSION_FILES`
   - `_KEY_VERSION_FILES`
+
+`_RAW_VERSION_FILES` remains as the aggregate tagger raw signature input. Prefer
+the per-layer lists when adding new extractor files.
 
 Hydrated tagger records carry:
 
@@ -137,7 +148,8 @@ Then inspect:
 Expected behavior:
 
 - settings or derived scorer changes re-derive from raw cache
-- raw extraction changes invalidate raw feature layers automatically
+- raw extraction changes invalidate only the affected raw feature layer automatically
+- DSP is not re-extracted for tag formatting, category label, grouping, or derived-scorer changes
 - Songstats input changes refresh affected tagger entries automatically
 
 Manual cache clearing is now mainly for debugging:
@@ -207,7 +219,7 @@ Do not add instructions that tell contributors to bump a manual cache version.
 
 ## Testing Notes
 
-- current suite size: `245` tests
+- current suite size: `309` tests
 - tests use synthetic audio fixtures
 - registry, tagger, grouper, and cache behaviors all have direct coverage
 

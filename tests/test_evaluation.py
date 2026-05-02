@@ -10,7 +10,7 @@ from dj_grouper.evaluation import EvalPair, evaluate
 
 def _make_track(energy=3, vibe="HYPN", bpm=128, path="t.aiff"):
     info = TrackInfo(path=path, energy=energy, vibe=vibe, bpm=bpm,
-                     structure="64H", intro_bars=64, flow_type="H", vocal="NV")
+                     structure="64H", intro_bars=64, flow_type="H", vocal="INST")
     return TrackFeatures(
         path=path, info=info,
         tag_vector=encode_tags(info),

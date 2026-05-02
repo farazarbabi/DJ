@@ -7,6 +7,7 @@ import pytest
 
 from dj_grouper.scanner import TrackInfo
 from dj_grouper.cli import _run_extraction, _ExtractionStats, _apply_tagger_result
+from dj_grouper.features.dsp import DSP_CURATED_NAMES
 from dj_tagger.tagger_cache import hydrate_tagger_result
 from dj_tagger.universal_cache import get_cache, quick_duration, reset_cache
 
@@ -59,6 +60,109 @@ class TestRunExtraction:
         _, stats2 = _run_extraction(tracks, cache_path, workers=1)
         assert stats2.n_extracted == 0
         assert stats2.n_cached == 1
+
+    def test_compatible_stale_dsp_cache_is_reused(self, tmp_path, monkeypatch):
+        """DSP cache survives unrelated raw signature churn when its schema is compatible."""
+        wav = str(tmp_path / "track.wav")
+        _make_wav(wav)
+        tracks = [TrackInfo(path=wav)]
+        cache_path = str(tmp_path / "cache.pkl")
+        cache_dur = quick_duration(wav)
+        ucache = get_cache(str(tmp_path / "raw_cache.pkl"))
+
+        dsp = {name: 0.1 for name in DSP_CURATED_NAMES}
+        ucache.put(ucache.track_key("track.wav", cache_dur, "dsp"), dsp, version="old-raw-version")
+        ucache.put_track(
+            "track.wav",
+            cache_dur,
+            "tagger",
+            hydrate_tagger_result({
+                "camelot": "9A",
+                "energy": 3,
+                "bpm": 126.0,
+                "vibe": "HYPN",
+                "vocal": "INST",
+                "confidences": {"vibe": 0.8, "vocal": 0.8},
+            }),
+        )
+        ucache.save()
+
+        def fail_extract(*args, **kwargs):
+            raise AssertionError("audio extraction should not run")
+
+        monkeypatch.setattr("dj_grouper.cli._extract_worker", fail_extract)
+        monkeypatch.setattr("dj_grouper.cli._extract_dsp_worker", fail_extract)
+
+        raw_cache, stats = _run_extraction(tracks, cache_path, workers=1)
+
+        assert stats.n_cached == 1
+        assert stats.n_extracted == 0
+        assert raw_cache[wav].dsp == dsp
+        assert ucache.get_track("track.wav", cache_dur, "dsp") == dsp
+
+    def test_dsp_only_path_does_not_run_full_tagger_pipeline(self, tmp_path, monkeypatch):
+        """When analysis is cached, missing DSP uses the lightweight DSP worker."""
+        wav = str(tmp_path / "track.wav")
+        _make_wav(wav)
+        tracks = [TrackInfo(path=wav)]
+        cache_path = str(tmp_path / "cache.pkl")
+        cache_dur = quick_duration(wav)
+        ucache = get_cache(str(tmp_path / "raw_cache.pkl"))
+        ucache.put_track(
+            "track.wav",
+            cache_dur,
+            "tagger",
+            hydrate_tagger_result({
+                "camelot": "9A",
+                "energy": 3,
+                "bpm": 126.0,
+                "vibe": "HYPN",
+                "vocal": "INST",
+                "confidences": {"vibe": 0.8, "vocal": 0.8},
+            }),
+        )
+        ucache.save()
+
+        def fail_full_extract(*args, **kwargs):
+            raise AssertionError("full tagger pipeline should not run")
+
+        dsp = {name: 0.2 for name in DSP_CURATED_NAMES}
+        monkeypatch.setattr("dj_grouper.cli._extract_worker", fail_full_extract)
+        monkeypatch.setattr(
+            "dj_grouper.cli._extract_dsp_worker",
+            lambda path: {"dsp": dsp, "section_dsp": {"groove": {"rms_mean": 0.2}}},
+        )
+
+        raw_cache, stats = _run_extraction(tracks, cache_path, workers=1)
+
+        assert stats.n_cached == 0
+        assert stats.n_extracted == 1
+        assert raw_cache[wav].dsp == dsp
+        assert ucache.get_track("track.wav", cache_dur, "dsp") == dsp
+
+    def test_cached_dsp_is_reused_when_analysis_refreshes(self, tmp_path, monkeypatch):
+        """Refreshing tagger analysis should not recompute a cached DSP layer."""
+        wav = str(tmp_path / "track.wav")
+        _make_wav(wav)
+        tracks = [TrackInfo(path=wav, energy=3, key="9A", bpm=126)]
+        cache_path = str(tmp_path / "cache.pkl")
+        cache_dur = quick_duration(wav)
+        ucache = get_cache(str(tmp_path / "raw_cache.pkl"))
+
+        dsp = {name: 0.3 for name in DSP_CURATED_NAMES}
+        ucache.put_track("track.wav", cache_dur, "dsp", dsp)
+        ucache.save()
+
+        def fail_dsp_extract(*args, **kwargs):
+            raise AssertionError("cached DSP should not be recomputed")
+
+        monkeypatch.setattr("dj_tagger.raw_features.extract_dsp_features", fail_dsp_extract)
+
+        raw_cache, stats = _run_extraction(tracks, cache_path, workers=1)
+
+        assert stats.n_extracted == 1
+        assert raw_cache[wav].dsp == dsp
+        assert ucache.get_track("track.wav", cache_dur, "dsp") == dsp
 
     def test_force_re_extracts(self, tmp_path):
         """force=True ignores existing cache."""
@@ -133,7 +237,7 @@ class TestRunExtraction:
                 "bpm": 126.0,
                 "structure": "16H",
                 "vibe": "DRK",
-                "vocal": "NV",
+                "vocal": "INST",
                 "confidences": {"key": 0.9},
             },
             analyze_untagged=True,
@@ -181,7 +285,7 @@ class TestRunExtraction:
                 "key_confidence": 0.9,
                 "energy": 3,
                 "vibe": "MEL",
-                "vocal": "NV",
+                "vocal": "INST",
                 "structure": "32H",
                 "bpm": 128.0,
                 "vibe_scores": {"MEL": 0.9},

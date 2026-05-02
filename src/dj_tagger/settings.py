@@ -23,12 +23,22 @@ _file_digest_cache: dict[str, tuple[int, int, str]] = {}
 # A change in any of these triggers derived cache invalidation.
 _DERIVED_SECTIONS = ("energy", "vibe", "vocal", "structure", "key")
 
-_RAW_VERSION_FILES = (
+_DSP_VERSION_FILES = (
     "src/dj_tagger/audio.py",
-    "src/dj_tagger/raw_features.py",
+    "src/dj_grouper/features/dsp.py",
+)
+_SECTION_DSP_VERSION_FILES = (
+    "src/dj_tagger/audio.py",
     "src/dj_grouper/features/dsp.py",
     "src/dj_tagger/analyzers/sections.py",
 )
+_RAW_ANALYSIS_VERSION_FILES = (
+    "src/dj_tagger/audio.py",
+    "src/dj_tagger/raw_features.py",
+)
+_RAW_VERSION_FILES = tuple(dict.fromkeys(
+    _DSP_VERSION_FILES + _RAW_ANALYSIS_VERSION_FILES
+))
 _DERIVED_VERSION_FILES = (
     "src/dj_tagger/derive.py",
     "src/dj_tagger/vibe_scoring.py",
@@ -113,7 +123,25 @@ def derived_version() -> str:
 
 def raw_version() -> str:
     """Compute a version hash for raw feature extraction code paths."""
-    combined = _code_signature(_RAW_VERSION_FILES)
+    combined = f"dsp={dsp_version()}|raw_analysis={raw_analysis_version()}"
+    return hashlib.sha256(combined.encode()).hexdigest()[:12]
+
+
+def dsp_version() -> str:
+    """Compute a version hash for whole-track DSP extraction."""
+    combined = _code_signature(_DSP_VERSION_FILES)
+    return hashlib.sha256(combined.encode()).hexdigest()[:12]
+
+
+def section_dsp_version() -> str:
+    """Compute a version hash for section-aware DSP extraction."""
+    combined = _code_signature(_SECTION_DSP_VERSION_FILES)
+    return hashlib.sha256(combined.encode()).hexdigest()[:12]
+
+
+def raw_analysis_version() -> str:
+    """Compute a version hash for raw tagger-analysis intermediates."""
+    combined = _code_signature(_RAW_ANALYSIS_VERSION_FILES)
     return hashlib.sha256(combined.encode()).hexdigest()[:12]
 
 

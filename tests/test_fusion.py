@@ -11,7 +11,7 @@ from dj_grouper.scanner import TrackInfo
 
 
 def _make_track_with_unified(
-    energy=3, key="9A", bpm=128, vibe="HYPN", vocal="NV",
+    energy=3, key="9A", bpm=128, vibe="HYPN", vocal="INST",
     danceability=0.7, valence=0.4, genre="Techno",
     path="test.aiff",
 ):
@@ -62,7 +62,7 @@ def test_unified_vector_shape():
     """Unified vector should reflect the dynamic tag-vector mood slice."""
     info = TrackInfo(path="t.aiff", energy=3, key="9A", bpm=128,
                      structure="64H", intro_bars=64, flow_type="H",
-                     vibe="HYPN", vocal="NV")
+                     vibe="HYPN", vocal="INST")
     tag_vec = encode_tags(info)
     dsp_vec = np.zeros(21, dtype=np.float32)
     registry = RegistryEnrichment(danceability=0.5, valence=0.5, has_songstats=True)
@@ -75,7 +75,7 @@ def test_unified_vector_no_registry():
     """Without registry, genre and songstats should be neutral."""
     info = TrackInfo(path="t.aiff", energy=3, key="9A", bpm=128,
                      structure="64H", intro_bars=64, flow_type="H",
-                     vibe="HYPN", vocal="NV")
+                     vibe="HYPN", vocal="INST")
     tag_vec = encode_tags(info)
     dsp_vec = np.zeros(21, dtype=np.float32)
     unified = build_unified_vector(tag_vec, dsp_vec, None, None, clap_pca_dims=32)
@@ -92,7 +92,7 @@ def test_unified_vector_with_clap():
     """When CLAP is provided, it should be included in the unified vector."""
     info = TrackInfo(path="t.aiff", energy=3, key="9A", bpm=128,
                      structure="64H", intro_bars=64, flow_type="H",
-                     vibe="HYPN", vocal="NV")
+                     vibe="HYPN", vocal="INST")
     tag_vec = encode_tags(info)
     dsp_vec = np.zeros(21, dtype=np.float32)
     clap_vec = np.ones(32, dtype=np.float32) * 0.3

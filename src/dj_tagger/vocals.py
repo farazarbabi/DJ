@@ -70,20 +70,15 @@ _ALIASES: dict[str, str] = {
     "INSTR": "INST",
     "INSTRUMENTAL": "INST",
     "LOW_VOCAL": "VOC",
-    "LV": "VOC",
     "NO_VOCAL": "INST",
     "NO_VOCALS": "INST",
     "NONVOCAL": "INST",
-    "NV": "INST",
     "SPEECH": "SPK",
     "SPOKEN": "SPK",
     "SPOKEN_WORD": "SPK",
-    "V": "VOC",
     "VOICE": "VOC",
     "VOCAL": "VOC",
 }
-
-_LEGACY_PATTERN_CODES = ("V", "NV", "LV")
 
 
 def load_taxonomy_vocal_profiles(path: str | Path | None = None) -> tuple[str, ...]:
@@ -141,7 +136,7 @@ def normalize_vocal_profile(value: Any) -> str:
 
 
 def normalize_vocal_profile_scores(scores: dict[str, float] | None) -> dict[str, float]:
-    """Normalize score dictionaries that may contain legacy V/NV tokens."""
+    """Normalize score dictionaries to the current vocal-profile code set."""
     normalized = {code: 0.0 for code in VOCAL_PROFILE_LABELS}
     for raw_code, raw_score in (scores or {}).items():
         code = normalize_vocal_profile(raw_code)
@@ -154,7 +149,7 @@ def normalize_vocal_profile_scores(scores: dict[str, float] | None) -> dict[str,
 
 
 def vocal_profile_tag_pattern() -> str:
-    codes = sorted({*VOCAL_PROFILE_LABELS, *_LEGACY_PATTERN_CODES}, key=len, reverse=True)
+    codes = sorted(VOCAL_PROFILE_LABELS, key=len, reverse=True)
     return "(?:" + "|".join(re.escape(code) for code in codes) + r"|\?\?)"
 
 

@@ -311,6 +311,10 @@ Standalone classification uses the external model as the primary
 workflow uses the internal model as primary, while preserving both internal and
 external predictions for comparison.
 
+For COMMENT tag writing, the selected internal model category contributes a
+compact code derived from `dj_taxonomy_label`. The tag does not write
+`category_id`; IDs remain internal registry/model fields.
+
 ### Ground-Truth Guardrails
 
 The LLM prompt is bounded by the full `dj_taxonomy.json` category list. The
@@ -375,3 +379,7 @@ After `dj-registry dj-taxonomy classify`, `registry_overview.csv` includes:
 - expanded metadata: `dj_taxonomy_moods`, `dj_taxonomy_grooves`, `dj_taxonomy_set_roles`, `dj_taxonomy_bpm_range`, `dj_taxonomy_energy_range`, `dj_taxonomy_vocal_profiles`, `dj_taxonomy_source_genres`, `dj_taxonomy_keywords`
 - model comparison columns: `dj_taxonomy_internal_id`, `dj_taxonomy_internal_confidence`, `dj_taxonomy_external_id`, `dj_taxonomy_external_confidence`, `dj_taxonomy_models_agree`, `dj_taxonomy_external_evidence_available`
 - audit columns: `dj_taxonomy_alternatives`, `dj_taxonomy_evidence`, `dj_taxonomy_version`
+
+When tags are synced, the COMMENT category segment is built from
+`dj_taxonomy_label` using 3-4 uppercase characters per word joined with dots,
+for example `Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`.

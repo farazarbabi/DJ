@@ -5,6 +5,7 @@ import os
 import numpy as np
 import pytest
 
+import dj_tagger.universal_cache as universal_cache
 from dj_tagger.universal_cache import (
     UniversalCache, CacheEntry, LAYER_VERSIONS, reset_cache,
 )
@@ -103,11 +104,11 @@ def test_cross_module_sharing(tmp_path):
 
     tagger_result = {
         "file": "track.aiff",
-        "tag": "9A_E3_HYPN_64H_NV_126",
+        "tag": "9A_126_E3_HYPN_INST",
         "energy": 3,
         "camelot": "9A",
         "vibe": "HYPN",
-        "vocal": "NV",
+        "vocal": "INST",
         "bpm": 126,
     }
     cache.put_track("track.aiff", 180.5, "tagger", tagger_result)
@@ -175,6 +176,21 @@ def test_versioned_raw_layers_are_checked(cache):
     key = cache.track_key("track.aiff", 180.5, "raw_analysis")
     cache.put(key, {"tempo": 128.0}, version="old_raw_version")
     assert cache.get_track("track.aiff", 180.5, "raw_analysis") is None
+
+
+def test_raw_layer_versions_are_independent(monkeypatch):
+    """DSP invalidation should not be tied to raw_analysis or section_dsp changes."""
+    import dj_tagger.settings as settings
+
+    monkeypatch.setattr(settings, "dsp_version", lambda: "dsp-v")
+    monkeypatch.setattr(settings, "section_dsp_version", lambda: "section-v")
+    monkeypatch.setattr(settings, "raw_analysis_version", lambda: "analysis-v")
+
+    versions = universal_cache.refresh_layer_versions()
+
+    assert versions["dsp"] == "dsp-v"
+    assert versions["section_dsp"] == "section-v"
+    assert versions["raw_analysis"] == "analysis-v"
 
 
 def test_atomic_save_creates_files(tmp_path):

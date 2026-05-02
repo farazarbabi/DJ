@@ -1,8 +1,4 @@
-"""Shared taxonomy-derived mood vocabulary.
-
-The public registry/tagger field is still named ``vibe`` for backward
-compatibility, but its values are now mood codes derived from the DJ taxonomy.
-"""
+"""Shared taxonomy-derived mood vocabulary used by tagger and registry."""
 
 from __future__ import annotations
 
@@ -104,7 +100,6 @@ _ALIASES: dict[str, str] = {
     "EMOTIONAL": "EMO",
     "EUPHORIC": "EUP",
     "FUNKY": "PLAY",
-    "HYP": "HYPN",
     "HYPNOTIC": "HYPN",
     "MELODIC": "MEL",
     "NOCTURNAL": "DRK",
@@ -170,7 +165,7 @@ def normalize_mood_code(value: Any) -> str:
 
 
 def normalize_mood_scores(scores: dict[str, float]) -> dict[str, float]:
-    """Normalize score dictionaries that may contain legacy vibe tokens."""
+    """Normalize score dictionaries to the current mood code set."""
     normalized = {code: 0.0 for code in MOOD_LABELS}
     for raw_code, raw_score in (scores or {}).items():
         code = normalize_mood_code(raw_code)
@@ -183,7 +178,7 @@ def normalize_mood_scores(scores: dict[str, float]) -> dict[str, float]:
 
 
 def mood_tag_pattern() -> str:
-    codes = sorted({*MOOD_LABELS, "HYP"}, key=len, reverse=True)
+    codes = sorted(MOOD_LABELS, key=len, reverse=True)
     return "(?:" + "|".join(re.escape(code) for code in codes) + r"|\?\?)"
 
 
@@ -209,5 +204,4 @@ MOOD_NAME_BY_CODE = {defn.code: defn.mood for defn in MOOD_DEFINITIONS}
 MOOD_CODE_BY_NAME = {defn.mood: defn.code for defn in MOOD_DEFINITIONS}
 MOOD_CUES_BY_CODE = {defn.code: defn.cues for defn in MOOD_DEFINITIONS}
 
-# Backward-compatible public name used by older grouper/tagger code.
 VIBE_LABELS = MOOD_LABELS

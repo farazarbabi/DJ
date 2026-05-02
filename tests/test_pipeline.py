@@ -23,7 +23,7 @@ def test_full_pipeline(sine_440hz):
 def test_pipeline_skip_existing(flac_file):
     """If a file already has a tag and overwrite is False, it should be skipped."""
     from dj_tagger.metadata import write_tag
-    existing_tag = "E2 | 8A | 64L | DEEP | NV"
+    existing_tag = "8A_128_E2_DEEP_INST"
     write_tag(flac_file, existing_tag, dry_run=False)
 
     config = AnalysisConfig(dry_run=True, overwrite=False)
@@ -35,7 +35,7 @@ def test_pipeline_skip_existing(flac_file):
 def test_pipeline_overwrite(flac_file):
     """With overwrite=True, it should re-analyze even if tagged."""
     from dj_tagger.metadata import write_tag
-    write_tag(flac_file, "E1 | 1A | 16L | ATM | NV", dry_run=False)
+    write_tag(flac_file, "1A_124_E1_ATM_INST", dry_run=False)
 
     config = AnalysisConfig(dry_run=True, overwrite=True)
     result = analyze_track(flac_file, config)

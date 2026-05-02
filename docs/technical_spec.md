@@ -35,7 +35,7 @@ The current tagger path is intentionally shared across `dj-tagger`, `dj-registry
 ```text
 load_audio_features()
   -> compute_tagger_artifacts()
-     -> extract_dsp_features()
+     -> extract_dsp_features() unless compatible dsp was supplied from cache
      -> extract_raw_analysis()
      -> analyze_sections()
      -> extract_section_dsp()
@@ -53,6 +53,9 @@ Produced by `src/dj_tagger/raw_features.py`:
 - `section_dsp`
 
 These are the reusable inputs for cheap re-derivation after scoring changes.
+`dsp` is treated as the stable audio-extraction boundary: tag formatting,
+category labels, grouping, and derived scoring changes do not force DSP
+re-extraction.
 
 ### Derived Fields
 
@@ -72,17 +75,15 @@ Produced by `src/dj_tagger/derive.py`:
 
 Key analysis is computed separately and merged into the final hydrated tagger result.
 
-`vibe` remains the stored/tag compatibility name. Semantically it is now a
-taxonomy mood code loaded from `src/dj_registry/taxonomy/dj_taxonomy.json`.
+`vibe` is the stored tag field for taxonomy mood codes loaded from
+`src/dj_registry/taxonomy/dj_taxonomy.json`.
 `src/dj_tagger/moods.py` is the shared vocabulary source for tagger, grouper,
-registry taxonomy features, and tag parsing. Legacy codes are normalized through
-aliases, for example `HYP -> HYPN`.
+registry taxonomy features, and tag parsing.
 
-`vocal` is now the stored compatibility field for the taxonomy vocal profile.
+`vocal` is the stored tag field for the taxonomy vocal profile.
 `src/dj_tagger/vocals.py` loads `vocal_profiles` from
 `src/dj_registry/taxonomy/dj_taxonomy.json`, currently producing `INST`, `VOC`,
-`FVOC`, `SPK`, `CHANT`, `DUB`, and `TOOL`. Legacy `V`/`NV` tags still parse and
-normalize to `VOC`/`INST`.
+`FVOC`, `SPK`, `CHANT`, `DUB`, and `TOOL`.
 
 The human-facing code dictionary is maintained in `README.md`. The runtime
 source of truth is:
@@ -117,7 +118,7 @@ Contains raw or external layers:
 - `analysis_librosa`
 - `analysis_essentia`
 
-`dsp`, `section_dsp`, and `raw_analysis` are versioned raw layers. They are invalidated by the raw extractor signature, not reused forever.
+`dsp`, `section_dsp`, and `raw_analysis` are versioned raw layers. Each has its own extractor signature, so downstream changes do not force unrelated raw layers to be recomputed. In particular, cached `dsp` is reused unless DSP extraction inputs/code change.
 
 ### `derived_cache.pkl`
 
@@ -134,6 +135,9 @@ The `tagger` layer is version-gated by the current tagger signature.
 Current signature types:
 
 - `raw_version()`
+- `dsp_version()`
+- `section_dsp_version()`
+- `raw_analysis_version()`
 - `derived_version()`
 - `key_version()`
 - `tagger_version()`
@@ -147,6 +151,9 @@ Each hydrated tagger result stores:
 - `_tagger_audio_features_sig`
 
 This is the main protection against stale cache reuse during tuning.
+The aggregate `_tagger_raw_sig` covers raw inputs needed for tagger derivation.
+Whole-track DSP, section-DSP, and raw-analysis cache entries also have
+independent layer versions.
 
 ## Invalidation Rules
 
@@ -158,9 +165,9 @@ This is the main protection against stale cache reuse during tuning.
 
 ### If raw extraction logic changes
 
-- raw signature changes
-- cached `dsp`, `raw_analysis`, and `section_dsp` miss
-- fresh extraction is required
+- the affected raw-layer signature changes
+- only that raw layer misses
+- fresh extraction is required for the missing layer
 
 ### If key logic changes
 
@@ -177,10 +184,16 @@ This is the main protection against stale cache reuse during tuning.
 The signature lists live in `src/dj_tagger/settings.py`:
 
 - `_RAW_VERSION_FILES`
+- `_DSP_VERSION_FILES`
+- `_SECTION_DSP_VERSION_FILES`
+- `_RAW_ANALYSIS_VERSION_FILES`
 - `_DERIVED_VERSION_FILES`
 - `_KEY_VERSION_FILES`
 
-If a new Python file becomes part of tagger computation, it must be added to the appropriate list so cache invalidation sees it.
+If a new Python file becomes part of tagger computation, it must be added to the
+appropriate list so cache invalidation sees it. Prefer the per-layer raw lists
+for extractor files; `_RAW_VERSION_FILES` is the aggregate tagger raw signature
+input.
 
 ## Registry Architecture
 
@@ -215,6 +228,9 @@ Current track-level stored tagger fields:
 
 `registry_overview.csv` also exports `tagger_mood` and `tagger_mood_scores`
 as aliases of `tagger_vibe` and `tagger_vibe_scores`.
+
+`tagger_structure` remains stored and exported for analysis, taxonomy features,
+grouping, and recommendations. It is not written into the current COMMENT tag.
 
 Current track-level genre taxonomy fields:
 
@@ -408,7 +424,9 @@ The grouper now uses the same canonical cache pipeline as tagger and registry.
 
 - loads current tagger entries when available
 - re-derives from raw cache when only derived logic changed
-- falls back to canonical artifact extraction when needed
+- reuses compatible cached DSP across downstream tag/category/grouping changes
+- uses a lightweight DSP-only worker when tagger analysis is cached but DSP is missing
+- falls back to canonical artifact extraction when analysis/raw-analysis must be refreshed
 - preserves richer Songstats-aware tagger entries instead of replacing them with DSP-only output
 
 ### Feature Layers
@@ -445,10 +463,12 @@ The registry sync path builds the COMMENT tag from:
 The current COMMENT shape is `KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]`.
 `CATEGORY` is the no-space code from the category label. Each label word becomes
 3-4 uppercase characters separated by dots, for example
-`Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`. Legacy tags with structure are
-still parsed.
+`Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`.
 
-It also writes canonical key to the dedicated key field for supported formats.
+By default it leaves the dedicated TKEY/InitialKey field untouched so the
+original embedded key remains available as a resolver signal. Passing
+`--write-key-tag` also writes the canonical Camelot key there for supported
+formats.
 
 ## Observability
 

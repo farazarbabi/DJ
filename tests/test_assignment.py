@@ -25,7 +25,7 @@ def _track(path: str, key: str | None) -> TrackFeatures:
         bpm=124,
         structure="16H",
         vibe="DRK",
-        vocal="NV",
+        vocal="INST",
     )
     return TrackFeatures(path, info, np.zeros(19), np.zeros(21))
 
@@ -42,7 +42,7 @@ def test_group_folder_prefers_known_key_over_unknown_placeholder():
 
     group = assignment.groups[0]
     assert group.key == "9A"
-    assert group.folder_name == "G001_9A_E4_DRK_16H_INST_124"
+    assert group.folder_name == "9A_124_E4_DRK_INST_G001"
     assert "____" not in group.folder_name
 
 
@@ -55,10 +55,10 @@ def test_group_folder_uses_safe_unknown_key_placeholder():
 
     group = assignment.groups[0]
     assert group.key == "NK"
-    assert group.folder_name == "G001_NK_E4_DRK_16H_INST_124"
+    assert group.folder_name == "NK_124_E4_DRK_INST_G001"
 
 
-def test_load_assignment_normalizes_legacy_unknown_key_folder(tmp_path):
+def test_load_assignment_normalizes_unknown_key_folder(tmp_path):
     assignment = GroupAssignment(
         groups=[
             GroupInfo(
@@ -69,9 +69,9 @@ def test_load_assignment_normalizes_legacy_unknown_key_folder(tmp_path):
                 energy=4,
                 vibe="DRK",
                 structure="16H",
-                vocal="NV",
+                vocal="INST",
                 bpm=124,
-                folder_name="G001_??_E4_DRK_16H_INST_124",
+                folder_name="??_124_E4_DRK_INST_G001",
             )
         ],
         track_to_group={"/music/a.aiff": "G001"},
@@ -83,7 +83,7 @@ def test_load_assignment_normalizes_legacy_unknown_key_folder(tmp_path):
 
     group = loaded.groups[0]
     assert group.key == "NK"
-    assert group.folder_name == "G001_NK_E4_DRK_16H_INST_124"
+    assert group.folder_name == "NK_124_E4_DRK_INST_G001"
 
 
 def test_refresh_group_descriptors_updates_stale_cached_key():
@@ -101,9 +101,9 @@ def test_refresh_group_descriptors_updates_stale_cached_key():
                 energy=4,
                 vibe="DRK",
                 structure="16H",
-                vocal="NV",
+                vocal="INST",
                 bpm=124,
-                folder_name="G001_??_E4_DRK_16H_INST_124",
+                folder_name="??_124_E4_DRK_INST_G001",
             )
         ],
         track_to_group={
@@ -116,7 +116,7 @@ def test_refresh_group_descriptors_updates_stale_cached_key():
 
     group = assignment.groups[0]
     assert group.key == "9A"
-    assert group.folder_name == "G001_9A_E4_DRK_16H_INST_124"
+    assert group.folder_name == "9A_124_E4_DRK_INST_G001"
 
 
 def test_assign_new_tracks_refreshes_descriptors_without_membership_changes():
@@ -134,9 +134,9 @@ def test_assign_new_tracks_refreshes_descriptors_without_membership_changes():
                 energy=4,
                 vibe="DRK",
                 structure="16H",
-                vocal="NV",
+                vocal="INST",
                 bpm=124,
-                folder_name="G001_??_E4_DRK_16H_INST_124",
+                folder_name="??_124_E4_DRK_INST_G001",
             )
         ],
         track_to_group={
@@ -149,4 +149,4 @@ def test_assign_new_tracks_refreshes_descriptors_without_membership_changes():
 
     group = updated.groups[0]
     assert group.key == "9A"
-    assert group.folder_name == "G001_9A_E4_DRK_16H_INST_124"
+    assert group.folder_name == "9A_124_E4_DRK_INST_G001"

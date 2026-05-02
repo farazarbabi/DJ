@@ -13,7 +13,7 @@ def _make_track(key="9A", bpm=128, path="test.aiff"):
     info = TrackInfo(
         path=path, energy=3, key=key, bpm=bpm,
         structure="64H", intro_bars=64, flow_type="H",
-        vibe="HYPN", vocal="NV",
+        vibe="HYPN", vocal="INST",
     )
     tag_vec = encode_tags(info)
     dsp_vec = np.zeros(21, dtype=np.float32)

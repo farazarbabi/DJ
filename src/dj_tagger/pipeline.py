@@ -56,7 +56,6 @@ def analyze_track(path: str, config: AnalysisConfig) -> dict:
         energy=canonical.get("energy"),
         camelot=canonical.get("camelot"),
         bpm=bpm_rounded,
-        structure=canonical.get("structure"),
         vibe=canonical.get("vibe"),
         has_vocals=canonical.get("has_vocals"),
         vocal_profile=canonical.get("vocal_profile", canonical.get("vocal")),
