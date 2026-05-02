@@ -109,6 +109,21 @@ def _run_songstats(config, store, obs_cache, *, show_progress: bool = False) -> 
     return summary
 
 
+def _run_dj_taxonomy_for_tags(store, *, show_progress: bool = False) -> int:
+    """Populate internal DJ category fields before COMMENT tag sync when models exist."""
+    try:
+        from dj_registry.taxonomy.dj_model import classify_all_dj_taxonomies
+
+        return classify_all_dj_taxonomies(
+            store,
+            primary_model="internal",
+            show_progress=show_progress,
+        )
+    except FileNotFoundError as exc:
+        logger.info("DJ taxonomy: skipped (%s)", exc)
+        return 0
+
+
 def _fmt_elapsed(seconds: float) -> str:
     """Format elapsed time as human-readable hh:mm:ss or mm:ss or Ns."""
     if seconds < 60:
@@ -489,7 +504,13 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     build_review_queue(config, store, show_progress=show_progress)
     logger.info("Pipeline: resolve done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
 
-    # Phase 5: Write tags
+    # Phase 5: DJ taxonomy category for tags
+    t0 = time.perf_counter()
+    classified = _run_dj_taxonomy_for_tags(store, show_progress=show_progress)
+    if classified:
+        logger.info("Pipeline: DJ taxonomy classified %d tracks in %s\n", classified, _fmt_elapsed(time.perf_counter() - t0))
+
+    # Phase 6: Write tags
     t0 = time.perf_counter()
     if not args.no_tags:
         sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False), show_progress=show_progress)
@@ -497,11 +518,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     else:
         logger.info("Tags: skipped (--no-tags)\n")
 
-    # Phase 6: Reports
+    # Phase 7: Reports
     classify_all_taxonomies(store, show_progress=show_progress)
     generate_reports(store, config.reports_dir, show_progress=show_progress)
 
-    # Phase 7: Grouping
+    # Phase 8: Grouping
     if not args.no_grouping:
         t0 = time.perf_counter()
         try:

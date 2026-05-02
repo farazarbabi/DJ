@@ -16,17 +16,21 @@ The project is Windows-first and built around a local Rekordbox workflow.
 The current COMMENT tag format is:
 
 ```text
-KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM[_GID]
+KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]
 ```
 
 Examples:
 
 ```text
-9A_E3_HYPN_64H_INST_126
-8A_E4_DRK_32D_FVOC_130_G017
+9A_126_E3_HYPN_INST_DRK.TECH.HOUS.DRV
+8A_130_E4_DRK_FVOC_RAW.WHSE.TECH.HOUS.PEAK_G017
 ```
 
-Legacy pipe-separated tags are still parsed, but newly written tags use the underscore format.
+`CATEGORY` is a compact code derived from the DJ taxonomy category label: each
+label word becomes 3-4 uppercase characters separated by dots, for example
+`Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`. Legacy tags with structure and
+legacy pipe-separated tags are still parsed, but newly written tags omit
+structure.
 
 ## Installation
 
@@ -122,8 +126,9 @@ The unified pipeline orchestrates:
 2. Rekordbox and Songstats ingest
 3. full tagger analysis
 4. canonical key/BPM resolution
-5. tag writing
-6. grouping and recommendation generation
+5. internal DJ taxonomy category prediction
+6. tag writing
+7. grouping and recommendation generation
 
 ### `dj-tagger`
 
@@ -237,10 +242,12 @@ and reports two models against the same GPT-seeded labels:
 - `external`: all internal features plus Rekordbox, Songstats, Spotify/source observations
 
 Classification always records both model predictions and confidences in
-`dj_taxonomy_internal_*` and `dj_taxonomy_external_*` columns. The primary
-`dj_taxonomy_*` metadata is expanded from the selected category ID, so moods,
-grooves, set roles, BPM/energy ranges, vocal profiles, source genres, and
-keywords remain bounded by `dj_taxonomy.json`.
+`dj_taxonomy_internal_*` and `dj_taxonomy_external_*` columns. Standalone
+classification defaults the primary `dj_taxonomy_*` metadata to the external
+model when available; the tag-writing workflow uses the internal model as primary.
+The selected category ID expands to bounded moods, grooves, set roles,
+BPM/energy ranges, vocal profiles, source genres, and keywords from
+`dj_taxonomy.json`.
 
 Methodology summary:
 

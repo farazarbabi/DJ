@@ -306,8 +306,10 @@ The registry stores both predictions and confidences:
 - `dj_taxonomy_models_agree`
 - `dj_taxonomy_external_evidence_available`
 
-The primary `dj_taxonomy_id`, label, metadata, and confidence use the external
-model when available, while preserving the internal prediction for comparison.
+Standalone classification uses the external model as the primary
+`dj_taxonomy_id`, label, metadata, and confidence when available. The tag-writing
+workflow uses the internal model as primary, while preserving both internal and
+external predictions for comparison.
 
 ### Ground-Truth Guardrails
 

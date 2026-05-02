@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..category_codes import compact_category_label
+
 
 @dataclass(frozen=True)
 class DjTaxonomyCategory:

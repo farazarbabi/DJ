@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from ..category_codes import compact_category_label
 from ..key_utils import camelot_to_standard
 from ..models import now_iso
 from ..progress import ProgressBar
@@ -13,13 +14,73 @@ from ..store.csv_store import CsvStore
 logger = logging.getLogger(__name__)
 
 
+def _parse_energy(value: str | int | None) -> int | None:
+    if value is None:
+        return None
+    raw = str(value).strip().upper()
+    if raw.startswith("E"):
+        raw = raw[1:]
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _category_label_for_tag(track) -> str:
+    """Use the internal DJ-taxonomy model label for COMMENT tags when available."""
+    return (
+        str(getattr(track, "dj_taxonomy_internal_label", "") or "").strip()
+        or str(getattr(track, "dj_taxonomy_label", "") or "").strip()
+    )
+
+
+def _category_code_for_tag(track) -> str:
+    label = _category_label_for_tag(track)
+    if label:
+        return compact_category_label(label)
+    return ""
+
+
+def _build_comment_tag(track) -> str | None:
+    """Build the COMMENT tag from registry fields, including DJ category when present."""
+    from dj_tagger.formats import format_tag
+
+    camelot = track.canonical_key_camelot or None
+    category = _category_code_for_tag(track) or None
+    has_tagger_fields = any(
+        bool(getattr(track, field, ""))
+        for field in ("tagger_energy", "tagger_vibe", "tagger_vocal", "tagger_bpm")
+    )
+    if not camelot and not has_tagger_fields and not category:
+        return None
+
+    bpm = None
+    bpm_str = track.canonical_bpm or track.tagger_bpm
+    if bpm_str:
+        try:
+            bpm = int(round(float(bpm_str)))
+        except (ValueError, TypeError):
+            pass
+
+    return format_tag(
+        energy=_parse_energy(track.tagger_energy),
+        camelot=camelot,
+        bpm=bpm,
+        vibe=track.tagger_vibe or None,
+        vocal_profile=track.tagger_vocal or None,
+        category=category,
+    )
+
+
 def _write_tkey(path: str, camelot: str) -> None:
     """Write Camelot key to the standard TKEY/InitialKey tag field."""
     ext = Path(path).suffix.lower()
 
     if ext == ".mp3":
-        from mutagen.mp3 import MP3
         from mutagen.id3 import TKEY
+        from mutagen.mp3 import MP3
 
         audio = MP3(path)
         if audio.tags is None:
@@ -39,47 +100,12 @@ def _write_tkey(path: str, camelot: str) -> None:
 
 
 def _write_full_tag(path: str, track) -> bool:
-    """Write a full dj-tagger COMMENT tag from LogicalTrack canonical + tagger fields.
-
-    Returns True if written, False if insufficient data.
-    """
-    from dj_tagger.formats import format_tag
+    """Write a full dj-tagger COMMENT tag from LogicalTrack fields."""
     from dj_tagger.metadata import write_tag
 
-    # Need at least key or some tagger data to write a meaningful tag
-    camelot = track.canonical_key_camelot
-    if not camelot and not track.tagger_energy:
+    tag_string = _build_comment_tag(track)
+    if not tag_string:
         return False
-
-    # Parse energy
-    energy = None
-    if track.tagger_energy:
-        try:
-            energy = int(track.tagger_energy)
-        except (ValueError, TypeError):
-            pass
-
-    # Parse BPM — prefer canonical (multi-source resolved), fall back to tagger
-    bpm = None
-    bpm_str = track.canonical_bpm or track.tagger_bpm
-    if bpm_str:
-        try:
-            bpm = int(round(float(bpm_str)))
-        except (ValueError, TypeError):
-            pass
-
-    # Key — use canonical (multi-source resolved)
-    if not camelot:
-        camelot = None
-
-    tag_string = format_tag(
-        energy=energy,
-        camelot=camelot,
-        bpm=bpm,
-        structure=track.tagger_structure or None,
-        vibe=track.tagger_vibe or None,
-        vocal_profile=track.tagger_vocal or None,
-    )
 
     write_tag(path, tag_string, dry_run=False)
     return True
@@ -96,10 +122,10 @@ def sync_tags(
     """Write tagger features to file tags.
 
     Always writes:
-      COMMENT tag — full tag string (KEY_ENERGY_VIBE_STRUCT_VOC_BPM)
+      COMMENT tag - KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY]
 
     Optionally writes (write_key_tag=True):
-      TKEY/InitialKey — canonical Camelot key, for DJ software display.
+      TKEY/InitialKey - canonical Camelot key, for DJ software display.
       Off by default so the original embedded key is preserved as a
       validation signal for multi-source key resolution.
 
@@ -122,21 +148,14 @@ def sync_tags(
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
-        # Need at least a canonical key or tagger features to write
-        has_key = bool(track.canonical_key_camelot)
-        has_features = bool(track.tagger_energy)
-        if not has_key and not has_features:
+        candidate_tag = _build_comment_tag(track)
+        if not candidate_tag:
             skipped += 1
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
         if dry_run:
-            canonical_cam = track.canonical_key_camelot or "??"
-            logger.debug(
-                "Would write tag to %s (key=%s, energy=%s, vibe=%s)",
-                frec.file_name, canonical_cam,
-                track.tagger_energy, track.tagger_vibe,
-            )
+            logger.debug("Would write tag to %s: %s", frec.file_name, candidate_tag)
             skipped += 1
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue

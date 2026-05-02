@@ -48,16 +48,19 @@ dj-grouper --force-extract
 Current COMMENT tag format:
 
 ```text
-KEY_ENERGY_VIBE_STRUCTURE_VOCAL_BPM[_GID]
+KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]
 ```
 
 Example:
 
 ```text
-9A_E3_HYPN_64H_NV_126
+9A_126_E3_HYPN_INST_DRK.TECH.HOUS.DRV
 ```
 
-Legacy pipe-separated tags are still parsed, but new writes use the underscore format.
+`CATEGORY` is the compact no-space DJ taxonomy category label code: each label
+word becomes 3-4 uppercase characters separated by dots. Legacy tags with
+structure and legacy pipe-separated tags are still parsed, but new writes omit
+structure.
 
 ## Cache Architecture
 

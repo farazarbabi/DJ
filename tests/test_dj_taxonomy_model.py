@@ -16,7 +16,7 @@ from dj_registry.taxonomy.dj_model import (
     load_dj_taxonomy_model,
     train_dj_taxonomy_models,
 )
-from dj_registry.taxonomy.dj_schema import load_dj_taxonomy
+from dj_registry.taxonomy.dj_schema import compact_category_label, load_dj_taxonomy
 from dj_registry.taxonomy.features import build_track_features
 
 
@@ -27,6 +27,12 @@ def test_dj_taxonomy_schema_loads_flat_categories():
     assert taxonomy.category("dark_tech_house_driver").label == "Dark Tech-House Driver"
     assert taxonomy.category("dark_tech_house_driver").moods
     assert taxonomy.category("dark_tech_house_driver").grooves
+
+
+def test_compact_category_label_uses_dot_separated_word_codes():
+    assert compact_category_label("Dark Tech-House Driver") == "DRK.TECH.HOUS.DRV"
+    assert compact_category_label("Organic Chant House") == "ORG.CHNT.HOUS"
+    assert compact_category_label("Lo-Fi Deep House") == "LOFI.DEEP.HOUS"
 
 
 def test_internal_feature_mode_excludes_provider_evidence():
@@ -86,6 +92,18 @@ def test_train_evaluate_and_classify_both_dj_taxonomy_models(tmp_path):
     assert tracks["T1"].dj_taxonomy_confidence > 0
     assert tracks["T1"].dj_taxonomy_source_model == "external"
     assert json.loads(tracks["T1"].dj_taxonomy_evidence)["internal"]
+
+
+def test_classify_can_use_internal_model_as_primary(tmp_path):
+    store = _sample_store(tmp_path)
+    labels_path = _write_dj_labels(tmp_path)
+
+    train_dj_taxonomy_models(store, str(labels_path), model_dir=str(tmp_path / "dj_model"))
+    classify_all_dj_taxonomies(store, model_dir=str(tmp_path / "dj_model"), primary_model="internal")
+
+    tracks = {track.track_id: track for track in store.load_tracks()}
+    assert tracks["T1"].dj_taxonomy_source_model == "internal"
+    assert tracks["T1"].dj_taxonomy_id == tracks["T1"].dj_taxonomy_internal_id
 
 
 def test_dj_taxonomy_overview_exports_dual_model_columns(tmp_path):

@@ -365,8 +365,11 @@ def classify_all_dj_taxonomies(
     *,
     taxonomy_path: str | None = None,
     model_dir: str | None = None,
+    primary_model: str = "external",
     show_progress: bool = False,
 ) -> int:
+    if primary_model not in VALID_FEATURE_MODES:
+        raise ValueError(f"Invalid primary DJ taxonomy model: {primary_model}")
     taxonomy = load_dj_taxonomy(taxonomy_path)
     base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
     internal_model = load_dj_taxonomy_model_if_available(base_dir / "internal", taxonomy_path=taxonomy_path)
@@ -401,6 +404,7 @@ def classify_all_dj_taxonomies(
             internal_prediction,
             external_prediction,
             has_external_evidence=external_evidence_available(track_obs),
+            primary_model=primary_model,
         )
         progress.update(index, track.title_canonical, category=track.dj_taxonomy_id)
     progress.finish()
@@ -415,9 +419,14 @@ def _apply_predictions_to_track(
     external_prediction: DjCategoryPrediction,
     *,
     has_external_evidence: bool,
+    primary_model: str = "external",
 ) -> None:
-    primary = external_prediction if external_prediction.category_id else internal_prediction
-    source_model = "external" if external_prediction.category_id else "internal"
+    if primary_model == "internal":
+        primary = internal_prediction if internal_prediction.category_id else external_prediction
+        source_model = "internal" if internal_prediction.category_id else "external"
+    else:
+        primary = external_prediction if external_prediction.category_id else internal_prediction
+        source_model = "external" if external_prediction.category_id else "internal"
     if primary.category_id:
         category = taxonomy.category(primary.category_id)
         track.dj_taxonomy_id = category.id

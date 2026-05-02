@@ -40,6 +40,21 @@ def _enrich_observations(store: CsvStore) -> None:
         store.save_observations(obs)
 
 
+def _classify_dj_taxonomy_for_tags(store: CsvStore, *, show_progress: bool = False) -> int:
+    """Populate DJ category fields before COMMENT tag sync when models exist."""
+    try:
+        from ..taxonomy.dj_model import classify_all_dj_taxonomies
+
+        return classify_all_dj_taxonomies(
+            store,
+            primary_model="internal",
+            show_progress=show_progress,
+        )
+    except FileNotFoundError as exc:
+        logger.info("DJ taxonomy: skipped (%s)", exc)
+        return 0
+
+
 def run_full_pipeline(
     config: RegistryConfig,
     *,
@@ -117,6 +132,7 @@ def run_full_pipeline(
     summary["bpm_resolved"] = bpm_resolved
     summary["bpm_missing"] = bpm_missing
     summary["review_items"] = build_review_queue(config, store, show_progress=show_progress)
+    summary["dj_taxonomy_classified"] = _classify_dj_taxonomy_for_tags(store, show_progress=show_progress)
 
     if write_tags and not dry_run:
         written, _, errors = sync_tags(store, dry_run=False, show_progress=show_progress)

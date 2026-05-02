@@ -309,9 +309,11 @@ The current supervised baseline uses `DictVectorizer` plus balanced
 F1, confidence buckets, per-category accuracy, model agreement, and external
 improved/worsened counts.
 
-Classification always runs both available models. It writes the primary
-`dj_taxonomy_*` metadata plus internal/external prediction columns so confidence
-and accuracy can be compared per track.
+Classification always runs both available models. Standalone
+`dj-registry dj-taxonomy classify` keeps the external model as the default primary
+when available, while the tag-writing workflow uses the internal model as primary.
+Both paths write the primary `dj_taxonomy_*` metadata plus internal/external
+prediction columns so confidence and accuracy can be compared per track.
 
 ### Ground-Truth Labels
 
@@ -385,9 +387,10 @@ Disable progress bars with `--no-progress`.
 4. enrich ISRCs and ingest Songstats
 5. run local analysis
 6. resolve canonical key and BPM
-7. sync tags
-8. export registry reports
-9. run grouping unless skipped
+7. classify the flat DJ taxonomy with the internal model as the primary category
+8. sync tags
+9. export registry reports
+10. run grouping unless skipped
 
 The unified CLI passes progress settings into registry batch steps. `dj-grouper`
 and `dj-tagger` also have their own existing progress output for analysis and
@@ -436,8 +439,14 @@ The registry sync path builds the COMMENT tag from:
 - canonical BPM when available, otherwise tagger BPM
 - tagger energy
 - tagger mood/vibe
-- tagger structure
 - tagger vocal
+- compact category code from the internal DJ taxonomy category label
+
+The current COMMENT shape is `KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]`.
+`CATEGORY` is the no-space code from the category label. Each label word becomes
+3-4 uppercase characters separated by dots, for example
+`Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`. Legacy tags with structure are
+still parsed.
 
 It also writes canonical key to the dedicated key field for supported formats.
 
