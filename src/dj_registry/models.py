@@ -203,6 +203,9 @@ class SourceObservation:
     valence: str = ""
     time_signature: str = ""
 
+    # Spotify popularity (0-100, recency-weighted by Spotify)
+    popularity: str = ""
+
     # Tagger analysis features
     tagger_energy: str = ""
     tagger_vibe: str = ""

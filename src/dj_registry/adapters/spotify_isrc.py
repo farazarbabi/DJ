@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 SEARCH_URL = "https://api.spotify.com/v1/search"
+TRACK_URL = "https://api.spotify.com/v1/tracks"
 
 
 class SpotifyClient:
@@ -156,6 +157,62 @@ class SpotifyClient:
             "artists": ", ".join(a.get("name", "") for a in best.get("artists", [])),
             "duration_sec": best.get("duration_ms", 0) / 1000.0,
         }
+
+    def get_track(self, spotify_id: str) -> dict | None:
+        """Fetch a track by Spotify ID. Returns the raw track object or None."""
+        if not spotify_id:
+            return None
+        self._authenticate()
+        url = f"{TRACK_URL}/{spotify_id}"
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {self._token}"},
+                )
+                if resp.status_code == 429:
+                    retry = int(resp.headers.get("Retry-After", "5"))
+                    logger.warning("Spotify rate limited, waiting %ds", retry)
+                    time.sleep(retry)
+                    resp = client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self._token}"},
+                    )
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                return resp.json()
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.debug("Spotify get_track failed for %s: %s", spotify_id, e)
+            return None
+
+    def find_id_by_isrc(self, isrc: str) -> str:
+        """Search for a Spotify track by ISRC. Returns spotify_id or ''."""
+        if not isrc:
+            return ""
+        self._authenticate()
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.get(
+                    SEARCH_URL,
+                    headers={"Authorization": f"Bearer {self._token}"},
+                    params={"q": f"isrc:{isrc}", "type": "track", "limit": 1},
+                )
+                if resp.status_code == 429:
+                    retry = int(resp.headers.get("Retry-After", "5"))
+                    logger.warning("Spotify rate limited, waiting %ds", retry)
+                    time.sleep(retry)
+                    resp = client.get(
+                        SEARCH_URL,
+                        headers={"Authorization": f"Bearer {self._token}"},
+                        params={"q": f"isrc:{isrc}", "type": "track", "limit": 1},
+                    )
+                resp.raise_for_status()
+                items = resp.json().get("tracks", {}).get("items", [])
+                return items[0].get("id", "") if items else ""
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.debug("Spotify ISRC search failed for %s: %s", isrc, e)
+            return ""
 
 
 TAGGER_CACHE_PATH = os.path.join("cache", "tagger_cache.pkl")

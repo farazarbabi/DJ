@@ -24,6 +24,7 @@ _OBSERVATION_LAYERS = frozenset({
     "rekordbox",
     "analysis_librosa",
     "analysis_essentia",
+    "spotify",
 })
 
 

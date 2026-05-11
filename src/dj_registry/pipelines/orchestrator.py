@@ -10,6 +10,7 @@ from ..adapters.local_analysis import run_analysis
 from ..adapters.rekordbox_xml import ingest_rekordbox
 from ..adapters.songstats import ingest_songstats
 from ..adapters.spotify_isrc import enrich_isrcs
+from ..adapters.spotify_popularity import ingest_spotify_popularity
 from ..config import RegistryConfig
 from ..identity.matcher import link_files_to_tracks
 from ..resolver.bpm_resolver import resolve_all_bpms
@@ -128,9 +129,15 @@ def run_full_pipeline(
         )
         summary["songstats_fetched"] = ss_stats["total"]
         summary["songstats_cached"] = ss_stats["cached"]
+        pop_stats = ingest_spotify_popularity(
+            store, obs_cache=obs_cache, show_progress=show_progress
+        )
+        summary["spotify_popularity_fetched"] = pop_stats["fetched"]
+        summary["spotify_popularity_cached"] = pop_stats["cached"]
     else:
         summary["isrcs_enriched"] = 0
         summary["songstats_fetched"] = 0
+        summary["spotify_popularity_fetched"] = 0
 
     # Flush Songstats (and any other ISRC-keyed data) to the universal cache
     # before analysis so the tagger can look up audio features during vibe scoring.
