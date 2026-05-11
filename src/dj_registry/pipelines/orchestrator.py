@@ -45,14 +45,32 @@ def _classify_dj_taxonomy_for_tags(store: CsvStore, *, show_progress: bool = Fal
     try:
         from ..taxonomy.dj_model import classify_all_dj_taxonomies
 
+        model_dir = _dj_taxonomy_model_dir_for_tags(store)
+        if not model_dir:
+            logger.info("DJ taxonomy: skipped (no model found)")
+            return 0
         return classify_all_dj_taxonomies(
             store,
+            model_dir=model_dir,
             primary_model="internal",
             show_progress=show_progress,
         )
     except FileNotFoundError as exc:
         logger.info("DJ taxonomy: skipped (%s)", exc)
         return 0
+
+
+def _dj_taxonomy_model_dir_for_tags(store: CsvStore) -> str | None:
+    """Prefer the active registry model, then the project-level trained model."""
+    from pathlib import Path
+
+    active = Path(store.output_dir) / "dj_taxonomy_model"
+    if (active / "internal").exists() or (active / "external").exists():
+        return str(active)
+    fallback = Path("outputs") / "registry" / "dj_taxonomy_model"
+    if (fallback / "internal").exists() or (fallback / "external").exists():
+        return str(fallback)
+    return None
 
 
 def run_full_pipeline(

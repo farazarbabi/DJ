@@ -29,7 +29,8 @@
       "Bash(PYTHONPATH=src python3:*)",
       "Bash(awk '{print $9, \"\\(\" $5 \"\\)\"}')",
       "Bash(awk '{print $9, $5}')",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "PowerShell(Import-Csv *)"
     ]
   }
 }

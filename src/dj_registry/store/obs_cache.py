@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 # Legacy path — kept for backward-compatible loading. New data goes to raw cache.
 CACHE_PATH = os.path.join("cache", "registry_cache.pkl")
 _CACHE_VERSION = "2"
+_OBSERVATION_LAYERS = frozenset({
+    "tag",
+    "songstats",
+    "rekordbox",
+    "analysis_librosa",
+    "analysis_essentia",
+})
 
 
 def _make_key(filename: str, duration: float | None, source: str) -> str:
@@ -63,13 +70,13 @@ class ObsCache:
         if ucache is None:
             return
         for key, entry in ucache._entries.items():
-            if ("|" in key and not key.endswith("|tagger") and
-                not key.endswith("|dsp") and not key.endswith("|section_dsp") and
-                not key.endswith("|clap") and not key.endswith("|raw_analysis")):
-                parts = key.split("|")
-                if len(parts) >= 3 or key.startswith("isrc:"):
-                    if isinstance(entry.data, dict):
-                        self._entries[key] = entry.data
+            layer = ucache._layer_from_key(key)
+            if layer not in _OBSERVATION_LAYERS:
+                continue
+            parts = key.split("|")
+            if len(parts) >= 3 or key.startswith("isrc:"):
+                if isinstance(entry.data, dict):
+                    self._entries[key] = entry.data
         if self._entries:
             logger.debug("ObsCache loaded %d entries from cache", len(self._entries))
         ucache.save()

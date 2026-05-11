@@ -109,19 +109,57 @@ def _run_songstats(config, store, obs_cache, *, show_progress: bool = False) -> 
     return summary
 
 
+def _dj_taxonomy_model_dir_for_tags(store) -> str | None:
+    """Prefer the active registry model, then the project-level trained model."""
+    from pathlib import Path
+
+    active = Path(store.output_dir) / "dj_taxonomy_model"
+    if (active / "internal").exists() or (active / "external").exists():
+        return str(active)
+    fallback = Path("outputs") / "registry" / "dj_taxonomy_model"
+    if (fallback / "internal").exists() or (fallback / "external").exists():
+        return str(fallback)
+    return None
+
+
 def _run_dj_taxonomy_for_tags(store, *, show_progress: bool = False) -> int:
     """Populate internal DJ category fields before COMMENT tag sync when models exist."""
     try:
         from dj_registry.taxonomy.dj_model import classify_all_dj_taxonomies
 
+        model_dir = _dj_taxonomy_model_dir_for_tags(store)
+        if not model_dir:
+            logger.info("DJ taxonomy: skipped (no model found)")
+            return 0
         return classify_all_dj_taxonomies(
             store,
+            model_dir=model_dir,
             primary_model="internal",
             show_progress=show_progress,
         )
     except FileNotFoundError as exc:
         logger.info("DJ taxonomy: skipped (%s)", exc)
         return 0
+
+
+def _load_group_ids_by_file(groups_csv: str) -> dict[str, str]:
+    """Load filename -> group ID from the grouper output."""
+    from dj_registry.sync.tag_writer import load_group_ids_by_file
+
+    return load_group_ids_by_file(groups_csv)
+
+
+def _grouper_groups_csv_path(paths: list[str]) -> str:
+    """Return the groups.csv path that dj-grouper will write for these paths."""
+    from pathlib import Path
+
+    input_path = Path(paths[0] if paths else "./files").resolve()
+    project_dir = Path.cwd().resolve()
+    try:
+        input_path.relative_to(project_dir)
+        return str(Path("outputs") / "groups.csv")
+    except ValueError:
+        return str(input_path / "outputs" / "groups.csv")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -512,9 +550,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 
     # Phase 6: Write tags
     t0 = time.perf_counter()
-    if not args.no_tags:
+    if not args.no_tags and args.no_grouping:
         sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False), show_progress=show_progress)
         logger.info("Pipeline: tags written in %s\n", _fmt_elapsed(time.perf_counter() - t0))
+    elif not args.no_tags:
+        logger.info("Tags: delayed until after grouping so group IDs can be included\n")
     else:
         logger.info("Tags: skipped (--no-tags)\n")
 
@@ -528,7 +568,9 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         try:
             from dj_grouper.cli import main as grouper_main
             grouper_argv = list(args.paths)
+            groups_csv = _grouper_groups_csv_path(args.paths)
             grouper_argv.extend(["--registry-dir", config.output_dir])
+            grouper_argv.extend(["--csv", groups_csv])
             if args.no_clap:
                 grouper_argv.append("--no-clap")
             if args.force_extract:
@@ -537,6 +579,17 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 grouper_argv.extend(["-w", str(args.workers)])
             grouper_main(grouper_argv)
             logger.info("Pipeline: grouping done in %s", _fmt_elapsed(time.perf_counter() - t0))
+            if not args.no_tags:
+                tag_t0 = time.perf_counter()
+                group_ids = _load_group_ids_by_file(groups_csv)
+                sync_tags(
+                    store,
+                    dry_run=False,
+                    write_key_tag=getattr(args, "write_key_tag", False),
+                    group_ids_by_file=group_ids,
+                    show_progress=show_progress,
+                )
+                logger.info("Pipeline: final tags written in %s", _fmt_elapsed(time.perf_counter() - tag_t0))
         except Exception:
             logger.error("Grouping failed", exc_info=True)
     else:

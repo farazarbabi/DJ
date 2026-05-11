@@ -10,6 +10,7 @@ import time
 import httpx
 
 from dj_tagger.cache import load_cache, save_cache, cache_key
+from dj_tagger.universal_cache import get_cache
 
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
@@ -186,10 +187,12 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
 
     # Load shared tagger cache
     tagger_cache = load_cache(TAGGER_CACHE_PATH)
+    raw_cache = get_cache(os.path.join("cache", "raw_cache.pkl"))
 
     # Check cache first — skip tracks whose file already has an ISRC cached
     candidates = []
     cache_hits = 0
+    cached_not_found = 0
     for t in tracks:
         if t.isrc_canonical:
             continue
@@ -199,6 +202,14 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
         if frec:
             # Check cache with duration-aware key
             dur = frec.audio_duration_sec if frec.audio_duration_sec > 0 else None
+            spotify_cached = raw_cache.get_track(frec.path_abs, dur, "spotify")
+            if isinstance(spotify_cached, dict):
+                if spotify_cached.get("isrc"):
+                    t.isrc_canonical = spotify_cached["isrc"]
+                    cache_hits += 1
+                else:
+                    cached_not_found += 1
+                continue
             ck = cache_key(frec.path_abs, dur)
             entry = tagger_cache.get(ck)
             if not entry:
@@ -217,10 +228,20 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
     if not candidates:
         if cache_hits:
             store.save_tracks(tracks)
-            logger.info("ISRCs: %d from cache, 0 to fetch", cache_hits)
+        if cache_hits or cached_not_found:
+            logger.info(
+                "ISRCs: %d from cache, %d cached not found, 0 to fetch",
+                cache_hits,
+                cached_not_found,
+            )
         return cache_hits
 
-    logger.info("ISRCs: %d cached, %d to fetch from Spotify", cache_hits, len(candidates))
+    logger.info(
+        "ISRCs: %d cached, %d cached not found, %d to fetch from Spotify",
+        cache_hits,
+        cached_not_found,
+        len(candidates),
+    )
 
     enriched = 0
     cache_dirty = False
@@ -229,6 +250,13 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
         frec = file_by_track.get(t.track_id)
         dur = frec.audio_duration_sec if frec and frec.audio_duration_sec > 0 else 0.0
         result = client.search_track(t.artist_canonical, t.title_canonical, duration_sec=dur)
+        if frec:
+            raw_cache.put_track(
+                frec.path_abs,
+                dur if dur > 0 else None,
+                "spotify",
+                result or {"isrc": "", "status": "not_found"},
+            )
         if result and result["isrc"]:
             t.isrc_canonical = result["isrc"]
             enriched += 1
@@ -245,16 +273,17 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
         else:
             logger.debug("  No ISRC found for %s - %s", t.artist_canonical, t.title_canonical)
 
-        progress.update(index, t.title_canonical, cached=cache_hits, enriched=enriched)
+        progress.update(index, t.title_canonical, cached=cache_hits, skipped=cached_not_found, enriched=enriched)
         time.sleep(0.1)
 
     progress.finish()
     store.save_tracks(tracks)
     if cache_dirty:
         save_cache(tagger_cache, TAGGER_CACHE_PATH)
+    raw_cache.save()
 
     total = cache_hits + enriched
-    not_found = len(candidates) - enriched
+    not_found = cached_not_found + len(candidates) - enriched
     if not_found:
         logger.info("ISRCs: %d found (%d cached + %d Spotify), %d not found", total, cache_hits, enriched, not_found)
     else:
