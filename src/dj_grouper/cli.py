@@ -198,8 +198,8 @@ def _extract_dsp_worker(track_path: str) -> dict:
     }
 
 
-def _compatible_cached_raw_layer(ucache, filename: str, duration: float | None, layer: str):
-    """Return a compatible raw layer, restamping older cache entries when safe."""
+def _cached_raw_layer(ucache, filename: str, duration: float | None, layer: str):
+    """Return an identity-keyed raw layer, ignoring version metadata."""
     data = ucache.get_track(filename, duration, layer)
     if data is not None:
         return data
@@ -209,7 +209,7 @@ def _compatible_cached_raw_layer(ucache, filename: str, duration: float | None, 
         return None
 
     ucache.put_track(filename, duration, layer, data)
-    logger.info("Reused compatible cached %s layer for %s", layer, filename)
+    logger.info("Reused cached %s layer for %s", layer, filename)
     return data
 
 
@@ -277,7 +277,6 @@ def _run_extraction(
     from dj_tagger.universal_cache import get_cache as get_universal_cache, quick_duration
     from dj_tagger.tagger_cache import (
         hydrate_tagger_result,
-        key_signature_matches,
         merge_rederived_tagger,
         tagger_core_metadata_matches,
         tagger_metadata_matches,
@@ -316,12 +315,16 @@ def _run_extraction(
             to_extract.append((i, t, mtime, needs_analysis, None))
             continue
 
-        # Check raw layers in universal cache (auto-invalidated when extractor logic changes)
-        dsp_data = _compatible_cached_raw_layer(ucache, filename, dur, "dsp")
-        section_dsp_data = _compatible_cached_raw_layer(ucache, filename, dur, "section_dsp")
+        # Check raw layers in universal cache. Raw/data collection is
+        # identity-keyed; downstream signatures do not force recollection.
+        dsp_data = _cached_raw_layer(ucache, filename, dur, "dsp")
+        section_dsp_data = _cached_raw_layer(ucache, filename, dur, "section_dsp")
         raw_analysis = ucache.get_track(filename, dur, "raw_analysis")
+        tagger_key = ucache.track_key(filename, dur, "tagger")
+        any_tagger_entry = ucache._entries.get(tagger_key)
+        collected_tagger = any_tagger_entry.data if any_tagger_entry and isinstance(any_tagger_entry.data, dict) else None
 
-        # Check derived layer (versioned — returns None if stale)
+        # Check derived layer (versioned; returns None if stale)
         tagger_data = ucache.get_track(filename, dur, "tagger")
         usable_tagger = None
         if isinstance(tagger_data, dict):
@@ -332,16 +335,23 @@ def _run_extraction(
                 # from registry/tagger instead of downgrading it to DSP-only derivation.
                 usable_tagger = tagger_data
 
-        # Auto-recompute: if raw is cached but derived is stale, re-derive
+        # Auto-recompute: if raw is cached but derived is stale, re-derive.
+        # Raw collection layers are identity-keyed; downstream signature changes
+        # must not force audio extraction when these payloads exist.
         if dsp_data and isinstance(dsp_data, dict) and raw_analysis and isinstance(raw_analysis, dict):
-            if usable_tagger is None and key_signature_matches(tagger_data if isinstance(tagger_data, dict) else None):
-                # Raw available, derived stale → re-derive without loading audio.
+            if usable_tagger is None:
+                # Raw available, derived stale: re-derive without loading audio.
                 # Grouper has no Songstats features, so this path is DSP-only on purpose.
                 from dj_tagger.derive import derive_all
-                tagger_data = merge_rederived_tagger(tagger_data, derive_all(dsp_data, raw_analysis))
+                tagger_data = merge_rederived_tagger(collected_tagger, derive_all(dsp_data, raw_analysis))
                 ucache.put_track(filename, dur, "tagger", tagger_data, mtime=mtime)
                 logger.info("Auto-recomputed derived analysis for %s from cached raw", filename)
                 usable_tagger = tagger_data
+
+        if usable_tagger is None and isinstance(collected_tagger, dict):
+            # Fall back to collected tagger facts even if derived metadata is
+            # stale; do not re-extract audio solely because signatures changed.
+            usable_tagger = collected_tagger
 
         if usable_tagger is not None:
             _apply_tagger_result(t, usable_tagger, analyze_untagged)
@@ -399,7 +409,7 @@ def _run_extraction(
         raw_cache[t.path] = RawCacheEntry(
             mtime=mtime, info=t, dsp=result["dsp"], section_dsp=result["section_dsp"],
         )
-        # Store in cache: raw layers (permanent) + derived layer (versioned)
+        # Store in cache: raw layers (identity-keyed) + derived layer (versioned)
         filename = Path(t.path).name
         dur = _durations.get(t.path)
         ucache.put_track(filename, dur, "dsp", result["dsp"], mtime=mtime)

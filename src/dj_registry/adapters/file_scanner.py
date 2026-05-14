@@ -138,12 +138,16 @@ def scan_files(
                 new_obs.append(SourceObservation(
                     observation_id=f"OBS-tag-{existing.file_id}",
                     file_id=existing.file_id,
+                    artist=existing.embedded_artist,
+                    title=existing.embedded_title,
                     source_system="tag",
+                    source_object_id=existing.embedded_isrc,
                     key_standard=existing.embedded_key_standard,
                     key_camelot=existing.embedded_key_camelot,
                     key_confidence=1.0 if existing.embedded_key_camelot else 0.0,
                     bpm=existing.embedded_bpm,
                     genre=existing.embedded_genre,
+                    comments=existing.embedded_comment,
                     observed_at=existing.last_scanned_at,
                 ))
             skipped += 1
@@ -157,7 +161,8 @@ def scan_files(
 
         file_id = existing.file_id if existing else f"F{len(existing_files) + len(new_files) + 1:05d}"
 
-        tags = extract_tags(path_abs)
+        cached_tag = obs_cache.get_by_file(path_abs, audio["duration"], "tag") if obs_cache else None
+        tags = _tags_from_cached_observation(cached_tag, existing) if cached_tag else extract_tags(path_abs)
 
         rec = FileRecord(
             file_id=file_id,
@@ -197,7 +202,6 @@ def scan_files(
 
         # Create tag observation — check cache first
         duration = audio["duration"]
-        cached_tag = obs_cache.get_by_file(path_abs, duration, "tag") if obs_cache else None
         if cached_tag:
             cached_tag.observation_id = f"OBS-tag-{file_id}"
             cached_tag.file_id = file_id
@@ -206,12 +210,16 @@ def scan_files(
             obs = SourceObservation(
                 observation_id=f"OBS-tag-{file_id}",
                 file_id=file_id,
+                artist=tags["artist"],
+                title=tags["title"],
                 source_system="tag",
+                source_object_id=tags["isrc"],
                 key_standard=tags["key_standard"],
                 key_camelot=tags["key_camelot"],
                 key_confidence=1.0 if tags["key_camelot"] else 0.0,
                 bpm=tags["bpm"],
                 genre=tags.get("genre", ""),
+                comments=tags["comment"],
                 observed_at=now_iso(),
             )
             new_obs.append(obs)
@@ -251,3 +259,19 @@ def scan_files(
 
     logger.info("Scan: %d files (%d new, %d updated, %d unchanged)", len(all_files), len(new_files), updated, skipped)
     return all_files
+
+
+def _tags_from_cached_observation(obs: SourceObservation, existing: FileRecord | None) -> dict[str, str]:
+    """Rebuild a tag snapshot from cached raw tag data."""
+    return {
+        "title": obs.title or (existing.embedded_title if existing else ""),
+        "artist": obs.artist or (existing.embedded_artist if existing else ""),
+        "album": existing.embedded_album if existing else "",
+        "genre": obs.genre or (existing.embedded_genre if existing else ""),
+        "bpm": obs.bpm or (existing.embedded_bpm if existing else ""),
+        "key_raw": existing.embedded_key_camelot if existing else "",
+        "key_standard": obs.key_standard or (existing.embedded_key_standard if existing else ""),
+        "key_camelot": obs.key_camelot or (existing.embedded_key_camelot if existing else ""),
+        "comment": obs.comments or (existing.embedded_comment if existing else ""),
+        "isrc": obs.source_object_id or (existing.embedded_isrc if existing else ""),
+    }

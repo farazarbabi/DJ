@@ -1,7 +1,7 @@
 """Recompute derived analysis values from cached raw features.
 
-All parameters are read from settings.toml. Change any value there and
-the derived cache auto-invalidates on next run — no manual version bumping.
+All parameters are read from settings.toml. Change any value there and derived
+tagger entries refresh from cached raw data on the next run.
 
 Raw inputs:
   - dsp: dict with ~45 DSP features (from grouper extraction)

@@ -15,6 +15,7 @@ from ..models import SourceObservation, PayloadIndexEntry, now_iso
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from ..store.obs_cache import ObsCache
+from dj_tagger.universal_cache import get_cache
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,10 @@ def ingest_songstats(
     new_obs: list[SourceObservation] = []
     new_payloads: list[PayloadIndexEntry] = []
     success_count = 0
+    lookup_cache = get_cache(os.path.join("cache", "raw_cache.pkl"))
 
     cache_hits = 0
+    cached_not_found = 0
     progress = ProgressBar(len(candidates), label="Songstats", enabled=show_progress)
     for index, track in enumerate(candidates, start=1):
         isrc = track.isrc_canonical
@@ -146,8 +149,25 @@ def ingest_songstats(
                 new_obs.append(cached)
                 cache_hits += 1
                 success_count += 1
-                progress.update(index, track.title_canonical or isrc, cached=cache_hits, fetched=success_count - cache_hits)
+                progress.update(
+                    index,
+                    track.title_canonical or isrc,
+                    cached=cache_hits,
+                    skipped=cached_not_found,
+                    fetched=success_count - cache_hits,
+                )
                 continue
+        lookup_state = lookup_cache.get_isrc(isrc, "songstats_lookup")
+        if isinstance(lookup_state, dict) and lookup_state.get("status") == "not_found":
+            cached_not_found += 1
+            progress.update(
+                index,
+                track.title_canonical or isrc,
+                cached=cache_hits,
+                skipped=cached_not_found,
+                fetched=success_count - cache_hits,
+            )
+            continue
 
         payload_path = os.path.join(raw_dir, f"{isrc}.json")
 
@@ -164,8 +184,16 @@ def ingest_songstats(
         if result is None:
             result = client.fetch_track_by_isrc(isrc)
             if result is None:
-                progress.update(index, track.title_canonical or isrc, cached=cache_hits, fetched=success_count - cache_hits)
+                lookup_cache.put_isrc(isrc, "songstats_lookup", {"status": "not_found"})
+                progress.update(
+                    index,
+                    track.title_canonical or isrc,
+                    cached=cache_hits,
+                    skipped=cached_not_found,
+                    fetched=success_count - cache_hits,
+                )
                 continue
+            lookup_cache.put_isrc(isrc, "songstats_lookup", {"status": "found"})
             with open(payload_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2)
 
@@ -277,7 +305,13 @@ def ingest_songstats(
             store.save_payload_index(all_payloads)
             new_payloads = []
             logger.debug("Songstats: %d/%d", success_count, len(candidates))
-        progress.update(index, track.title_canonical or isrc, cached=cache_hits, fetched=success_count - cache_hits)
+        progress.update(
+            index,
+            track.title_canonical or isrc,
+            cached=cache_hits,
+            skipped=cached_not_found,
+            fetched=success_count - cache_hits,
+        )
 
     progress.finish()
     # Final save
@@ -292,8 +326,15 @@ def ingest_songstats(
     stats["total"] = success_count
     stats["cached"] = cache_hits
     stats["fetched"] = fetched
-    if cache_hits:
-        logger.info("Songstats: %d tracks (%d cached, %d fetched)", success_count, cache_hits, fetched)
+    if cache_hits or cached_not_found:
+        logger.info(
+            "Songstats: %d tracks (%d cached, %d cached not found, %d fetched)",
+            success_count,
+            cache_hits,
+            cached_not_found,
+            fetched,
+        )
     else:
         logger.info("Songstats: %d tracks fetched", success_count)
+    lookup_cache.save()
     return stats

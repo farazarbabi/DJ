@@ -187,10 +187,11 @@ For each track it:
 
 1. looks for a current hydrated tagger cache record
 2. re-derives from cached raw layers when possible
-3. otherwise runs fresh canonical analysis
-4. writes raw layers and hydrated tagger output back to shared cache
-5. writes `tagger_*` fields onto `LogicalTrack`
-6. emits `analysis_librosa` observations
+3. reuses raw-layer payloads by filename + duration identity even when signatures changed
+4. otherwise runs fresh canonical analysis
+5. writes raw layers and hydrated tagger output back to shared cache
+6. writes `tagger_*` fields onto `LogicalTrack`
+7. emits `analysis_librosa` observations
 
 ## Current Cache Interaction
 
@@ -205,6 +206,8 @@ Relevant raw layers:
 - `raw_analysis`
 - `section_dsp`
 - `songstats`
+- `songstats_lookup`
+- `spotify`
 - `rekordbox`
 - `tag`
 
@@ -212,17 +215,18 @@ Relevant derived layer:
 
 - `tagger`
 
-The registry trusts a cached tagger result only when:
+The registry trusts a cached derived tagger result only when:
 
 - tagger version matches
-- raw/DSP signatures match for the layers being reused
 - derived signature matches
-- key signature matches
 - Songstats audio-feature signature matches the current inputs
 
-Whole-track DSP, section-DSP, and raw-analysis cache entries have independent
-layer signatures. A tag/category/grouping change must not force DSP
-re-extraction when the cached DSP payload is compatible.
+Raw/data-collection cache entries are different: they are identity-only. Track
+data uses full filename + rounded duration + layer; API data uses ISRC + layer.
+If that entry exists, downstream tag/category/grouping/signature changes do not
+recollect DSP, raw analysis, embedded tags, Spotify/Songstats lookups, or local
+librosa/Essentia observations. Fresh collection happens only for missing
+identities or explicit force/clear workflows.
 
 ## Resolution
 

@@ -76,6 +76,8 @@ _ALIASES: dict[str, str] = {
     "SPEECH": "SPK",
     "SPOKEN": "SPK",
     "SPOKEN_WORD": "SPK",
+    "NV": "INST",
+    "V": "VOC",
     "VOICE": "VOC",
     "VOCAL": "VOC",
 }

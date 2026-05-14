@@ -78,7 +78,7 @@ Relevant raw layers:
 - `section_dsp`
 - `raw_analysis`
 - `clap`
-- source payload layers such as `tag`, `songstats`, `rekordbox`
+- source payload layers such as `tag`, `songstats`, `songstats_lookup`, `spotify`, `rekordbox`
 
 Relevant derived layer:
 
@@ -86,14 +86,16 @@ Relevant derived layer:
 
 Important current behavior:
 
-- raw layers `dsp`, `section_dsp`, and `raw_analysis` are versioned independently
-- cached `dsp` is reused across downstream tag/category/grouping changes
+- raw/data-collection layers are identity-keyed only
+- track-scoped raw keys use full filename + rounded duration + layer
+- API raw keys use ISRC + layer
+- cached raw layers are reused across downstream tag/category/grouping/signature changes
 - tagger results are hydrated with provenance metadata
 - registry and grouper reuse the same canonical tagger/raw cache
 - grouper preserves richer Songstats-aware tagger entries instead of downgrading them
-- grouper uses a lightweight DSP-only path when tagger analysis is already cached
+- grouper uses a lightweight DSP-only path only when tagger analysis is cached but DSP is missing
 
-## Automatic Cache Invalidation
+## Signatures and Derived Refresh
 
 Do not rely on manual version bumps.
 
@@ -117,8 +119,8 @@ These signatures hash both:
   - `_DERIVED_VERSION_FILES`
   - `_KEY_VERSION_FILES`
 
-`_RAW_VERSION_FILES` remains as the aggregate tagger raw signature input. Prefer
-the per-layer lists when adding new extractor files.
+`_RAW_VERSION_FILES` remains as aggregate tagger provenance metadata. Raw/data
+collection cache hits do not depend on these signatures.
 
 Hydrated tagger records carry:
 
@@ -128,7 +130,9 @@ Hydrated tagger records carry:
 - `_tagger_key_sig`
 - `_tagger_audio_features_sig`
 
-If you add a brand-new Python file that affects tagger computation, add it to the appropriate signature list. Otherwise changing that file later will not invalidate cache.
+If you add a brand-new Python file that affects tagger computation, add it to
+the appropriate signature list. Otherwise changing that file later may not
+refresh derived tagger metadata.
 
 ## Safe Tuning Workflow
 
@@ -148,8 +152,9 @@ Then inspect:
 Expected behavior:
 
 - settings or derived scorer changes re-derive from raw cache
-- raw extraction changes invalidate only the affected raw feature layer automatically
-- DSP is not re-extracted for tag formatting, category label, grouping, or derived-scorer changes
+- raw/data-collection entries are reused by filename + duration or ISRC identity
+- DSP/raw layers are restamped or used to re-derive tagger data without recollection
+- DSP is not re-extracted for tag formatting, category label, grouping, derived-scorer, or signature changes
 - Songstats input changes refresh affected tagger entries automatically
 
 Manual cache clearing is now mainly for debugging:
@@ -219,7 +224,7 @@ Do not add instructions that tell contributors to bump a manual cache version.
 
 ## Testing Notes
 
-- current suite size: `309` tests
+- current suite size: `321` tests
 - tests use synthetic audio fixtures
 - registry, tagger, grouper, and cache behaviors all have direct coverage
 

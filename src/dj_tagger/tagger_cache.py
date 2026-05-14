@@ -42,21 +42,20 @@ def merge_rederived_tagger(existing: dict | None, derived: dict, audio_features:
 
 
 def key_signature_matches(result: dict | None) -> bool:
-    return bool(result) and result.get("_tagger_key_sig") == key_version()
+    """Return whether a cached tagger record contains collected key data.
+
+    Key/librosa analysis is a data-collection result. Its stored signature is
+    audit metadata only and must not force audio re-analysis when the filename
+    + duration cache identity is present.
+    """
+    return bool(result) and bool(result.get("camelot") or result.get("key"))
 
 
 def tagger_core_metadata_matches(result: dict | None) -> bool:
-    """Check current raw/key/derived signatures, ignoring audio-feature context."""
+    """Check current derived signature, ignoring raw/key collection metadata."""
     if not result:
         return False
-    meta = current_tagger_metadata()
-    keys = (
-        "_tagger_version",
-        "_tagger_raw_sig",
-        "_tagger_derived_sig",
-        "_tagger_key_sig",
-    )
-    return all(result.get(k, "") == meta[k] for k in keys)
+    return result.get("_tagger_derived_sig") == derived_version()
 
 
 def derived_signature_matches(result: dict | None, audio_features: dict[str, float] | None = None) -> bool:
@@ -71,5 +70,4 @@ def derived_signature_matches(result: dict | None, audio_features: dict[str, flo
 def tagger_metadata_matches(result: dict | None, audio_features: dict[str, float] | None = None) -> bool:
     if not result:
         return False
-    meta = current_tagger_metadata(audio_features)
-    return all(result.get(k, "") == v for k, v in meta.items())
+    return derived_signature_matches(result, audio_features)

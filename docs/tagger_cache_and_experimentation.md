@@ -15,9 +15,9 @@ You should be able to:
 
 - change `settings.toml`
 - change derived scorer logic
-- change raw feature extraction logic
+- keep raw data collection stable unless you explicitly force recollection
 - rerun the pipeline
-- trust that the exported `tagger_*` values reflect the current code and settings
+- trust that exported derived `tagger_*` values reflect current derived code and settings
 
 That is the current design of the tagger cache system.
 
@@ -39,9 +39,11 @@ Relevant raw layers:
 - `section_dsp`
 
 These are reusable inputs for re-deriving tagger outputs without decoding audio again.
-`dsp` is the stable audio-extraction boundary. Tag formatting, category labels,
-grouping code, and derived scorer changes do not force DSP extraction when a
-compatible DSP payload is already cached.
+`dsp` is the stable audio-extraction boundary. Raw/data-collection entries are
+keyed by full filename + rounded duration + layer. API entries are keyed by ISRC
++ layer. Tag formatting, category labels, grouping code, derived scorer changes,
+and signature/provenance changes do not force DSP, librosa, tag, Spotify, or
+Songstats recollection when a matching identity is already cached.
 
 ### Derived Layer
 
@@ -51,7 +53,7 @@ Relevant derived layer:
 
 This holds the full hydrated tagger result used by registry and grouper.
 
-## What Invalidates Automatically
+## What Refreshes Automatically
 
 ### 1. `settings.toml` changes
 
@@ -77,15 +79,17 @@ Effect:
 
 ### 3. Raw feature extraction changes
 
-If you change code used to produce `dsp`, `raw_analysis`, or `section_dsp`, that layer's raw signature changes automatically.
+If you change code used to produce `dsp`, `raw_analysis`, or `section_dsp`, the
+raw provenance signature changes on newly hydrated tagger records.
 
-Current coverage is driven by `_DSP_VERSION_FILES`, `_SECTION_DSP_VERSION_FILES`, and `_RAW_ANALYSIS_VERSION_FILES` in `src/dj_tagger/settings.py`.
+Current coverage is driven by `_DSP_VERSION_FILES`, `_SECTION_DSP_VERSION_FILES`,
+and `_RAW_ANALYSIS_VERSION_FILES` in `src/dj_tagger/settings.py`.
 
 Effect:
 
-- affected versioned raw layers miss
-- fresh extraction runs only for the missing layer
-- derived tagger output is rebuilt from the new raw features
+- existing raw/data-collection entries remain cache hits by filename + duration
+- fresh extraction runs only for missing identities or explicit force/clear
+- derived tagger output is rebuilt or restamped from cached raw payloads
 
 ### 4. Key-analysis changes
 
@@ -95,7 +99,8 @@ Current coverage is driven by `_KEY_VERSION_FILES` in `src/dj_tagger/settings.py
 
 Effect:
 
-- cached tagger entries are not accepted as current until key is refreshed
+- derived tagger entries are refreshed when needed
+- collected key/librosa facts are not recollected solely because the signature changed
 
 ### 5. Songstats audio-feature changes
 
@@ -182,9 +187,9 @@ dj run --no-grouping --no-tags
 
 Expected behavior:
 
-- raw feature layers miss automatically
-- fresh extraction runs
-- derived tagger output rebuilt from fresh raw layers
+- existing raw feature layers remain cache hits by filename + duration
+- fresh extraction runs only for missing identities or when you force/clear cache
+- derived tagger output rebuilt/restamped from cached raw layers
 
 ### D. Grouping-only experiments
 
@@ -222,7 +227,9 @@ Useful signals from `dj vibe-audit`:
 
 ### New Python files that affect tagger computation
 
-If you create a brand-new module and the tagger starts depending on it, you must add that file to one of the signature lists in `src/dj_tagger/settings.py`:
+If you create a brand-new module and the tagger starts depending on it, add that
+file to one of the signature lists in `src/dj_tagger/settings.py` so derived
+outputs and provenance metadata can refresh correctly:
 
 - `_DSP_VERSION_FILES`
 - `_SECTION_DSP_VERSION_FILES`
@@ -230,8 +237,8 @@ If you create a brand-new module and the tagger starts depending on it, you must
 - `_DERIVED_VERSION_FILES`
 - `_KEY_VERSION_FILES`
 
-`_RAW_VERSION_FILES` is kept as the aggregate tagger raw signature input. Add
-new extractor files to the specific per-layer list first.
+`_RAW_VERSION_FILES` is kept as aggregate tagger raw provenance metadata. Raw
+cache hits still use filename + duration identity, not these signatures.
 
 Examples:
 
@@ -239,7 +246,8 @@ Examples:
 - new shared scorer module for energy or structure
 - new key-profile or key-postprocessing helper
 
-If you do not add the new file, changing it later will not invalidate cache.
+If you do not add the new file, changing it later may not refresh derived tagger
+metadata.
 
 ### External data shape changes
 
@@ -260,7 +268,7 @@ Use those when:
 
 - you suspect cache corruption
 - you want a completely cold run for benchmarking
-- you changed behavior outside the tracked signature inputs and want a temporary full reset
+- you intentionally want to recollect raw/data-collection layers
 
 ## Practical Recommendation
 

@@ -35,7 +35,7 @@ The current tagger path is intentionally shared across `dj-tagger`, `dj-registry
 ```text
 load_audio_features()
   -> compute_tagger_artifacts()
-     -> extract_dsp_features() unless compatible dsp was supplied from cache
+     -> extract_dsp_features() unless identity-keyed dsp was supplied from cache
      -> extract_raw_analysis()
      -> analyze_sections()
      -> extract_section_dsp()
@@ -114,11 +114,20 @@ Contains raw or external layers:
 - `tag`
 - `rekordbox`
 - `songstats`
+- `songstats_lookup`
 - `spotify`
 - `analysis_librosa`
 - `analysis_essentia`
 
-`dsp`, `section_dsp`, and `raw_analysis` are versioned raw layers. Each has its own extractor signature, so downstream changes do not force unrelated raw layers to be recomputed. In particular, cached `dsp` is reused unless DSP extraction inputs/code change.
+Raw/data-collection layers are identity-keyed only. Track-scoped entries use the
+full filename + rounded duration + layer. API entries use ISRC + layer. Once an
+entry exists for that identity, downstream changes do not recollect it. This
+includes DSP, section DSP, raw analysis, embedded tags, Spotify lookups,
+Songstats observations and not-found lookups, Rekordbox imports, and registry
+librosa/Essentia observations.
+
+Raw signatures remain provenance metadata on hydrated tagger records. They are
+not cache-hit gates for raw/data-collection layers.
 
 ### `derived_cache.pkl`
 
@@ -150,12 +159,11 @@ Each hydrated tagger result stores:
 - `_tagger_key_sig`
 - `_tagger_audio_features_sig`
 
-This is the main protection against stale cache reuse during tuning.
-The aggregate `_tagger_raw_sig` covers raw inputs needed for tagger derivation.
-Whole-track DSP, section-DSP, and raw-analysis cache entries also have
-independent layer versions.
+Derived signatures protect derived tagger outputs during tuning. The aggregate
+`_tagger_raw_sig` records the raw-code provenance used when the tagger result was
+hydrated, but raw/data-collection entries are still reused by identity.
 
-## Invalidation Rules
+## Refresh Rules
 
 ### If settings or derived scoring logic changes
 
@@ -165,9 +173,9 @@ independent layer versions.
 
 ### If raw extraction logic changes
 
-- the affected raw-layer signature changes
-- only that raw layer misses
-- fresh extraction is required for the missing layer
+- existing raw/data-collection entries remain cache hits by identity
+- fresh extraction happens only for missing identities or explicit force/clear
+- derived tagger output can be rehydrated/restamped from the cached raw payloads
 
 ### If key logic changes
 
@@ -191,9 +199,9 @@ The signature lists live in `src/dj_tagger/settings.py`:
 - `_KEY_VERSION_FILES`
 
 If a new Python file becomes part of tagger computation, it must be added to the
-appropriate list so cache invalidation sees it. Prefer the per-layer raw lists
-for extractor files; `_RAW_VERSION_FILES` is the aggregate tagger raw signature
-input.
+appropriate list so derived/provenance signatures see it. `_RAW_VERSION_FILES`
+is aggregate raw provenance metadata; it does not invalidate raw/data-collection
+cache entries.
 
 ## Registry Architecture
 
@@ -252,10 +260,11 @@ Legacy `taxonomy_*` columns are still populated for downstream compatibility.
 
 1. looks for a current hydrated tagger entry
 2. if needed, re-derives from cached raw layers
-3. if needed, runs full canonical analysis
-4. writes raw layers and hydrated tagger results back to shared cache
-5. updates `LogicalTrack`
-6. emits `analysis_librosa` observations
+3. reuses raw-layer payloads by filename + duration identity even when signatures changed
+4. if needed, runs full canonical analysis
+5. writes raw layers and hydrated tagger results back to shared cache
+6. updates `LogicalTrack`
+7. emits `analysis_librosa` observations
 
 This is the same truth later exported by `registry_overview.csv`.
 
@@ -424,9 +433,9 @@ The grouper now uses the same canonical cache pipeline as tagger and registry.
 
 - loads current tagger entries when available
 - re-derives from raw cache when only derived logic changed
-- reuses compatible cached DSP across downstream tag/category/grouping changes
+- reuses cached DSP by filename + duration across downstream tag/category/grouping/signature changes
 - uses a lightweight DSP-only worker when tagger analysis is cached but DSP is missing
-- falls back to canonical artifact extraction when analysis/raw-analysis must be refreshed
+- falls back to canonical artifact extraction when analysis/raw-analysis is missing or force is requested
 - preserves richer Songstats-aware tagger entries instead of replacing them with DSP-only output
 
 ### Feature Layers

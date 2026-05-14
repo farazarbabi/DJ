@@ -171,15 +171,22 @@ def test_layer_version_auto_set(cache):
     assert entry.version == LAYER_VERSIONS["tagger"]
 
 
-def test_versioned_raw_layers_are_checked(cache):
-    """Raw feature layers should miss when their extractor signature changes."""
+def test_raw_layers_ignore_version_mismatch(cache):
+    """Raw/data-collection layers are keyed only by filename + duration + layer."""
     key = cache.track_key("track.aiff", 180.5, "raw_analysis")
     cache.put(key, {"tempo": 128.0}, version="old_raw_version")
-    assert cache.get_track("track.aiff", 180.5, "raw_analysis") is None
+    assert cache.get_track("track.aiff", 180.5, "raw_analysis") == {"tempo": 128.0}
 
 
-def test_raw_layer_versions_are_independent(monkeypatch):
-    """DSP invalidation should not be tied to raw_analysis or section_dsp changes."""
+def test_raw_api_layers_ignore_version_mismatch(cache):
+    """ISRC-based API observations are also raw/data-collection layers."""
+    key = cache.isrc_key("USRC12345", "songstats_lookup")
+    cache.put(key, {"status": "not_found"}, version="old_api_version")
+    assert cache.get_isrc("USRC12345", "songstats_lookup") == {"status": "not_found"}
+
+
+def test_raw_layers_are_not_signature_versioned(monkeypatch):
+    """Downstream signature churn must not invalidate collected raw layers."""
     import dj_tagger.settings as settings
 
     monkeypatch.setattr(settings, "dsp_version", lambda: "dsp-v")
@@ -188,9 +195,35 @@ def test_raw_layer_versions_are_independent(monkeypatch):
 
     versions = universal_cache.refresh_layer_versions()
 
-    assert versions["dsp"] == "dsp-v"
-    assert versions["section_dsp"] == "section-v"
-    assert versions["raw_analysis"] == "analysis-v"
+    assert versions["dsp"] == "1"
+    assert versions["section_dsp"] == "1"
+    assert versions["raw_analysis"] == "1"
+
+
+def test_direct_tagger_cache_rederives_from_loaded_raw_cache(tmp_path, monkeypatch):
+    """Stale direct tagger cache entries should use raw cache, not audio."""
+    import dj_tagger.derive as derive
+    from dj_tagger.cache import TaggerCacheEntry, get_cached, load_cache
+
+    cache_path = str(tmp_path / "tagger_cache.pkl")
+    cache = load_cache(cache_path)
+    raw_cache = universal_cache.get_cache(str(tmp_path / "raw_cache.pkl"))
+    raw_cache.put_track("Track.mp3", 123.4, "dsp", {"raw": "dsp"})
+    raw_cache.put_track("Track.mp3", 123.4, "raw_analysis", {"raw": "analysis"})
+
+    monkeypatch.setattr(derive, "derive_all", lambda dsp, raw: {"energy": 4, "vibe": "MEL"})
+    cache["Track.mp3|123.4"] = TaggerCacheEntry(
+        mtime=1.0,
+        version="old-version",
+        result={"energy": 2, "camelot": "9A"},
+    )
+
+    result = get_cached(cache, str(tmp_path / "Track.mp3"), 99.0, duration=123.4)
+
+    assert result is not None
+    assert result["energy"] == 4
+    assert result["vibe"] == "MEL"
+    assert result["camelot"] == "9A"
 
 
 def test_atomic_save_creates_files(tmp_path):

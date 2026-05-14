@@ -5,7 +5,7 @@ Once a track is analyzed, it is never re-analyzed — any module can reuse
 results from any other module.
 
 Two cache files:
-  - cache/raw_cache.pkl     — raw data (DSP, CLAP, API results; some layers versioned)
+  - cache/raw_cache.pkl     — raw/data-collection results (identity-keyed)
   - cache/derived_cache.pkl — versioned derived data (energy, vibe, vocal, structure)
 
 Key format:
@@ -42,8 +42,11 @@ DEFAULT_DERIVED_PATH = os.path.join("cache", "derived_cache.pkl")
 # Legacy — kept for migration only
 DEFAULT_CACHE_PATH = os.path.join("cache", "universal_cache.pkl")
 
-# Raw layers are stored in raw_cache.pkl. Some raw layers are versioned
-# automatically so feature-extraction changes invalidate stale entries.
+# Raw layers are stored in raw_cache.pkl. These are data-collection results:
+# once a track-scoped key (filename + duration + layer) or ISRC-scoped key
+# exists, reads are identity-only and ignore version metadata. Downstream
+# formatter, taxonomy, grouping, scoring, and signature changes must not cause
+# these layers to be collected again.
 RAW_LAYERS = frozenset({
     "dsp",            # ~45 DSP features (librosa fixed algorithms)
     "section_dsp",    # per-section DSP features
@@ -52,28 +55,19 @@ RAW_LAYERS = frozenset({
     "tag",            # file embedded tags
     "rekordbox",      # Rekordbox XML data
     "songstats",      # Songstats API response
+    "songstats_lookup",  # Songstats lookup status, including not-found
     "spotify",        # Spotify lookup
     "analysis_librosa",   # registry librosa key analysis
     "analysis_essentia",  # registry essentia key analysis
 })
-VERSIONED_RAW_LAYERS = frozenset({
-    "dsp",
-    "section_dsp",
-    "raw_analysis",
-})
+# Kept for compatibility with older imports/tests. Raw layers are not
+# version-gated on read.
+VERSIONED_RAW_LAYERS = frozenset()
 
 
 def _get_raw_layer_versions() -> dict[str, str]:
-    """Get raw layer versions for feature extraction outputs."""
-    try:
-        from .settings import dsp_version, raw_analysis_version, section_dsp_version
-    except Exception:
-        return {layer: "1" for layer in VERSIONED_RAW_LAYERS}
-    return {
-        "dsp": dsp_version(),
-        "section_dsp": section_dsp_version(),
-        "raw_analysis": raw_analysis_version(),
-    }
+    """Raw layers are identity-keyed and do not use versions for cache hits."""
+    return {}
 
 def _get_derived_versions() -> dict[str, str]:
     """Get derived layer versions — auto-computed from settings.toml hash."""
@@ -96,7 +90,12 @@ LAYER_VERSIONS: dict[str, str] = {}
 
 
 def refresh_layer_versions() -> dict[str, str]:
-    """Refresh layer versions after settings or code changes."""
+    """Refresh layer versions after settings or code changes.
+
+    Raw/data-collection layers are intentionally pinned to version "1" for
+    storage only. Reads ignore the version and use filename + duration + layer
+    (or ISRC + layer for API observations) as the cache identity.
+    """
     global RAW_LAYER_VERSIONS, DERIVED_VERSIONS, LAYER_VERSIONS
     RAW_LAYER_VERSIONS = _get_raw_layer_versions()
     DERIVED_VERSIONS = _get_derived_versions()
@@ -113,7 +112,11 @@ refresh_layer_versions()
 
 @dataclass
 class CacheEntry:
-    """Generic cache entry with version gating."""
+    """Generic cache entry.
+
+    Version is used for derived entries. Raw/data-collection entries keep it as
+    audit metadata only and are read by identity.
+    """
     version: str
     mtime: float  # file modification time (0.0 for API data)
     data: object  # the actual payload (dict, ndarray, etc.)
@@ -158,6 +161,9 @@ class UniversalCache:
         entry = self._entries.get(key)
         if entry is None:
             return None
+        layer = self._layer_from_key(key)
+        if layer in RAW_LAYERS:
+            return entry.data
         if version is not None and entry.version != version:
             return None
         return entry.data
@@ -204,8 +210,8 @@ class UniversalCache:
     ) -> object | None:
         """Look up track data by filename + duration + layer.
 
-        Raw feature layers auto-check against their extractor signature when
-        applicable. Derived layers auto-check against the current tagger version.
+        Raw/data-collection layers are identity-only and ignore version
+        metadata. Derived layers auto-check against the current tagger version.
         """
         if version is None:
             refresh_layer_versions()
@@ -236,12 +242,16 @@ class UniversalCache:
     ) -> None:
         """Store track data.
 
-        Auto-sets version from the current layer signature map so both raw and
-        derived layers are invalidated safely when their logic changes.
+        Raw/data-collection layers are stored with a stable version because
+        they are keyed by filename + duration + layer, not downstream code
+        signatures. Derived layers auto-set the current derived signature.
         """
         if version is None:
-            refresh_layer_versions()
-            version = LAYER_VERSIONS.get(layer, "1")
+            if layer in RAW_LAYERS:
+                version = "1"
+            else:
+                refresh_layer_versions()
+                version = LAYER_VERSIONS.get(layer, "1")
 
         key = self.track_key(filename, duration, layer)
         self.put(key, data, version, mtime)

@@ -145,14 +145,16 @@ def cmd_import_reviews(args: argparse.Namespace) -> int:
 
 
 def cmd_sync_tags(args: argparse.Namespace) -> int:
-    from .sync.tag_writer import sync_tags
+    from .sync.tag_writer import load_group_ids_by_file, sync_tags
     config = _build_config(args)
     store = CsvStore(config.output_dir)
+    group_ids = load_group_ids_by_file(getattr(args, "groups_csv", "")) if getattr(args, "groups_csv", "") else None
     written, skipped, errors = sync_tags(
         store,
         dry_run=args.dry_run,
         only_changed=getattr(args, "only_changed", True),
         write_key_tag=getattr(args, "write_key_tag", False),
+        group_ids_by_file=group_ids,
         show_progress=_show_progress(args),
     )
     print(f"Tags: {written} written, {skipped} skipped, {errors} errors")
@@ -458,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     p_st.add_argument("--only-changed", action="store_true", default=True)
     p_st.add_argument("--write-key-tag", action="store_true", default=False,
                       help="Also write canonical key to TKEY/InitialKey field (off by default)")
+    p_st.add_argument("--groups-csv", default="", help="Optional grouper groups.csv to append G### group IDs to COMMENT tags")
     p_st.add_argument("--output", default="./outputs/registry")
     add_no_progress(p_st)
 

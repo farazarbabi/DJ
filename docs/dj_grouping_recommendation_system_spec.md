@@ -38,20 +38,20 @@ Current extraction logic is shared with tagger and registry:
 ```text
 shared cache
   -> use current tagger result when present
-  -> reuse compatible cached dsp/section_dsp
+  -> reuse cached dsp/section_dsp by filename + duration identity
   -> re-derive tagger fields from cached raw layers when only derived logic changed
   -> extract only missing dsp/section_dsp when tagger analysis is already cached
-  -> run compute_tagger_artifacts() only when analysis/raw_analysis must be refreshed
+  -> run compute_tagger_artifacts() only when raw-analysis identity is missing or force is requested
 ```
 
 Cache usage rules:
 
 - if a current tagger entry exists, use it
-- if raw layers are current but derived logic changed, re-derive without reloading audio
-- if DSP is cached, downstream tag/category/grouping changes do not re-extract it
+- if raw layers exist but derived logic changed, re-derive without reloading audio
+- if DSP is cached, downstream tag/category/grouping/signature changes do not re-extract it
 - if a richer Songstats-aware tagger entry already exists, preserve it
 - if only DSP is missing and analysis is cached, use the lightweight DSP-only worker
-- if analysis/raw-analysis is missing or stale, run the canonical tagger artifact path
+- if analysis/raw-analysis is missing, run the canonical tagger artifact path
 
 ## Feature Layers
 
@@ -267,4 +267,6 @@ For current behavior, the main places to tune are:
 - `src/dj_grouper/grouping/constraints.py` for key/BPM admissibility rules
 - `src/dj_grouper/recommend/scoring.py` for directional recommendation behavior
 
-If those changes affect tagger-derived inputs, the shared cache signatures will invalidate the affected layers automatically.
+If those changes affect tagger-derived inputs, derived tagger outputs can refresh
+from cached raw layers. Raw/data-collection layers are not invalidated by
+downstream signature changes.

@@ -114,6 +114,43 @@ def _analyze_full(path: str, use_essentia: bool, audio_features: dict[str, float
     return result
 
 
+def _cached_raw_layer(ucache, filename: str, duration: float | None, layer: str):
+    """Return an identity-keyed raw layer, ignoring version metadata."""
+    data = ucache.get_track(filename, duration, layer)
+    if data is not None:
+        return data
+
+    data = ucache.get_track_any_version(filename, duration, layer)
+    if not _raw_layer_schema_matches(layer, data):
+        return None
+
+    ucache.put_track(filename, duration, layer, data)
+    logger.info("Reused cached %s layer for %s", layer, filename)
+    return data
+
+
+def _raw_layer_schema_matches(layer: str, data) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if layer == "dsp":
+        from dj_grouper.features.dsp import DSP_CURATED_NAMES
+
+        return all(name in data for name in DSP_CURATED_NAMES)
+    if layer == "raw_analysis":
+        required = {
+            "bar_energies",
+            "n_bars",
+            "tempo",
+            "vocal_ratio",
+            "vocal_temporal_bonus",
+            "onset_rate",
+        }
+        return required.issubset(data)
+    if layer == "section_dsp":
+        return True
+    return False
+
+
 def _essentia_available() -> bool:
     """Check if Essentia is installed."""
     try:
@@ -317,7 +354,7 @@ def run_analysis(
 
     # Load shared caches
     from dj_tagger.universal_cache import get_cache as get_ucache
-    from dj_tagger.tagger_cache import key_signature_matches, tagger_metadata_matches
+    from dj_tagger.tagger_cache import tagger_metadata_matches
     ucache = get_ucache(os.path.join("cache", "raw_cache.pkl"))
 
     # Split into cache hits and misses.
@@ -340,30 +377,44 @@ def run_analysis(
         any_tagger_entry = ucache._entries.get(tagger_key)
         cached_tagger = any_tagger_entry.data if any_tagger_entry and isinstance(any_tagger_entry.data, dict) else None
         audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
-        dsp_data = ucache.get_track(filename, cache_dur, "dsp")
-        raw_analysis = ucache.get_track(filename, cache_dur, "raw_analysis")
+        dsp_data = _cached_raw_layer(ucache, filename, cache_dur, "dsp")
+        raw_analysis = _cached_raw_layer(ucache, filename, cache_dur, "raw_analysis")
 
         # Try tagger layer in universal cache (version-checked, no mtime check).
         tagger_data = ucache.get_track(filename, cache_dur, "tagger")
         if tagger_metadata_matches(tagger_data if isinstance(tagger_data, dict) else None, audio_features):
             features = _extract_tagger_features(tagger_data)
 
-        # Fill in missing tagger features from raw cache via derive_all
-        if not (features.get("energy") and features.get("vibe")):
-            if (
-                dsp_data and isinstance(dsp_data, dict)
-                and raw_analysis and isinstance(raw_analysis, dict)
-                and key_signature_matches(cached_tagger)
-            ):
-                from dj_tagger.derive import derive_all
-                derived = derive_all(dsp_data, raw_analysis, audio_features=audio_features)
-                merged = _merge_rederived_tagger(cached_tagger, derived, audio_features)
-                ucache.put_track(filename, cache_dur, "tagger", merged)
-                derived_features = _extract_tagger_features(merged)
-                # Merge: derived fills gaps, existing features take precedence
-                for k, v in derived_features.items():
-                    if k not in features or not features[k]:
-                        features[k] = v
+        raw_layers_available = dsp_data and isinstance(dsp_data, dict) and raw_analysis and isinstance(raw_analysis, dict)
+        raw_signature_changed = False
+        if raw_layers_available and isinstance(cached_tagger, dict):
+            try:
+                from dj_tagger.settings import raw_version
+                raw_signature_changed = cached_tagger.get("_tagger_raw_sig") != raw_version()
+            except Exception:
+                raw_signature_changed = False
+
+        # Fill in missing/stale tagger features from raw cache via derive_all.
+        # Raw collection layers are identity-keyed; downstream signature changes
+        # must not force audio analysis when these payloads exist.
+        if raw_layers_available and (raw_signature_changed or not (features.get("energy") and features.get("vibe"))):
+            from dj_tagger.derive import derive_all
+            derived = derive_all(dsp_data, raw_analysis, audio_features=audio_features)
+            merged = _merge_rederived_tagger(cached_tagger, derived, audio_features)
+            ucache.put_track(filename, cache_dur, "tagger", merged)
+            derived_features = _extract_tagger_features(merged)
+            # Merge: derived fills gaps, and raw provenance changes refresh
+            # derived fields without recollecting audio.
+            for k, v in derived_features.items():
+                if raw_signature_changed or k not in features or not features[k]:
+                    features[k] = v
+
+        if not (features.get("energy") and features.get("vibe")) and cached_tagger:
+            # Last resort: use the collected tagger facts by filename+duration
+            # even when their derived metadata is stale. This preserves the
+            # no-recollection guarantee; later runs can rederive when raw
+            # layers are available.
+            features = _extract_tagger_features(cached_tagger)
 
         has_key = bool(features.get("camelot"))
         has_tagger = bool(features.get("energy") and features.get("vibe"))

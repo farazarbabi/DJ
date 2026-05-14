@@ -61,8 +61,8 @@ class TestRunExtraction:
         assert stats2.n_extracted == 0
         assert stats2.n_cached == 1
 
-    def test_compatible_stale_dsp_cache_is_reused(self, tmp_path, monkeypatch):
-        """DSP cache survives unrelated raw signature churn when its schema is compatible."""
+    def test_identity_keyed_dsp_cache_ignores_version_stamp(self, tmp_path, monkeypatch):
+        """DSP cache survives unrelated raw signature churn by identity."""
         wav = str(tmp_path / "track.wav")
         _make_wav(wav)
         tracks = [TrackInfo(path=wav)]

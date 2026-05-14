@@ -9,6 +9,7 @@ from dj_registry.config import RegistryConfig
 from dj_registry.models import LogicalTrack, FileRecord
 from dj_registry.store.csv_store import CsvStore
 from dj_registry.adapters.local_analysis import run_analysis
+from dj_grouper.features.dsp import DSP_CURATED_NAMES
 from dj_tagger.derive import derive_all
 from dj_tagger.tagger_cache import hydrate_tagger_result
 from dj_tagger.universal_cache import get_cache, quick_duration, reset_cache
@@ -270,3 +271,77 @@ class TestRunAnalysis:
         assert refreshed is not None
         assert refreshed["vibe"] == expected["vibe"]
         assert refreshed["_tagger_audio_features_sig"]
+
+    def test_identity_keyed_raw_layers_are_rederived_without_audio(self, tmp_path, monkeypatch):
+        """Registry analysis should reuse raw layers despite stale version stamps."""
+        wav_path = str(tmp_path / "track.wav")
+        _make_wav(wav_path)
+        duration = 2.0
+
+        monkeypatch.chdir(tmp_path)
+        os.makedirs("cache", exist_ok=True)
+        cache_dur = quick_duration(wav_path) or duration
+        ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+
+        dsp = {name: 0.2 for name in DSP_CURATED_NAMES}
+        raw = {
+            "bar_energies": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.55, 0.6],
+            "n_bars": 8,
+            "tempo": 126.0,
+            "vocal_ratio": 0.04,
+            "vocal_temporal_bonus": 0.0,
+            "onset_rate": 3.0,
+        }
+        ucache.put(ucache.track_key("track.wav", cache_dur, "dsp"), dsp, version="old-raw-version")
+        ucache.put(ucache.track_key("track.wav", cache_dur, "raw_analysis"), raw, version="old-raw-version")
+
+        stale_tagger = hydrate_tagger_result({
+            "camelot": "9A",
+            "key": "A minor",
+            "key_confidence": 0.91,
+            "energy": 2,
+            "vibe": "DRK",
+            "vocal": "INST",
+            "structure": "16H",
+            "bpm": 126.0,
+            "confidences": {"key": 0.91, "vibe": 0.7, "vocal": 0.8},
+        })
+        stale_tagger["_tagger_raw_sig"] = "old-raw-signature"
+        ucache.put_track("track.wav", cache_dur, "tagger", stale_tagger)
+        ucache.save()
+
+        def fail_analysis(*args, **kwargs):
+            raise AssertionError("audio analysis should not run")
+
+        monkeypatch.setattr("dj_registry.adapters.local_analysis._analyze_full", fail_analysis)
+
+        self.config.output_dir = str(tmp_path / "registry")
+        store = CsvStore(self.config.output_dir)
+        store.save_tracks([
+            LogicalTrack(track_id="T-001", primary_file_id="F-001"),
+        ])
+        store.save_files([
+            FileRecord(
+                file_id="F-001",
+                track_id="T-001",
+                path_abs=wav_path,
+                file_name="track.wav",
+                is_primary_file=True,
+                audio_duration_sec=duration,
+            ),
+        ])
+        store.save_observations([])
+
+        stats = run_analysis(self.config, store, no_essentia=True)
+
+        assert stats["total"] == 1
+        assert stats["cached"] == 1
+        assert stats["analyzed"] == 0
+        assert ucache.get_track("track.wav", cache_dur, "dsp") == dsp
+        assert ucache.get_track("track.wav", cache_dur, "raw_analysis") == raw
+
+        refreshed = ucache.get_track("track.wav", cache_dur, "tagger")
+        expected = derive_all(dsp, raw)
+        assert refreshed is not None
+        assert refreshed["vibe"] == expected["vibe"]
+        assert refreshed["_tagger_raw_sig"] != "old-raw-signature"

@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 from pathlib import Path
 
 from ..category_codes import compact_category_label
 from ..key_utils import camelot_to_standard
-from ..models import now_iso
+from ..models import SourceObservation, now_iso
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 
 logger = logging.getLogger(__name__)
+
+
+def load_group_ids_by_file(groups_csv: str) -> dict[str, str]:
+    """Load filename -> group ID from a grouper groups.csv file."""
+    if not groups_csv or not Path(groups_csv).exists():
+        return {}
+    mapping: dict[str, str] = {}
+    with open(groups_csv, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            file_name = (row.get("file") or "").strip()
+            group_id = (row.get("group_id") or "").strip()
+            if file_name and group_id:
+                mapping[file_name] = group_id
+    return mapping
 
 
 def _parse_energy(value: str | int | None) -> int | None:
@@ -43,7 +58,7 @@ def _category_code_for_tag(track) -> str:
     return ""
 
 
-def _build_comment_tag(track) -> str | None:
+def _build_comment_tag(track, *, group_id: str | None = None) -> str | None:
     """Build the COMMENT tag from registry fields, including DJ category when present."""
     from dj_tagger.formats import format_tag
 
@@ -71,6 +86,7 @@ def _build_comment_tag(track) -> str | None:
         vibe=track.tagger_vibe or None,
         vocal_profile=track.tagger_vocal or None,
         category=category,
+        group_id=group_id,
     )
 
 
@@ -99,16 +115,36 @@ def _write_tkey(path: str, camelot: str) -> None:
         audio.save()
 
 
-def _write_full_tag(path: str, track) -> bool:
+def _write_full_tag(path: str, track, tag_string: str | None = None) -> bool:
     """Write a full dj-tagger COMMENT tag from LogicalTrack fields."""
     from dj_tagger.metadata import write_tag
 
-    tag_string = _build_comment_tag(track)
+    tag_string = tag_string or _build_comment_tag(track)
     if not tag_string:
         return False
 
     write_tag(path, tag_string, dry_run=False)
     return True
+
+
+def _tag_observation_from_write(frec, track, tag_string: str) -> SourceObservation:
+    """Represent a just-written COMMENT as the current raw tag observation."""
+    return SourceObservation(
+        observation_id=f"OBS-tag-{frec.file_id}",
+        track_id=frec.track_id,
+        file_id=frec.file_id,
+        artist=frec.embedded_artist or getattr(track, "artist_canonical", ""),
+        title=frec.embedded_title or getattr(track, "title_canonical", ""),
+        source_system="tag",
+        source_object_id=frec.embedded_isrc or getattr(track, "isrc_canonical", ""),
+        key_standard=frec.embedded_key_standard,
+        key_camelot=frec.embedded_key_camelot,
+        key_confidence=1.0 if frec.embedded_key_camelot else 0.0,
+        bpm=frec.embedded_bpm,
+        genre=frec.embedded_genre,
+        comments=tag_string,
+        observed_at=now_iso(),
+    )
 
 
 def sync_tags(
@@ -117,12 +153,13 @@ def sync_tags(
     dry_run: bool = True,
     only_changed: bool = True,
     write_key_tag: bool = False,
+    group_ids_by_file: dict[str, str] | None = None,
     show_progress: bool = False,
 ) -> tuple[int, int, int]:
     """Write tagger features to file tags.
 
     Always writes:
-      COMMENT tag - KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY]
+      COMMENT tag - KEY_BPM_ENERGY_VIBE_VOCAL_CATEGORY when category is available.
 
     Optionally writes (write_key_tag=True):
       TKEY/InitialKey - canonical Camelot key, for DJ software display.
@@ -139,6 +176,8 @@ def sync_tags(
     written = 0
     skipped = 0
     errors = 0
+    obs_cache = None
+    obs_cache_dirty = False
     progress = ProgressBar(len(files), label="Sync tags", enabled=show_progress)
 
     for index, frec in enumerate(files, start=1):
@@ -148,7 +187,8 @@ def sync_tags(
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
-        candidate_tag = _build_comment_tag(track)
+        group_id = _group_id_for_file(frec, group_ids_by_file)
+        candidate_tag = _build_comment_tag(track, group_id=group_id)
         if not candidate_tag:
             skipped += 1
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
@@ -168,11 +208,23 @@ def sync_tags(
                 if std:
                     frec.embedded_key_standard = std
 
-            _write_full_tag(frec.path_abs, track)
+            _write_full_tag(frec.path_abs, track, candidate_tag)
 
+            frec.embedded_comment = candidate_tag
             frec.tag_write_status = "ok"
             frec.tag_write_error = ""
             frec.last_tag_written_at = now_iso()
+            if obs_cache is None:
+                from ..store.obs_cache import ObsCache
+
+                obs_cache = ObsCache()
+            obs_cache.put_by_file(
+                frec.path_abs,
+                frec.audio_duration_sec,
+                "tag",
+                _tag_observation_from_write(frec, track, candidate_tag),
+            )
+            obs_cache_dirty = True
             written += 1
 
             logger.debug("Wrote tag to %s", frec.file_name)
@@ -182,12 +234,24 @@ def sync_tags(
             frec.tag_write_error = str(e)
             errors += 1
             logger.error("Failed to write tag to %s: %s", frec.file_name, e)
-        progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
+            progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
 
     progress.finish()
     store.save_files(files)
+    if obs_cache is not None and obs_cache_dirty:
+        obs_cache.save()
     if written or errors:
         logger.info("Tags: %d written, %d errors", written, errors)
     else:
         logger.debug("Tags: nothing to write")
     return written, skipped, errors
+
+
+def _group_id_for_file(frec, group_ids_by_file: dict[str, str] | None) -> str | None:
+    if not group_ids_by_file:
+        return None
+    for key in (frec.path_abs, frec.file_name, Path(frec.path_abs).name):
+        group_id = group_ids_by_file.get(key)
+        if group_id:
+            return group_id
+    return None

@@ -271,9 +271,9 @@ Current grouping pipeline:
 
 1. load tagger results from shared cache when current
 2. fall back to raw cache and re-derive when only derived logic changed
-3. reuse cached DSP whenever its payload is compatible, even if downstream signatures changed
-4. extract only missing DSP/section-DSP when analysis is already cached
-5. run the canonical tagger pipeline only when analysis/raw-analysis must be refreshed
+3. reuse cached DSP/raw layers by filename + duration identity, even if downstream signatures changed
+4. extract DSP/section-DSP only when the raw cache identity is missing or force is requested
+5. run the canonical tagger pipeline only when analysis/raw-analysis is absent from the raw cache
 6. build tag, DSP, optional CLAP, and optional registry-enrichment feature layers
 7. cluster with either:
    - `constrained` (default)
@@ -295,13 +295,22 @@ Stores reusable raw artifacts and external data:
 - `tag`
 - `rekordbox`
 - `songstats`
+- `songstats_lookup`
 - `spotify`
 - analysis observations
 
-Important: DSP is cached at the extraction boundary. Downstream changes such as
-tag formatting, category labels, grouping, or derived scoring do not force DSP
-extraction. Only DSP extractor inputs/code should invalidate `dsp`;
-`section_dsp` and `raw_analysis` have their own signatures.
+Important: raw/data-collection cache keys are identity-only:
+
+- track-scoped data: full filename + rounded duration + layer
+- API data: ISRC + layer
+
+If a raw/data-collection entry exists for that identity, downstream changes do
+not recollect it. That includes tag formatting, category labels, grouping,
+derived scoring, signature metadata, and taxonomy changes. DSP, section DSP,
+raw analysis, embedded tags, Spotify lookups, Songstats observations, Songstats
+not-found lookups, Rekordbox imports, and registry analysis observations all use
+this rule. Raw versions/signatures are audit metadata only; forced recollection
+requires an explicit force/clear workflow.
 
 ### `cache/derived_cache.pkl`
 
@@ -313,7 +322,6 @@ Each tagger record carries metadata describing the build used to compute it:
 
 - tagger version
 - aggregate raw signature
-- per-layer DSP/raw signatures
 - derived signature
 - key signature
 - Songstats audio-feature signature
@@ -322,7 +330,10 @@ Each tagger record carries metadata describing the build used to compute it:
 
 If you change `settings.toml` or derived scoring logic, the derived signature changes automatically and tagger results are re-derived from cached raw layers on the next run.
 
-If you change raw extraction logic, the affected raw-layer signature changes automatically and that layer is recomputed instead of being silently reused.
+If you change raw extraction logic and want to recollect DSP/librosa/API/tag data,
+use an explicit force/clear workflow. Cache identity is still filename +
+duration for track data, or ISRC for API data; signature changes alone do not
+invalidate raw/data-collection entries.
 
 You do not need to manually bump a cache version string anymore.
 
@@ -336,8 +347,9 @@ signature list in `src/dj_tagger/settings.py`:
 - `_DERIVED_VERSION_FILES`
 - `_KEY_VERSION_FILES`
 
-`_RAW_VERSION_FILES` is kept as the aggregate tagger raw signature input; add
-new files to the specific per-layer list first.
+`_RAW_VERSION_FILES` is kept as aggregate tagger provenance metadata. Derived
+outputs may be restamped or re-derived, but the raw/data-collection cache itself
+is not invalidated by these signatures.
 
 For a focused workflow reference, see [docs/tagger_cache_and_experimentation.md](docs/tagger_cache_and_experimentation.md).
 
@@ -369,7 +381,7 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 pytest -q
 ```
 
-Current suite size: `309` tests.
+Current suite size: `321` tests.
 
 ## Documentation
 

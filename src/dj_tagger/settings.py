@@ -1,8 +1,9 @@
 """Central settings loader.
 
 Reads settings.toml from the project root. All tunable parameters live there.
-Cache signatures are auto-computed from the relevant settings sections and
-source files so changes invalidate stale cache entries without a manual bump.
+Cache signatures are auto-computed from relevant settings sections and source
+files so derived tagger outputs can refresh without a manual bump. Raw/data
+collection cache hits remain identity-keyed.
 """
 
 from __future__ import annotations
