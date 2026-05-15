@@ -125,7 +125,7 @@ def _cached_raw_layer(ucache, filename: str, duration: float | None, layer: str)
         return None
 
     ucache.put_track(filename, duration, layer, data)
-    logger.info("Reused cached %s layer for %s", layer, filename)
+    logger.debug("Reused cached %s layer for %s", layer, filename)
     return data
 
 
@@ -435,7 +435,6 @@ def run_analysis(
         logger.info("Analysis: %d tracks (all cached)", len(candidates))
 
     # Run full analysis on cache misses
-    import time as _time
     fresh_results: list[tuple[str, str, str, dict]] = []  # (track_id, file_id, path, raw_result)
     if cache_misses:
         paths_to_analyze = [path for _, _, path, _, _ in cache_misses]
@@ -445,15 +444,14 @@ def run_analysis(
             raw_results = []
             analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
             for i, p in enumerate(paths_to_analyze):
-                t0 = _time.perf_counter()
                 track_id = cache_misses[i][0]
                 track = track_by_id.get(track_id)
                 audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
                 result = _analyze_full(p, use_essentia, audio_features)
-                elapsed = _time.perf_counter() - t0
                 raw_results.append(result)
                 fname = os.path.basename(p)
-                logger.info("  [%d/%d] %s (%.0fs)", i + 1, n_total, fname, elapsed)
+                if not show_progress:
+                    logger.info("  [%d/%d] %s", i + 1, n_total, fname)
                 analysis_progress.update(i + 1, fname)
             analysis_progress.finish()
         else:
@@ -479,12 +477,14 @@ def run_analysis(
                     try:
                         raw_results[idx] = future.result()
                         fname = os.path.basename(paths_to_analyze[idx])
-                        logger.info("  [%d/%d] %s", done, n_total, fname)
+                        if not show_progress:
+                            logger.info("  [%d/%d] %s", done, n_total, fname)
                         analysis_progress.update(done, fname)
                     except Exception as e:
                         raw_results[idx] = {"path": paths_to_analyze[idx], "error": str(e)}
                         fname = os.path.basename(paths_to_analyze[idx])
-                        logger.info("  [%d/%d] %s FAILED", done, n_total, fname)
+                        if not show_progress:
+                            logger.info("  [%d/%d] %s FAILED", done, n_total, fname)
                         analysis_progress.update(done, f"{fname} FAILED")
             analysis_progress.finish()
 

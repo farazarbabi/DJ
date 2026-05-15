@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 from pathlib import Path
 
 from ..category_codes import compact_category_label
@@ -159,7 +160,7 @@ def sync_tags(
     """Write tagger features to file tags.
 
     Always writes:
-      COMMENT tag - KEY_BPM_ENERGY_VIBE_VOCAL_CATEGORY when category is available.
+      COMMENT tag - KEY|ENERGY|VIBE|VOCAL|CATEGORY when category is available.
 
     Optionally writes (write_key_tag=True):
       TKEY/InitialKey - canonical Camelot key, for DJ software display.
@@ -175,6 +176,7 @@ def sync_tags(
 
     written = 0
     skipped = 0
+    missing = 0
     errors = 0
     obs_cache = None
     obs_cache_dirty = False
@@ -185,6 +187,13 @@ def sync_tags(
         if not track:
             skipped += 1
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
+            continue
+
+        if not os.path.exists(frec.path_abs):
+            missing += 1
+            skipped += 1
+            logger.debug("Skipping missing file: %s", frec.path_abs)
+            progress.update(index, frec.file_name, written=written, skipped=skipped, missing=missing, errors=errors)
             continue
 
         group_id = _group_id_for_file(frec, group_ids_by_file)
@@ -240,8 +249,11 @@ def sync_tags(
     store.save_files(files)
     if obs_cache is not None and obs_cache_dirty:
         obs_cache.save()
-    if written or errors:
-        logger.info("Tags: %d written, %d errors", written, errors)
+    if written or errors or missing:
+        if missing:
+            logger.info("Tags: %d written, %d errors, %d missing files skipped", written, errors, missing)
+        else:
+            logger.info("Tags: %d written, %d errors", written, errors)
     else:
         logger.debug("Tags: nothing to write")
     return written, skipped, errors

@@ -518,7 +518,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     files = scan_files(config, store, obs_cache=obs_cache, show_progress=show_progress)
     link_files_to_tracks(config, store, show_progress=show_progress)
     tracks = store.load_tracks()
-    logger.info("Pipeline: scan + link done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
+    logger.info("Pipeline: scan + link done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 2: Ingest external sources
     t0 = time.perf_counter()
@@ -534,12 +534,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         logger.info("Songstats: skipped (--no-songstats)")
 
     obs_cache.save()
-    logger.info("Pipeline: ingest done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
+    logger.info("Pipeline: ingest done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 3: Analyze (full tagger pipeline)
     t0 = time.perf_counter()
     run_analysis(config, store, no_essentia=args.no_essentia, show_progress=show_progress)
-    logger.info("Pipeline: analysis done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
+    logger.info("Pipeline: analysis done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 4: Resolve canonical key + BPM
     t0 = time.perf_counter()
@@ -549,23 +549,23 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     resolve_all_keys(config, store, force=True, show_progress=show_progress)
     resolve_all_bpms(config, store, force=True, show_progress=show_progress)
     build_review_queue(config, store, show_progress=show_progress)
-    logger.info("Pipeline: resolve done in %s\n", _fmt_elapsed(time.perf_counter() - t0))
+    logger.info("Pipeline: resolve done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 5: DJ taxonomy category for tags
     t0 = time.perf_counter()
     classified = _run_dj_taxonomy_for_tags(store, show_progress=show_progress)
     if classified:
-        logger.info("Pipeline: DJ taxonomy classified %d tracks in %s\n", classified, _fmt_elapsed(time.perf_counter() - t0))
+        logger.info("Pipeline: DJ taxonomy classified %d tracks in %s", classified, _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 6: Write tags
     t0 = time.perf_counter()
     if not args.no_tags and args.no_grouping:
         sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False), show_progress=show_progress)
-        logger.info("Pipeline: tags written in %s\n", _fmt_elapsed(time.perf_counter() - t0))
+        logger.info("Pipeline: tags written in %s", _fmt_elapsed(time.perf_counter() - t0))
     elif not args.no_tags:
-        logger.info("Tags: delayed until after grouping so group IDs can be included\n")
+        logger.info("Tags: delayed until after grouping so group IDs can be included")
     else:
-        logger.info("Tags: skipped (--no-tags)\n")
+        logger.info("Tags: skipped (--no-tags)")
 
     # Phase 7: Reports
     classify_all_taxonomies(store, show_progress=show_progress)

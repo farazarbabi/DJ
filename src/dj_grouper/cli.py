@@ -209,7 +209,7 @@ def _cached_raw_layer(ucache, filename: str, duration: float | None, layer: str)
         return None
 
     ucache.put_track(filename, duration, layer, data)
-    logger.info("Reused cached %s layer for %s", layer, filename)
+    logger.debug("Reused cached %s layer for %s", layer, filename)
     return data
 
 
@@ -345,7 +345,7 @@ def _run_extraction(
                 from dj_tagger.derive import derive_all
                 tagger_data = merge_rederived_tagger(collected_tagger, derive_all(dsp_data, raw_analysis))
                 ucache.put_track(filename, dur, "tagger", tagger_data, mtime=mtime)
-                logger.info("Auto-recomputed derived analysis for %s from cached raw", filename)
+                logger.debug("Auto-recomputed derived analysis for %s from cached raw", filename)
                 usable_tagger = tagger_data
 
         if usable_tagger is None and isinstance(collected_tagger, dict):
@@ -378,9 +378,9 @@ def _run_extraction(
             to_extract.append((i, t, mtime, needs_analysis, None))
 
     if stats.n_cached:
-        print(f"  {stats.n_cached} tracks loaded from cache")
+        logger.info("  %d tracks loaded from cache", stats.n_cached)
     if to_dsp_only:
-        print(f"  {len(to_dsp_only)} tracks need DSP extraction only (analysis cached)")
+        logger.info("  %d tracks need DSP extraction only (analysis cached)", len(to_dsp_only))
 
     # Tag writing imports (only when needed)
     _format_tag = None
@@ -440,19 +440,25 @@ def _run_extraction(
         ucache.put_track(filename, dur, "section_dsp", result["section_dsp"], mtime=mtime)
         stats.n_extracted += 1
 
+    from dj_registry.progress import ProgressBar
+
     # ── Phase 1: DSP-only extraction (tagger analysis already cached) ──
     if to_dsp_only:
+        bar = ProgressBar(len(to_dsp_only), label="DSP extract")
+        extracted = 0
+        failed = 0
         for j, (i, t, mtime) in enumerate(to_dsp_only):
-            done = j + 1
-            print(f"  [{done:>{len(str(len(to_dsp_only)))}}/{len(to_dsp_only)}] {Path(t.path).name}", end="", flush=True)
             try:
                 result = _extract_dsp_worker(t.path)
                 _apply_dsp_result(t, mtime, result)
-                print("  [DSP only]")
+                extracted += 1
             except Exception as e:
                 raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
                 stats.n_failed += 1
-                print(f"  FAILED: {e}")
+                failed += 1
+                logger.debug("DSP extract failed for %s: %s", t.path, e)
+            bar.update(j + 1, Path(t.path).name, extracted=extracted, failed=failed)
+        bar.finish()
 
     # ── Phase 2: Full analysis + extraction ──
     n_todo = len(to_extract)
@@ -461,23 +467,35 @@ def _run_extraction(
     if n_todo == 0:
         pass
     elif actual_workers <= 1 or n_todo == 1:
+        bar = ProgressBar(n_todo, label="Extract")
+        analyzed = 0
+        extracted = 0
+        failed = 0
         for j, (i, t, mtime, needs_analysis, cached_dsp) in enumerate(to_extract):
             done = j + 1
-            print(f"  [{done:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}", end="", flush=True)
             try:
                 result = _extract_worker(t.path, needs_analysis, cached_dsp)
                 _apply_result(t, mtime, needs_analysis, result)
-                status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
-                print(f"  {status}")
+                if needs_analysis:
+                    analyzed += 1
+                else:
+                    extracted += 1
             except Exception as e:
                 raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
                 stats.n_failed += 1
-                print(f"  FAILED: {e}")
+                failed += 1
+                logger.debug("Extract failed for %s: %s", t.path, e)
+            bar.update(done, Path(t.path).name, analyzed=analyzed, extracted=extracted, failed=failed)
             if done % 20 == 0:
                 save_raw_cache(raw_cache, cache_path)
+        bar.finish()
     else:
         from concurrent.futures import ProcessPoolExecutor, as_completed
-        print(f"  Using {actual_workers} workers for {n_todo} tracks...")
+        logger.info("  Using %d workers for %d tracks...", actual_workers, n_todo)
+        bar = ProgressBar(n_todo, label="Extract")
+        analyzed = 0
+        extracted = 0
+        failed = 0
         futures = {}
         with ProcessPoolExecutor(max_workers=actual_workers) as pool:
             for i, t, mtime, needs_analysis, cached_dsp in to_extract:
@@ -491,14 +509,19 @@ def _run_extraction(
                 try:
                     result = fut.result()
                     _apply_result(t, mtime, needs_analysis, result)
-                    status = "[analyzed + extracted]" if needs_analysis else "[extracted]"
-                    print(f"  [{done_count:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}  {status}")
+                    if needs_analysis:
+                        analyzed += 1
+                    else:
+                        extracted += 1
                 except Exception as e:
                     raw_cache[t.path] = RawCacheEntry(mtime=mtime, info=t, dsp={})
                     stats.n_failed += 1
-                    print(f"  [{done_count:>{len(str(n_todo))}}/{n_todo}] {Path(t.path).name}  FAILED: {e}")
+                    failed += 1
+                    logger.debug("Extract failed for %s: %s", t.path, e)
+                bar.update(done_count, Path(t.path).name, analyzed=analyzed, extracted=extracted, failed=failed)
                 if done_count % 20 == 0:
                     save_raw_cache(raw_cache, cache_path)
+        bar.finish()
 
     # Remove deleted files from cache
     current_paths = {t.path for t in tracks}

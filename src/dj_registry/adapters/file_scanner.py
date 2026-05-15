@@ -118,10 +118,12 @@ def scan_files(
     new_payloads: list[PayloadIndexEntry] = []
     updated = 0
     skipped = 0
+    visited: set[str] = set()
     progress = ProgressBar(len(paths), label="Scan files", enabled=show_progress)
 
     for index, path in enumerate(paths, start=1):
         path_abs = str(path.resolve())
+        visited.add(path_abs)
         stat = path.stat()
         mtime_str = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
 
@@ -247,6 +249,19 @@ def scan_files(
         progress.update(index, path.name, new=len(new_files), updated=updated, skipped=skipped)
 
     progress.finish()
+
+    # Prune FileRecords whose paths are no longer on disk. We only prune entries
+    # not visited by this scan AND confirmed missing — entries outside the
+    # current library_roots that still exist on disk are left alone.
+    removed_file_ids: set[str] = set()
+    for path, frec in list(existing_files.items()):
+        if path in visited:
+            continue
+        if os.path.exists(path):
+            continue
+        removed_file_ids.add(frec.file_id)
+        del existing_files[path]
+
     all_files = list(existing_files.values()) + new_files
 
     store.save_files(all_files)
@@ -257,7 +272,19 @@ def scan_files(
         all_payload.extend(new_payloads)
         store.save_payload_index(all_payload)
 
-    logger.info("Scan: %d files (%d new, %d updated, %d unchanged)", len(all_files), len(new_files), updated, skipped)
+    if removed_file_ids:
+        remaining_obs = [o for o in store.load_observations() if o.file_id not in removed_file_ids]
+        store.save_observations(remaining_obs)
+        remaining_payloads = [p for p in store.load_payload_index() if p.file_id not in removed_file_ids]
+        store.save_payload_index(remaining_payloads)
+
+    if removed_file_ids:
+        logger.info(
+            "Scan: %d files (%d new, %d updated, %d unchanged, %d removed)",
+            len(all_files), len(new_files), updated, skipped, len(removed_file_ids),
+        )
+    else:
+        logger.info("Scan: %d files (%d new, %d updated, %d unchanged)", len(all_files), len(new_files), updated, skipped)
     return all_files
 
 
