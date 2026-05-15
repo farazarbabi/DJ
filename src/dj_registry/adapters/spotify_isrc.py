@@ -21,6 +21,35 @@ TOKEN_URL = "https://accounts.spotify.com/api/token"
 SEARCH_URL = "https://api.spotify.com/v1/search"
 TRACK_URL = "https://api.spotify.com/v1/tracks"
 
+MAX_RETRY_AFTER_SEC = 60
+
+
+class SpotifyTransientError(Exception):
+    """Raised on transient Spotify errors (rate limit too long, network, 5xx).
+
+    Callers should NOT cache a "not found" result on this error — try again later.
+    """
+
+
+def _handle_429(resp) -> None:
+    """If response is 429, sleep for Retry-After (capped) or raise transient.
+
+    Raises SpotifyTransientError when Retry-After exceeds MAX_RETRY_AFTER_SEC,
+    so the pipeline can bail out instead of freezing for hours.
+    """
+    if resp.status_code != 429:
+        return
+    try:
+        retry = int(resp.headers.get("Retry-After", "5"))
+    except (TypeError, ValueError):
+        retry = 5
+    if retry > MAX_RETRY_AFTER_SEC:
+        raise SpotifyTransientError(
+            f"Spotify rate limited with Retry-After={retry}s (> {MAX_RETRY_AFTER_SEC}s cap)"
+        )
+    logger.warning("Spotify rate limited, waiting %ds", retry)
+    time.sleep(retry)
+
 
 class SpotifyClient:
     """Spotify Web API client for ISRC lookup."""
@@ -98,9 +127,7 @@ class SpotifyClient:
                     )
 
                     if resp.status_code == 429:
-                        retry = int(resp.headers.get("Retry-After", "5"))
-                        logger.warning("Spotify rate limited, waiting %ds", retry)
-                        time.sleep(retry)
+                        _handle_429(resp)
                         resp = client.get(
                             SEARCH_URL,
                             headers={"Authorization": f"Bearer {self._token}"},
@@ -159,7 +186,12 @@ class SpotifyClient:
         }
 
     def get_track(self, spotify_id: str) -> dict | None:
-        """Fetch a track by Spotify ID. Returns the raw track object or None."""
+        """Fetch a track by Spotify ID.
+
+        Returns the raw track object, or None on a definitive 404.
+        Raises SpotifyTransientError on rate-limit-too-long, network errors,
+        or HTTP 5xx — callers must not cache "not found" on these.
+        """
         if not spotify_id:
             return None
         self._authenticate()
@@ -171,9 +203,7 @@ class SpotifyClient:
                     headers={"Authorization": f"Bearer {self._token}"},
                 )
                 if resp.status_code == 429:
-                    retry = int(resp.headers.get("Retry-After", "5"))
-                    logger.warning("Spotify rate limited, waiting %ds", retry)
-                    time.sleep(retry)
+                    _handle_429(resp)
                     resp = client.get(
                         url,
                         headers={"Authorization": f"Bearer {self._token}"},
@@ -183,11 +213,15 @@ class SpotifyClient:
                 resp.raise_for_status()
                 return resp.json()
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            logger.debug("Spotify get_track failed for %s: %s", spotify_id, e)
-            return None
+            raise SpotifyTransientError(f"get_track({spotify_id}) failed: {e}") from e
 
     def find_id_by_isrc(self, isrc: str) -> str:
-        """Search for a Spotify track by ISRC. Returns spotify_id or ''."""
+        """Search for a Spotify track by ISRC.
+
+        Returns the spotify_id, or "" on a definitive empty-results response.
+        Raises SpotifyTransientError on rate-limit-too-long, network errors,
+        or HTTP 5xx — callers must not cache "not found" on these.
+        """
         if not isrc:
             return ""
         self._authenticate()
@@ -199,9 +233,7 @@ class SpotifyClient:
                     params={"q": f"isrc:{isrc}", "type": "track", "limit": 1},
                 )
                 if resp.status_code == 429:
-                    retry = int(resp.headers.get("Retry-After", "5"))
-                    logger.warning("Spotify rate limited, waiting %ds", retry)
-                    time.sleep(retry)
+                    _handle_429(resp)
                     resp = client.get(
                         SEARCH_URL,
                         headers={"Authorization": f"Bearer {self._token}"},
@@ -211,8 +243,7 @@ class SpotifyClient:
                 items = resp.json().get("tracks", {}).get("items", [])
                 return items[0].get("id", "") if items else ""
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            logger.debug("Spotify ISRC search failed for %s: %s", isrc, e)
-            return ""
+            raise SpotifyTransientError(f"find_id_by_isrc({isrc}) failed: {e}") from e
 
 
 TAGGER_CACHE_PATH = os.path.join("cache", "tagger_cache.pkl")

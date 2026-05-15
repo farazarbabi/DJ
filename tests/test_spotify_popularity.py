@@ -1,6 +1,7 @@
 """Tests for the Spotify popularity adapter."""
 
 from dj_registry.adapters import spotify_popularity
+from dj_registry.adapters.spotify_isrc import SpotifyTransientError
 from dj_registry.adapters.spotify_popularity import ingest_spotify_popularity
 from dj_registry.models import LogicalTrack, SourceObservation
 from dj_registry.store.csv_store import CsvStore
@@ -140,3 +141,76 @@ def test_cache_hit_skips_api(tmp_path, monkeypatch):
 
     obs = [o for o in store.load_observations() if o.source_system == "spotify"]
     assert obs and obs[0].popularity == "55"
+
+
+def test_definitive_miss_is_cached(tmp_path, monkeypatch):
+    """A track with no Spotify hit must be cached so re-runs don't call the API."""
+    monkeypatch.chdir(tmp_path)
+    _set_creds(monkeypatch)
+    reset_cache()
+
+    store = CsvStore(str(tmp_path / "registry"))
+    store.save_tracks([
+        LogicalTrack(track_id="T1", isrc_canonical="USRC_MISS"),
+    ])
+
+    obs_cache = ObsCache()
+    fake = _FakeClient()  # isrc_to_id empty → find_id_by_isrc returns ""
+    monkeypatch.setattr(spotify_popularity, "SpotifyClient", lambda *_a, **_k: fake)
+
+    stats = ingest_spotify_popularity(store, obs_cache=obs_cache)
+    assert stats["fetched"] == 0
+    assert stats["skipped"] == 1
+    assert fake.find_calls == ["USRC_MISS"]
+
+    # Second run: should hit the cache, not call the API again.
+    fake2 = _FakeClient()
+    monkeypatch.setattr(spotify_popularity, "SpotifyClient", lambda *_a, **_k: fake2)
+
+    stats2 = ingest_spotify_popularity(store, obs_cache=obs_cache)
+    assert fake2.find_calls == [], "definitive miss must be cached — no second API call"
+    assert fake2.get_track_calls == []
+    assert stats2["cached"] == 1
+    assert stats2["fetched"] == 0
+
+
+def test_transient_error_bails_without_caching(tmp_path, monkeypatch):
+    """A SpotifyTransientError must stop the loop without caching that track as not-found."""
+    monkeypatch.chdir(tmp_path)
+    _set_creds(monkeypatch)
+    reset_cache()
+
+    store = CsvStore(str(tmp_path / "registry"))
+    store.save_tracks([
+        LogicalTrack(track_id="T1", isrc_canonical="USRC_FIRST"),
+        LogicalTrack(track_id="T2", isrc_canonical="USRC_BOOM"),
+        LogicalTrack(track_id="T3", isrc_canonical="USRC_THIRD"),
+    ])
+
+    class _RateLimitedClient:
+        def __init__(self) -> None:
+            self.find_calls: list[str] = []
+            self.get_track_calls: list[str] = []
+
+        def find_id_by_isrc(self, isrc: str) -> str:
+            self.find_calls.append(isrc)
+            if isrc == "USRC_BOOM":
+                raise SpotifyTransientError("rate limited >60s")
+            return ""
+
+        def get_track(self, spotify_id: str):
+            self.get_track_calls.append(spotify_id)
+            return None
+
+    fake = _RateLimitedClient()
+    monkeypatch.setattr(spotify_popularity, "SpotifyClient", lambda *_a, **_k: fake)
+
+    obs_cache = ObsCache()
+    stats = ingest_spotify_popularity(store, obs_cache=obs_cache)
+
+    # First track: cached as definitive miss. Second: bailed mid-fetch — not cached.
+    assert fake.find_calls == ["USRC_FIRST", "USRC_BOOM"]
+    assert stats["skipped"] == 1
+    assert obs_cache.get_by_isrc("USRC_FIRST", "spotify") is not None
+    assert obs_cache.get_by_isrc("USRC_BOOM", "spotify") is None
+    assert obs_cache.get_by_isrc("USRC_THIRD", "spotify") is None
