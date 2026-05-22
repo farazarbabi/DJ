@@ -591,21 +591,19 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     classify_all_taxonomies(store, show_progress=show_progress)
     generate_reports(store, config.reports_dir, show_progress=show_progress)
 
-    # Phase 7b: Categorical playlists (by key / sub-genre / popularity)
+    # Phase 7b: Categorical playlists (by key / sub-genre)
     try:
         from dj_registry.sync.playlists import generate_categorical_playlists
         playlists_root = _playlists_dir(args.paths)
         cat_counts = generate_categorical_playlists(
             store.load_tracks(),
             store.load_files(),
-            store.load_observations(),
             playlists_root,
         )
         logger.info(
-            "Pipeline: categorical playlists — by_key=%d, by_subgenre=%d, by_popularity=%d in %s",
+            "Pipeline: categorical playlists — by_key=%d, by_subgenre=%d in %s",
             cat_counts["by_key"],
             cat_counts["by_subgenre"],
-            cat_counts["by_popularity"],
             playlists_root,
         )
     except Exception:

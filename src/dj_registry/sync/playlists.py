@@ -1,7 +1,13 @@
 """Categorical M3U8 playlist generation from the registry.
 
-Emits browsing playlists grouped by Camelot key, DJ taxonomy sub-genre, and
-Spotify popularity tier. Pure registry data — no clustering/grouper math.
+Emits browsing playlists grouped by Camelot key and DJ taxonomy sub-genre.
+Pure registry data — no clustering/grouper math.
+
+A popularity-tier writer used to live here too, but Spotify dropped the
+``popularity`` field from /v1/tracks/{id} for client-credentials apps in
+late 2024 and Songstats stream-count endpoints are paywalled, so there
+is no free popularity source to bucket on. Re-introduce when one is
+available.
 """
 
 from __future__ import annotations
@@ -10,7 +16,7 @@ import logging
 import math
 from pathlib import Path
 
-from ..models import FileRecord, LogicalTrack, SourceObservation
+from ..models import FileRecord, LogicalTrack
 
 logger = logging.getLogger(__name__)
 
@@ -57,22 +63,6 @@ def _resolve_paths(
             continue
         out[t.track_id] = f.path_abs
     return out
-
-
-def _popularity_by_track(
-    observations: list[SourceObservation],
-) -> dict[str, int]:
-    result: dict[str, int] = {}
-    for o in observations:
-        if o.source_system != "spotify":
-            continue
-        if o.source_object_id == "not_found" or not o.popularity:
-            continue
-        try:
-            result[o.track_id] = int(o.popularity)
-        except ValueError:
-            continue
-    return result
 
 
 def _sorted_entries(
@@ -152,69 +142,25 @@ def _write_by_subgenre(
     return written
 
 
-def _popularity_bucket(score: int) -> str | None:
-    if 0 <= score < 30:
-        return "0-30_underground"
-    if 30 <= score < 60:
-        return "30-60_mid"
-    if 60 <= score <= 100:
-        return "60-100_popular"
-    return None
-
-
-def _write_by_popularity(
-    out_dir: Path,
-    tracks: list[LogicalTrack],
-    path_by_id: dict[str, str],
-    popularity_by_id: dict[str, int],
-) -> int:
-    buckets: dict[str, list[LogicalTrack]] = {}
-    for t in tracks:
-        if t.track_id not in path_by_id:
-            continue
-        score = popularity_by_id.get(t.track_id)
-        if score is None:
-            continue
-        bucket_name = _popularity_bucket(score)
-        if not bucket_name:
-            continue
-        buckets.setdefault(bucket_name, []).append(t)
-
-    written = 0
-    for name, members in buckets.items():
-        entries = _sorted_entries(members, path_by_id)
-        if not entries:
-            continue
-        _write_m3u8(out_dir / f"{name}.m3u8", entries)
-        written += 1
-    return written
-
-
 def generate_categorical_playlists(
     tracks: list[LogicalTrack],
     files: list[FileRecord],
-    observations: list[SourceObservation],
     playlists_root: str,
 ) -> dict[str, int]:
-    """Write by_key/, by_subgenre/, by_popularity/ M3U8 playlists.
+    """Write by_key/ and by_subgenre/ M3U8 playlists.
 
     Returns counts of playlists written per category.
     """
     root = Path(playlists_root)
     path_by_id = _resolve_paths(tracks, files)
-    popularity_by_id = _popularity_by_track(observations)
 
     counts = {
         "by_key": _write_by_key(root / "by_key", tracks, path_by_id),
         "by_subgenre": _write_by_subgenre(root / "by_subgenre", tracks, path_by_id),
-        "by_popularity": _write_by_popularity(
-            root / "by_popularity", tracks, path_by_id, popularity_by_id
-        ),
     }
     logger.info(
-        "Categorical playlists: by_key=%d, by_subgenre=%d, by_popularity=%d",
+        "Categorical playlists: by_key=%d, by_subgenre=%d",
         counts["by_key"],
         counts["by_subgenre"],
-        counts["by_popularity"],
     )
     return counts
