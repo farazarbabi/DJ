@@ -10,7 +10,7 @@ def test_scan_library_normalizes_unknown_key_placeholder(monkeypatch, tmp_path):
     track.write_bytes(b"")
 
     monkeypatch.setattr(scanner, "find_audio_files", lambda paths, recursive, exclude_dirs: [track])
-    monkeypatch.setattr(scanner, "read_existing_tag", lambda path: "??_124_E3_DRK_INST")
+    monkeypatch.setattr(scanner, "read_existing_tag", lambda path: "??|E3|DRK|INST")
 
     tracks = scanner.scan_library([str(tmp_path)], recursive=True)
 

@@ -24,6 +24,13 @@ def _setup_logging(verbose: bool, quiet: bool) -> None:
         else "%(message)s"
     )
     logging.basicConfig(level=level, format=fmt, force=True)
+    # Route log output through tqdm.write so warnings (e.g. Spotify rate
+    # limits) don't break active progress bars.
+    try:
+        from dj_registry.progress import install_tqdm_log_handler
+        install_tqdm_log_handler()
+    except ImportError:
+        pass
     # Suppress noisy HTTP loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -169,6 +176,19 @@ def _grouper_groups_csv_path(paths: list[str]) -> str:
         return str(Path("outputs") / "groups.csv")
     except ValueError:
         return str(input_path / "outputs" / "groups.csv")
+
+
+def _playlists_dir(paths: list[str]) -> str:
+    """Return the playlists/ directory that mirrors dj-grouper's --playlists default."""
+    from pathlib import Path
+
+    input_path = Path(paths[0] if paths else "./files").resolve()
+    project_dir = Path.cwd().resolve()
+    try:
+        input_path.relative_to(project_dir)
+        return str(Path("outputs") / "playlists")
+    except ValueError:
+        return str(input_path / "outputs" / "playlists")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -570,6 +590,26 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # Phase 7: Reports
     classify_all_taxonomies(store, show_progress=show_progress)
     generate_reports(store, config.reports_dir, show_progress=show_progress)
+
+    # Phase 7b: Categorical playlists (by key / sub-genre / popularity)
+    try:
+        from dj_registry.sync.playlists import generate_categorical_playlists
+        playlists_root = _playlists_dir(args.paths)
+        cat_counts = generate_categorical_playlists(
+            store.load_tracks(),
+            store.load_files(),
+            store.load_observations(),
+            playlists_root,
+        )
+        logger.info(
+            "Pipeline: categorical playlists — by_key=%d, by_subgenre=%d, by_popularity=%d in %s",
+            cat_counts["by_key"],
+            cat_counts["by_subgenre"],
+            cat_counts["by_popularity"],
+            playlists_root,
+        )
+    except Exception:
+        logger.warning("Categorical playlists: generation failed, continuing", exc_info=True)
 
     # Phase 8: Grouping
     if not args.no_grouping:

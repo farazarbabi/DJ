@@ -48,13 +48,13 @@ dj-grouper --force-extract
 Current COMMENT tag format:
 
 ```text
-KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]
+KEY|ENERGY|VIBE|VOCAL[|CATEGORY][|GID]
 ```
 
 Example:
 
 ```text
-9A_126_E3_HYPN_INST_DRK.TECH.HOUS.DRV
+7A|E2|SOUL|FVOC|ORG.HOUS.BUIL|G015
 ```
 
 `CATEGORY` is the compact no-space DJ taxonomy category label code: each label
@@ -62,6 +62,10 @@ word becomes 3-4 uppercase characters separated by dots.
 
 `structure` remains an internal analysis/grouping field, but it is not part of
 the COMMENT tag format.
+
+BPM is intentionally omitted from the tag for now but its wiring through
+`format_tag` is preserved so it can be reintroduced later. Canonical BPM lives
+in the registry (`canonical_bpm` / `tagger_bpm`) regardless.
 
 ## Cache Architecture
 

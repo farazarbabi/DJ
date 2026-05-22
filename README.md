@@ -16,15 +16,19 @@ The project is Windows-first and built around a local Rekordbox workflow.
 The current COMMENT tag format is:
 
 ```text
-KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]
+KEY|ENERGY|VIBE|VOCAL[|CATEGORY][|GID]
 ```
 
 Examples:
 
 ```text
-9A_126_E3_HYPN_INST_DRK.TECH.HOUS.DRV
-8A_130_E4_DRK_FVOC_RAW.WHSE.TECH.HOUS.PEAK_G017
+9A|E3|HYPN|INST|DRK.TECH.HOUS.DRV
+7A|E2|SOUL|FVOC|ORG.HOUS.BUIL|G015
 ```
+
+BPM is not currently encoded in the tag (the formatter accepts a `bpm`
+argument for forward compatibility but does not emit it). Canonical BPM lives
+in the registry.
 
 `CATEGORY` is a compact code derived from the DJ taxonomy category label: each
 label word becomes 3-4 uppercase characters separated by dots, for example

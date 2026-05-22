@@ -31,7 +31,8 @@
       "Bash(awk '{print $9, $5}')",
       "Bash(grep:*)",
       "PowerShell(Import-Csv *)",
-      "Bash(pytest:*)"
+      "Bash(pytest:*)",
+      "Bash(tee outputs/vocal_spike_log.txt)"
     ]
   }
 }

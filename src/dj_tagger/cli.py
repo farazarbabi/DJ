@@ -144,6 +144,11 @@ def _setup_logging(verbose: bool, quiet: bool) -> None:
         else "%(message)s"
     )
     logging.basicConfig(level=level, format=fmt, force=True)
+    try:
+        from dj_registry.progress import install_tqdm_log_handler
+        install_tqdm_log_handler()
+    except ImportError:
+        pass
 
 
 def _quick_duration(path: str) -> float | None:

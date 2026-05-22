@@ -33,6 +33,11 @@ def _setup_logging(verbose: bool, quiet: bool) -> None:
         else "%(message)s"
     )
     logging.basicConfig(level=level, format=fmt, force=True)
+    try:
+        from dj_registry.progress import install_tqdm_log_handler
+        install_tqdm_log_handler()
+    except ImportError:
+        pass  # Older dj_registry — keep going with default StreamHandler.
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -51,10 +56,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help="Library paths (default: ./files)")
     p_run.add_argument("-r", "--recursive", action="store_true")
     p_run.add_argument("-w", "--workers", type=int, default=1, help="Parallel workers for extraction (default: 1)")
-    p_run.add_argument("--output", default=_DEFAULTS.grouped_dir, help="Folder output dir")
     p_run.add_argument("--write-tags", action="store_true", help="Write tags to file metadata")
     p_run.add_argument("--dry-run", action="store_true", help="Preview without writing anything")
-    p_run.add_argument("--copy", action="store_true", help="Copy files instead of hard-linking")
     p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings")
     p_run.add_argument("--algorithm", choices=["constrained", "agglomerative"], default=_DEFAULTS.clustering_method, help="Clustering algorithm (default: constrained)")
     p_run.add_argument("--no-registry", action="store_true", help="Skip loading registry enrichment")
@@ -90,19 +93,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("--feedback", default=_DEFAULTS.feedback_file)
 
     # --- apply ---
-    p_apply = sub.add_parser("apply", help="Write tags and create folders")
+    p_apply = sub.add_parser("apply", help="Write tags and generate playlists")
     p_apply.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
-    p_apply.add_argument("--output", default=_DEFAULTS.grouped_dir)
     p_apply.add_argument("--write-tags", action="store_true")
-    p_apply.add_argument("--copy", action="store_true")
     p_apply.add_argument("--dry-run", action="store_true")
     p_apply.add_argument("--playlists", default=_DEFAULTS.playlists_dir)
 
     # --- recommend ---
-    p_rec = sub.add_parser("recommend", help="Compute recommendations")
+    p_rec = sub.add_parser("recommend", help="Compute recommendations (CSV only)")
     p_rec.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)
     p_rec.add_argument("--csv", default=_DEFAULTS.recommendations_file)
-    p_rec.add_argument("--playlists", default=_DEFAULTS.playlists_dir)
 
     # --- feedback ---
     p_fb = sub.add_parser("feedback", help="Add feedback entries")
@@ -719,8 +719,7 @@ def _cmd_run(args) -> int:
     from .feedback.store import load_feedback
     from .feedback.apply import apply_feedback_to_distances
     from .output.csv_export import export_groups_csv, export_recommendations_csv
-    from .output.folders import create_group_folders
-    from .output.playlists import generate_group_playlists, generate_recommendation_playlists
+    from .output.playlists import generate_group_playlists
     from .recommend.neighbors import compute_recommendations
     from .config import GrouperConfig
     from dj_tagger.formats import format_tag
@@ -744,7 +743,6 @@ def _cmd_run(args) -> int:
         args.cache_dir = str(input_path / "cache")
         args.csv = str(input_path / "outputs" / "groups.csv")
         args.recommendations_csv = str(input_path / "outputs" / "recommendations.csv")
-        args.output = str(input_path / "outputs" / "Grouped")
         args.playlists = str(input_path / "outputs" / "playlists")
         args.feedback = str(input_path / "outputs" / "feedback.csv")
         out_dir = Path(ext_out)
@@ -775,8 +773,9 @@ def _cmd_run(args) -> int:
     if args.force_extract:
         for f in [cpaths["features"], cpaths["assignment"], cpaths["raw"]]:
             _safe_unlink(f, _allowed)
-        for d in [args.output, args.playlists]:
-            _safe_rmtree(d, _allowed)
+        # Only clear group playlists; categorical playlists (by_key, by_subgenre,
+        # by_popularity) are owned by the registry pipeline.
+        _safe_rmtree(str(Path(args.playlists) / "groups"), _allowed)
         for f in [args.csv, args.recommendations_csv]:
             _safe_unlink(f, _allowed)
         # Reset cache singleton so it reloads fresh
@@ -960,13 +959,8 @@ def _cmd_run(args) -> int:
     print(f"  CSV: {args.recommendations_csv}")
 
     if not args.dry_run:
-        # Clean and recreate group folders (hard links are instant)
-        _safe_rmtree(args.output, _allowed)
-        create_group_folders(
-            feature_tracks, assignment, args.output,
-            dry_run=False, use_copy=args.copy,
-        )
-        print(f"  Folders: {args.output}/ ({n_groups} groups)")
+        # Group folders intentionally not materialized — playlists are the
+        # supported deliverable. See output/playlists.py.
 
         # Incremental tag writing: skip files that already have the correct tag
         if args.write_tags:
@@ -993,11 +987,13 @@ def _cmd_run(args) -> int:
         print("  (dry run -- no files modified)")
 
     if args.playlists:
-        # Clean and recreate playlists
-        _safe_rmtree(args.playlists, _allowed)
+        # Clean and recreate group playlists. Categorical playlists
+        # (by_key/by_subgenre/by_popularity) live under the same root but are
+        # written by the registry pipeline; leave them untouched here.
+        groups_subdir = str(Path(args.playlists) / "groups")
+        _safe_rmtree(groups_subdir, _allowed)
         generate_group_playlists(feature_tracks, assignment, args.playlists)
-        generate_recommendation_playlists(recommendations, args.playlists)
-        print(f"  Playlists: {args.playlists}/")
+        print(f"  Playlists: {args.playlists}/groups/")
 
     print(f"\nDone in {_fmt_elapsed(_time.perf_counter() - t_step)}.")
     return 0
@@ -1144,7 +1140,6 @@ def _cmd_review(args) -> int:
 def _cmd_apply(args) -> int:
     from .features.builder import load_raw_cache, build_features_from_raw
     from .grouping.assignment import load_assignment
-    from .output.folders import create_group_folders
     from .output.playlists import generate_group_playlists
     from dj_tagger.formats import format_tag
     from dj_tagger.metadata import write_tag
@@ -1159,12 +1154,6 @@ def _cmd_apply(args) -> int:
     cache = build_features_from_raw(raw_cache, track_order, config=GrouperConfig())
     tracks = cache.tracks
     assignment = load_assignment(cpaths["assignment"])
-
-    print(f"Creating group folders in {args.output}...")
-    create_group_folders(
-        tracks, assignment, args.output,
-        dry_run=args.dry_run, use_copy=args.copy,
-    )
 
     if args.write_tags and not args.dry_run:
         print("Writing tags with group IDs to file metadata...")
@@ -1192,7 +1181,6 @@ def _cmd_recommend(args) -> int:
     from .features.builder import load_raw_cache, build_features_from_raw
     from .recommend.neighbors import compute_recommendations
     from .output.csv_export import export_recommendations_csv
-    from .output.playlists import generate_recommendation_playlists
     from .config import GrouperConfig
 
     config = GrouperConfig()
@@ -1210,10 +1198,6 @@ def _cmd_recommend(args) -> int:
 
     export_recommendations_csv(recommendations, args.csv)
     print(f"Recommendations exported to {args.csv}")
-
-    if args.playlists:
-        generate_recommendation_playlists(recommendations, args.playlists)
-        print(f"Recommendation playlists generated in {args.playlists}")
 
     return 0
 

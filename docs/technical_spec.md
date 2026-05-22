@@ -469,10 +469,14 @@ The registry sync path builds the COMMENT tag from:
 - tagger vocal
 - compact category code from the internal DJ taxonomy category label
 
-The current COMMENT shape is `KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]`.
+The current COMMENT shape is `KEY|ENERGY|VIBE|VOCAL[|CATEGORY][|GID]`.
 `CATEGORY` is the no-space code from the category label. Each label word becomes
 3-4 uppercase characters separated by dots, for example
 `Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`.
+
+BPM is not currently encoded in the tag; the formatter still accepts a `bpm`
+argument so it can be reintroduced without changing call sites. Canonical BPM
+remains in the registry.
 
 By default it leaves the dedicated TKEY/InitialKey field untouched so the
 original embedded key remains available as a resolver signal. Passing

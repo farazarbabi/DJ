@@ -82,7 +82,7 @@ def test_cached_result_tag_is_rebuilt_from_fields():
         "vocal": "VOC",
     }
 
-    assert _format_result_tag(result) == "9A_118_E2_MEL_VOC"
+    assert _format_result_tag(result) == "9A|E2|MEL|VOC"
 
 
 def test_result_tag_can_include_category_code():
@@ -96,13 +96,13 @@ def test_result_tag_can_include_category_code():
 
     assert (
         _format_result_tag(result, category="DRK.TECH.HOUS.DRV")
-        == "9A_118_E2_MEL_VOC_DRK.TECH.HOUS.DRV"
+        == "9A|E2|MEL|VOC|DRK.TECH.HOUS.DRV"
     )
 
 
 def test_registry_comment_tag_wins_over_local_reformat():
     result = {
-        "tag": "9A_118_E2_MEL_VOC",
+        "tag": "9A|E2|MEL|VOC",
         "energy": 2,
         "camelot": "9A",
         "bpm": 118.0,
@@ -113,7 +113,7 @@ def test_registry_comment_tag_wins_over_local_reformat():
         "canonical_key_camelot": "9A",
         "canonical_bpm": "118",
         "category": "DRK.TECH.HOUS.DRV",
-        "comment_tag": "9A_118_E2_MEL_VOC_DRK.TECH.HOUS.DRV",
+        "comment_tag": "9A|E2|MEL|VOC|DRK.TECH.HOUS.DRV",
     }
 
     assert _tag_from_registry_result(result, registry_result) == registry_result["comment_tag"]

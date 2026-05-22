@@ -60,8 +60,8 @@ def scan_library(paths: list[str], recursive: bool = True) -> list[TrackInfo]:
                 info.energy = int(parsed["energy"]) if parsed.get("energy", "?") != "?" else None
                 parsed_key = parsed.get("key")
                 info.key = None if is_unknown_key(parsed_key) else parsed_key
-                if "bpm" in parsed and parsed["bpm"] != "???":
-                    info.bpm = int(parsed["bpm"])
+                # BPM is no longer encoded in the COMMENT tag; it's recovered
+                # from the registry or fresh analysis elsewhere in the pipeline.
                 info.structure = parsed.get("structure")
                 if info.structure and len(info.structure) >= 3:
                     info.intro_bars = int(info.structure[:-1])

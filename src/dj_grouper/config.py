@@ -69,5 +69,4 @@ class GrouperConfig:
     feedback_file: str = "./outputs/feedback.csv"
     groups_file: str = "./outputs/groups.csv"
     recommendations_file: str = "./outputs/recommendations.csv"
-    grouped_dir: str = "./outputs/Grouped"
     playlists_dir: str = "./outputs/playlists"

@@ -21,6 +21,11 @@ def _setup_logging(verbose: bool = False, quiet: bool = False) -> None:
         level=level,
         format="%(levelname)s: %(message)s",
     )
+    try:
+        from .progress import install_tqdm_log_handler
+        install_tqdm_log_handler()
+    except ImportError:
+        pass
     # Suppress noisy HTTP request logging from httpx
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)

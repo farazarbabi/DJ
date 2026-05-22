@@ -245,8 +245,9 @@ Tagger-derived fields are not voted across sources; they are stored directly fro
 
 `dj-registry sync-tags` writes only the COMMENT tag:
 
-- COMMENT tag built from: canonical key, canonical BPM, stored tagger energy/mood/vocal, and compact internal DJ taxonomy category label code
-- Current shape: `KEY_BPM_ENERGY_VIBE_VOCAL[_CATEGORY][_GID]`
+- COMMENT tag built from: canonical key, stored tagger energy/mood/vocal, and compact internal DJ taxonomy category label code
+- Current shape: `KEY|ENERGY|VIBE|VOCAL[|CATEGORY][|GID]`
+- BPM is intentionally not encoded in the tag right now; canonical BPM remains in the registry, and the formatter still accepts `bpm` so it can be reintroduced later
 - `CATEGORY` is derived from the selected category label, not written as `category_id`
 
 The TKEY/InitialKey field is intentionally left untouched by default so the

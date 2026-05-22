@@ -19,7 +19,7 @@ def test_groups_csv_export(tmp_path):
     group = GroupInfo(
         group_id="G001", member_indices=[0], medoid_index=0,
         key="9A", energy=3, vibe="HYPN", structure="64H",
-        vocal="INST", bpm=126, folder_name="9A_126_E3_HYPN_INST",
+        vocal="INST", bpm=126, folder_name="9A_E3_HYPN_INST",
     )
     assignment = GroupAssignment(groups=[group], track_to_group={"/music/a.aiff": "G001"})
 

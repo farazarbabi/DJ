@@ -104,7 +104,7 @@ def test_cross_module_sharing(tmp_path):
 
     tagger_result = {
         "file": "track.aiff",
-        "tag": "9A_126_E3_HYPN_INST",
+        "tag": "9A|E3|HYPN|INST",
         "energy": 3,
         "camelot": "9A",
         "vibe": "HYPN",

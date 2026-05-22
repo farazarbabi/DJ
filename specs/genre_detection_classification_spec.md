@@ -92,7 +92,7 @@ Fields may be missing. The classifier must handle sparse inputs gracefully.
   "embedded_artist": "Artist",
   "embedded_album": "Release Name",
   "embedded_genre": "Tech House",
-  "embedded_comment": "9A_126_E4_HYPN_INST"
+  "embedded_comment": "9A|E4|HYPN|INST"
 }
 ```
 
