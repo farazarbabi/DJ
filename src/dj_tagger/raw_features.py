@@ -11,6 +11,7 @@ from dj_grouper.features.dsp import extract_dsp_features, extract_section_dsp
 
 from .analyzers.key import analyze_key
 from .analyzers.sections import analyze_sections
+from .analyzers.vocal_stem import analyze_vocal_stem, result_to_dict as vocal_stem_to_dict
 from .audio import TrackAudio
 from .derive import derive_all
 from .formats import format_tag
@@ -75,14 +76,34 @@ def compute_tagger_artifacts(
     *,
     audio_features: dict[str, float] | None = None,
     dsp: dict[str, float] | None = None,
+    vocal_stem: dict | None = None,
     use_essentia: bool = False,
 ) -> dict:
-    """Compute canonical tagger outputs plus reusable raw artifacts."""
+    """Compute canonical tagger outputs plus reusable raw artifacts.
+
+    ``vocal_stem`` may be passed in (loaded from cache by the caller) to skip
+    the expensive Demucs separation. When None, separation runs once and the
+    resulting scalars are returned for the caller to persist as their own raw
+    cache layer.
+    """
     if dsp is None:
         dsp = extract_dsp_features(track_audio)
     raw_analysis = extract_raw_analysis(track_audio)
     section_map = analyze_sections(track_audio)
     section_dsp = extract_section_dsp(track_audio, section_map)
+
+    if vocal_stem is None:
+        try:
+            stem_result = analyze_vocal_stem(track_audio)
+            vocal_stem = vocal_stem_to_dict(stem_result) if stem_result is not None else {}
+        except Exception:
+            logger.warning("Vocal-stem analysis failed", exc_info=True)
+            vocal_stem = {}
+    if vocal_stem:
+        # Inline into raw_analysis so derive_vocal sees stem metrics without
+        # a second cache lookup.
+        raw_analysis.update({k: v for k, v in vocal_stem.items() if k.startswith("vocal_stem_")})
+
     derived = derive_all(dsp, raw_analysis, audio_features=audio_features)
 
     key_result = None
@@ -135,4 +156,5 @@ def compute_tagger_artifacts(
         "dsp": dsp,
         "raw_analysis": raw_analysis,
         "section_dsp": section_dsp,
+        "vocal_stem": vocal_stem,
     }

@@ -320,6 +320,14 @@ def _run_extraction(
         dsp_data = _cached_raw_layer(ucache, filename, dur, "dsp")
         section_dsp_data = _cached_raw_layer(ucache, filename, dur, "section_dsp")
         raw_analysis = ucache.get_track(filename, dur, "raw_analysis")
+        # Merge cached vocal_stem scalars so re-derivation picks them up
+        # without re-running Demucs.
+        stem_data = ucache.get_track(filename, dur, "vocal_stem")
+        if isinstance(raw_analysis, dict) and isinstance(stem_data, dict):
+            raw_analysis = {
+                **raw_analysis,
+                **{k: v for k, v in stem_data.items() if k.startswith("vocal_stem_")},
+            }
         tagger_key = ucache.track_key(filename, dur, "tagger")
         any_tagger_entry = ucache._entries.get(tagger_key)
         collected_tagger = any_tagger_entry.data if any_tagger_entry and isinstance(any_tagger_entry.data, dict) else None
@@ -416,6 +424,8 @@ def _run_extraction(
         ucache.put_track(filename, dur, "section_dsp", result["section_dsp"], mtime=mtime)
         if "raw_analysis" in result:
             ucache.put_track(filename, dur, "raw_analysis", result["raw_analysis"], mtime=mtime)
+        if result.get("vocal_stem"):
+            ucache.put_track(filename, dur, "vocal_stem", result["vocal_stem"], mtime=mtime)
         # Preserve a richer Songstats-aware tagger entry from registry/tagger if it exists.
         existing_key = ucache.track_key(filename, dur, "tagger")
         existing_entry = ucache._entries.get(existing_key)

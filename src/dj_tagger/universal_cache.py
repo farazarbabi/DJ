@@ -17,6 +17,7 @@ Layers:
   - "dsp"         — ~45 DSP features dict
   - "section_dsp" — per-section DSP features dict
   - "clap"        — 512-dim CLAP embedding (NDArray)
+  - "vocal_stem"  — Demucs vocal-stem scalar metrics dict
   - "songstats"   — Songstats API observation
   - "rekordbox"   — Rekordbox XML observation
   - "tag"         — file tag observation
@@ -52,6 +53,7 @@ RAW_LAYERS = frozenset({
     "section_dsp",    # per-section DSP features
     "clap",           # 512-dim CLAP embedding (fixed model)
     "raw_analysis",   # intermediate features for re-derivation (bar_energies, vocal_ratio, etc.)
+    "vocal_stem",     # Demucs vocal-stem RMS/ratio/activity scalars (fixed model)
     "tag",            # file embedded tags
     "rekordbox",      # Rekordbox XML data
     "songstats",      # Songstats API response

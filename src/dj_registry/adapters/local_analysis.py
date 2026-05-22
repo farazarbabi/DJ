@@ -507,6 +507,8 @@ def run_analysis(
                     ucache.put_track(fname, store_dur, "raw_analysis", result["raw_analysis"], mtime=mtime)
                 if isinstance(result.get("section_dsp"), dict):
                     ucache.put_track(fname, store_dur, "section_dsp", result["section_dsp"], mtime=mtime)
+                if isinstance(result.get("vocal_stem"), dict) and result["vocal_stem"]:
+                    ucache.put_track(fname, store_dur, "vocal_stem", result["vocal_stem"], mtime=mtime)
                 result["tagger_result"] = tagger_result
                 fresh_results.append((track_id, file_id, path, result))
             else:

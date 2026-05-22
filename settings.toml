@@ -128,31 +128,33 @@ mel_valence = [0.15, 0.50, 0.30]     # valence > 0.50 → positive/melodic
 
 
 # ─── Vocal Detection ────────────────────────────────────────────────────────
-# Detects vocal presence from spectral energy in the vocal frequency band, then
-# maps the result to taxonomy vocal profiles such as INST, VOC, FVOC, SPK,
-# CHANT, DUB, and TOOL.
+# Primary signal: Demucs vocal-stem separation (analyzers/vocal_stem.py).
+# Five 30s slices are separated; we measure stem-to-mix RMS ratio and the
+# fraction of 0.5s windows where the stem is above the noise floor. The
+# spectral heuristic below remains as a fallback when Demucs is unavailable.
+# Profiles: INST, VOC, FVOC, SPK, CHANT, DUB, TOOL.
 [vocal]
 
-# Decision boundary: vocal_score above this = vocal-content profile.
-# Lower = more tracks classified as vocal. Higher = stricter detection.
+# Spectral-fallback decision boundary. Only used when stem signals are missing.
+# vocal_score above this = vocal-content profile.
 frame_threshold = 0.20
 
-# Frequency band for vocal detection (Hz). 300-3400 covers fundamental + formants.
-# Widen to catch breathy vocals; narrow to reduce false positives from synths.
+# Frequency band for the spectral fallback (Hz). 300-3400 covers fundamental
+# + formants but also coincides with most synth-lead energy in melodic techno
+# — which is the reason the stem detector is now primary.
 freq_low = 300.0
 freq_high = 3400.0
 
-# Per-frame thresholds for vocal-like frames.
+# Per-frame thresholds for the spectral fallback.
 energy_ratio = 0.12    # min fraction of total energy in vocal band per frame
 flatness_max = 0.5     # max spectral flatness (above = noise, not vocals)
 
-# How vocal_score is computed from vocal_fraction and temporal consistency.
-# vocal_score = vocal_fraction * (base_weight + temporal_weight * temporal_bonus)
-# Temporal bonus rewards sustained vocal runs vs. scattered transients.
+# How vocal_score is computed from vocal_fraction and temporal consistency
+# in the fallback path.
 score_base_weight = 0.6
 score_temporal_weight = 0.4
 
-# Confidence = distance_from_threshold / this. Higher scale = lower confidence.
+# Fallback-path confidence: distance_from_threshold / this.
 confidence_scale = 0.15
 
 

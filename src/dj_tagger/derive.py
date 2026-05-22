@@ -106,11 +106,18 @@ def derive_vocal(
     audio_features: dict[str, float] | None = None,
     mood_scores: dict[str, float] | None = None,
 ) -> dict:
-    """Recompute taxonomy vocal profile from cached raw analysis features."""
+    """Recompute taxonomy vocal profile from cached raw analysis features.
+
+    When Demucs vocal-stem scalars are present in raw_analysis they drive the
+    decision; the spectral vocal_ratio remains as a documented secondary
+    signal.
+    """
     s = get_section("vocal")
 
     vocal_ratio = raw_analysis.get("vocal_ratio", 0.0)
     temporal_bonus = raw_analysis.get("vocal_temporal_bonus", 0.0)
+    stem_ratio_db = raw_analysis.get("vocal_stem_mix_ratio_db")
+    stem_activity_frac = raw_analysis.get("vocal_stem_activity_frac")
     base_w = s.get("score_base_weight", 0.6)
     temp_w = s.get("score_temporal_weight", 0.4)
     threshold = s.get("frame_threshold", 0.20)
@@ -125,9 +132,25 @@ def derive_vocal(
         dsp=dsp,
         audio_features=audio_features,
         mood_scores=mood_scores,
+        stem_ratio_db=stem_ratio_db,
+        stem_activity_frac=stem_activity_frac,
     )
-    vocal_score = vocal_ratio * (base_w + temp_w * temporal_bonus)
-    detector_confidence = min(1.0, abs(vocal_score - threshold) / conf_scale)
+    if stem_ratio_db is not None and stem_activity_frac is not None:
+        # Stem-based confidence: how decisive each signal is, in the direction
+        # of the chosen label. INST decision is decisive at low ratio (stem
+        # inaudible) OR low activity (no sustained vocal). VOC decision is
+        # decisive at high ratio OR high sustained activity. Take the
+        # stronger of the two — either alone is enough.
+        if not has_vocals:
+            ratio_extreme = min(1.0, max(0.0, (-25.0 - float(stem_ratio_db)) / 10.0))
+            activity_extreme = min(1.0, max(0.0, (0.30 - float(stem_activity_frac)) / 0.20))
+        else:
+            ratio_extreme = min(1.0, max(0.0, (float(stem_ratio_db) + 25.0) / 10.0))
+            activity_extreme = min(1.0, max(0.0, (float(stem_activity_frac) - 0.30) / 0.20))
+        detector_confidence = max(ratio_extreme, activity_extreme)
+    else:
+        vocal_score = vocal_ratio * (base_w + temp_w * temporal_bonus)
+        detector_confidence = min(1.0, abs(vocal_score - threshold) / conf_scale)
     confidence = max(detector_confidence, profile_confidence)
 
     return {

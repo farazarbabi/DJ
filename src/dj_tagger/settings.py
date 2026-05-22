@@ -36,6 +36,7 @@ _SECTION_DSP_VERSION_FILES = (
 _RAW_ANALYSIS_VERSION_FILES = (
     "src/dj_tagger/audio.py",
     "src/dj_tagger/raw_features.py",
+    "src/dj_tagger/analyzers/vocal_stem.py",
 )
 _RAW_VERSION_FILES = tuple(dict.fromkeys(
     _DSP_VERSION_FILES + _RAW_ANALYSIS_VERSION_FILES
