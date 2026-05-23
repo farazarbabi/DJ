@@ -32,7 +32,12 @@
       "Bash(grep:*)",
       "PowerShell(Import-Csv *)",
       "Bash(pytest:*)",
-      "Bash(tee outputs/vocal_spike_log.txt)"
+      "Bash(tee outputs/vocal_spike_log.txt)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Faraz.Arbabi\\\\Documents\\\\code\\\\personal\\\\DJ\\\\src\\\\dj_registry\\\\taxonomy\" -Filter \"*.py\")",
+      "Bash(Select-Object Name)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Faraz.Arbabi\\\\Documents\\\\code\\\\personal\\\\DJ\" -Directory)",
+      "Bash(Get-ChildItem *)",
+      "Bash(powershell *)"
     ]
   }
 }

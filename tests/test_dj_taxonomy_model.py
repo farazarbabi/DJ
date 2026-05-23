@@ -137,7 +137,7 @@ def test_generate_dj_ground_truth_csv_with_mocked_client(tmp_path):
             return {
                 "category_id": "dark_tech_house_driver",
                 "confidence": 0.86,
-                "alternate_category_ids": ["dark_indie_tech_house"],
+                "alternate_category_ids": ["driving_dark_indie_tech"],
                 "rationale": "Dark E4 rolling club evidence.",
                 "warnings": "",
             }
@@ -157,7 +157,7 @@ def test_generate_dj_ground_truth_csv_with_mocked_client(tmp_path):
     assert rows[0]["category_id"] == "dark_tech_house_driver"
     assert rows[0]["category_label"] == "Dark Tech-House Driver"
     assert rows[0]["moods"]
-    assert rows[0]["alternate_category_ids"] == "dark_indie_tech_house"
+    assert rows[0]["alternate_category_ids"] == "driving_dark_indie_tech"
 
 
 def test_generate_dj_ground_truth_default_out_is_registry_output(tmp_path):

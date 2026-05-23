@@ -32,7 +32,13 @@ def _setup_logging(verbose: bool = False, quiet: bool = False) -> None:
 
 
 def _build_config(args: argparse.Namespace) -> RegistryConfig:
-    """Build RegistryConfig from parsed CLI args."""
+    """Build RegistryConfig from parsed CLI args.
+
+    Output-dir resolution order (matches `dj run`):
+      1. --output (explicit)
+      2. <paths[0]>/outputs/registry if --paths set (auto-derived from library location)
+      3. ./outputs/registry (default)
+    """
     config = RegistryConfig()
 
     if hasattr(args, "paths") and args.paths:
@@ -41,6 +47,12 @@ def _build_config(args: argparse.Namespace) -> RegistryConfig:
         config.rekordbox_xml_path = args.rekordbox_xml
     if hasattr(args, "output") and args.output:
         config.output_dir = args.output
+    elif hasattr(args, "paths") and args.paths:
+        # Auto-derive from the first library path so models / overview / etc.
+        # land next to the tracks rather than in cwd.
+        first = args.paths[0] if isinstance(args.paths, list) else args.paths
+        first = str(first).rstrip("/").rstrip("\\")
+        config.output_dir = f"{first}/outputs/registry"
     if hasattr(args, "workers") and args.workers:
         config.analysis_workers = args.workers
 
@@ -343,6 +355,9 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if command == "report":
+        return _cmd_dj_taxonomy_report(args, store)
+
     from .sync.export import generate_reports
     from .taxonomy.dj_model import classify_all_dj_taxonomies
 
@@ -367,6 +382,115 @@ def _print_dj_taxonomy_locations(model_dir: str, *, include_training: bool) -> N
         print(f"DJ taxonomy evaluation complete -> {base}")
     print(f"Comparison metrics -> {base / 'model_comparison.json'}")
     print(f"Per-track comparison -> {base / 'model_comparison.csv'}")
+
+
+def _cmd_dj_taxonomy_report(args: argparse.Namespace, store: CsvStore) -> int:
+    """Pretty-print training metrics, model comparison, and (optionally) library distribution."""
+    model_dir = Path(getattr(args, "model_dir", None) or Path(store.output_dir) / "dj_taxonomy_model")
+    if not model_dir.exists():
+        print(f"No trained models found at {model_dir}.")
+        print("Run `dj-registry dj-taxonomy train-models --labels <ground-truth.csv>` first.")
+        return 1
+
+    print(f"DJ Taxonomy Model Report")
+    print("=" * 64)
+    print(f"Model dir: {model_dir}")
+    print()
+
+    # 1. Per-mode training metrics
+    print("── Training metrics (per mode, on held-out validation) ─────────")
+    metrics_by_mode: dict[str, dict] = {}
+    for mode in ("internal", "external"):
+        report_path = model_dir / mode / "training_report.json"
+        if not report_path.exists():
+            print(f"  {mode}: report not found ({report_path})")
+            continue
+        with report_path.open("r", encoding="utf-8") as f:
+            report = json.load(f)
+        metrics = report.get("metrics", {})
+        metrics_by_mode[mode] = metrics
+        validation_kind = metrics.get("validation_kind", "?")
+        validation_n = metrics.get("validation_examples", "?")
+        top1 = metrics.get("top1_accuracy", 0.0)
+        top3 = metrics.get("top3_accuracy", 0.0)
+        mf1 = metrics.get("macro_f1", 0.0)
+        wf1 = metrics.get("weighted_f1", 0.0)
+        conf = metrics.get("average_confidence", 0.0)
+        examples = report.get("examples", "?")
+        classes = report.get("classes", "?")
+        print(f"  {mode:9s}  examples={examples}  classes={classes}  validation={validation_kind} ({validation_n})")
+        print(f"             top-1={top1:.1%}   top-3={top3:.1%}   macro-F1={mf1:.3f}   weighted-F1={wf1:.3f}   avg-conf={conf:.2f}")
+        warnings = report.get("warnings", [])
+        for warning in warnings:
+            print(f"             ! {warning}")
+    print()
+
+    # 2. §9.4 gate check
+    print("── §9.4 gates ──────────────────────────────────────────────────")
+    gates = (
+        ("top-1 ≥ 50%", "top1_accuracy", 0.50, lambda v: f"{v:.1%}"),
+        ("top-3 ≥ 75%", "top3_accuracy", 0.75, lambda v: f"{v:.1%}"),
+        ("macro F1 ≥ 0.30", "macro_f1", 0.30, lambda v: f"{v:.3f}"),
+    )
+    for label, key, threshold, fmt in gates:
+        cells = []
+        for mode in ("internal", "external"):
+            value = metrics_by_mode.get(mode, {}).get(key, 0.0)
+            mark = "✓" if value >= threshold else "✗"
+            cells.append(f"{mode}={mark} {fmt(value)}")
+        print(f"  {label:18s} {' | '.join(cells)}")
+    print()
+
+    # 3. Cross-model comparison
+    comparison_path = model_dir / "model_comparison.json"
+    if comparison_path.exists():
+        with comparison_path.open("r", encoding="utf-8") as f:
+            comparison = json.load(f)
+        print("── Cross-model comparison ──────────────────────────────────────")
+        print(f"  Examples evaluated: {comparison.get('examples', 0)}")
+        agreement = comparison.get("agreement_rate", 0.0)
+        print(f"  Agreement rate:     {agreement:.1%}")
+        print(f"  External wins:      {comparison.get('external_improved', 0)} (correct where internal wrong)")
+        print(f"  Internal wins:      {comparison.get('external_worsened', 0)} (correct where external wrong)")
+        print()
+
+    # 4. Live library distribution (if a model is present)
+    print("── Library bucket distribution (current `dj run` predictions) ──")
+    try:
+        from .taxonomy.dj_model import run_library_distribution_check
+        check = run_library_distribution_check(
+            store,
+            model_dir=str(model_dir),
+            taxonomy_path=getattr(args, "taxonomy", None),
+            show_progress=_show_progress(args),
+        )
+    except FileNotFoundError as exc:
+        print(f"  Skipped: {exc}")
+        return 0
+
+    total = check.get("total_tracks", 0)
+    largest_id = check.get("largest_bucket_id", "")
+    largest_share = check.get("largest_bucket_share", 0.0)
+    cap = check.get("max_bucket_share", 0.20)
+    passes = check.get("passes_cap", False)
+    cap_mark = "✓" if passes else "✗"
+    print(f"  Total tracks:   {total}")
+    print(f"  Largest bucket: {largest_id} ({largest_share:.1%})  [cap ≤{cap:.0%}: {cap_mark}]")
+    counts = check.get("predictions", {})
+    if counts:
+        top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        print(f"  Top 10 predicted buckets:")
+        for cat_id, count in top:
+            share = count / total if total else 0.0
+            print(f"    {count:4d}  ({share:5.1%})  {cat_id}")
+    print()
+    if not passes:
+        print(f"  §9.4 bucket cap: ✗ FAILED — {largest_id!r} at {largest_share:.1%} exceeds {cap:.0%}.")
+        print(f"  Consider retraining via train_with_collapse_guard, or tightening features.")
+    else:
+        print(f"  §9.4 bucket cap: ✓ PASSED")
+
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -529,9 +653,10 @@ def main(argv: list[str] | None = None) -> int:
     dj_tax_sub = p_dj_tax.add_subparsers(dest="dj_taxonomy_command")
 
     p_dj_tax_classify = dj_tax_sub.add_parser("classify", help="Classify tracks with both DJ taxonomy models")
+    p_dj_tax_classify.add_argument("paths", nargs="*", help="Library paths (auto-derives --output)")
     p_dj_tax_classify.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
     p_dj_tax_classify.add_argument("--model-dir", default=None, help="Optional DJ taxonomy model directory")
-    p_dj_tax_classify.add_argument("--output", default="./outputs/registry")
+    p_dj_tax_classify.add_argument("--output", default=None, help="Registry output dir (default: <paths>/outputs/registry or ./outputs/registry)")
     add_no_progress(p_dj_tax_classify)
 
     p_dj_tax_gt = dj_tax_sub.add_parser("generate-ground-truth", help="Generate GPT-5 seeded DJ taxonomy labels")
@@ -558,24 +683,36 @@ def main(argv: list[str] | None = None) -> int:
     add_no_progress(p_dj_tax_gt)
 
     p_dj_tax_train = dj_tax_sub.add_parser("train-models", help="Train internal and external DJ taxonomy models")
+    p_dj_tax_train.add_argument("paths", nargs="*", help="Library paths (auto-derives --output)")
     p_dj_tax_train.add_argument("--labels", required=True, help="DJ taxonomy ground-truth labels CSV")
     p_dj_tax_train.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
-    p_dj_tax_train.add_argument("--model-dir", default=None, help="Output model directory")
+    p_dj_tax_train.add_argument("--model-dir", default=None, help="Output model directory (default: <output>/dj_taxonomy_model)")
     p_dj_tax_train.add_argument("--validation-split", type=float, default=0.2)
     p_dj_tax_train.add_argument("--seed", type=int, default=42)
-    p_dj_tax_train.add_argument("--output", default="./outputs/registry")
+    p_dj_tax_train.add_argument("--output", default=None, help="Registry output dir (default: <paths>/outputs/registry or ./outputs/registry)")
     add_no_progress(p_dj_tax_train)
 
     p_dj_tax_eval = dj_tax_sub.add_parser("evaluate", help="Evaluate both DJ taxonomy models against labels CSV")
+    p_dj_tax_eval.add_argument("paths", nargs="*", help="Library paths (auto-derives --output)")
     p_dj_tax_eval.add_argument("--labels", required=True, help="DJ taxonomy ground-truth labels CSV")
     p_dj_tax_eval.add_argument("--model-dir", required=True, help="Trained DJ taxonomy model directory")
     p_dj_tax_eval.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
-    p_dj_tax_eval.add_argument("--output", default="./outputs/registry")
+    p_dj_tax_eval.add_argument("--output", default=None, help="Registry output dir (default: <paths>/outputs/registry or ./outputs/registry)")
     add_no_progress(p_dj_tax_eval)
 
     p_dj_tax_api = dj_tax_sub.add_parser("test-api", help="Test OpenAI/Azure OpenAI DJ taxonomy labeling connection")
     p_dj_tax_api.add_argument("--model", default=None, help="OpenAI model to use (defaults to OPENAI_MODEL or gpt-5)")
     p_dj_tax_api.add_argument("--output", default="./outputs/registry")
+
+    p_dj_tax_report = dj_tax_sub.add_parser(
+        "report",
+        help="Pretty-print training metrics, model comparison, gate checks, and library distribution",
+    )
+    p_dj_tax_report.add_argument("paths", nargs="*", help="Library paths (auto-derives --output)")
+    p_dj_tax_report.add_argument("--model-dir", default=None, help="Trained model directory (default: <output>/dj_taxonomy_model)")
+    p_dj_tax_report.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
+    p_dj_tax_report.add_argument("--output", default=None, help="Registry output dir (default: <paths>/outputs/registry or ./outputs/registry)")
+    add_no_progress(p_dj_tax_report)
 
     # run (full pipeline)
     p_run = sub.add_parser("run", help="Run full pipeline")

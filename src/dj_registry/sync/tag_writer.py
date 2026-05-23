@@ -45,7 +45,15 @@ def _parse_energy(value: str | int | None) -> int | None:
 
 
 def _category_label_for_tag(track) -> str:
-    """Use the internal DJ-taxonomy model label for COMMENT tags when available."""
+    """Use the internal DJ-taxonomy model label for COMMENT tags when available.
+
+    Respects the spec §7.2 null-fallback: if the primary classifier rolled the
+    track to "unclassified" (low confidence), we don't sneak the internal-model
+    label back into the COMMENT tag's CATEGORY segment.
+    """
+    primary_id = str(getattr(track, "dj_taxonomy_id", "") or "").strip()
+    if primary_id == "unclassified":
+        return ""
     return (
         str(getattr(track, "dj_taxonomy_internal_label", "") or "").strip()
         or str(getattr(track, "dj_taxonomy_label", "") or "").strip()

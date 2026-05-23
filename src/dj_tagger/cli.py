@@ -356,7 +356,10 @@ def _resolve_via_registry(
                 "canonical_key_camelot": track.canonical_key_camelot,
                 "canonical_bpm": track.canonical_bpm,
                 "category": _category_code_for_tag(track),
-                "category_label": track.dj_taxonomy_internal_label or track.dj_taxonomy_label,
+                "category_label": (
+                    "" if track.dj_taxonomy_id == "unclassified"
+                    else (track.dj_taxonomy_internal_label or track.dj_taxonomy_label)
+                ),
                 "comment_tag": _build_comment_tag(track),
             }
 

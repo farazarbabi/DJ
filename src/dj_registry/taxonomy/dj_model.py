@@ -19,16 +19,40 @@ from ..models import FileRecord, LogicalTrack, SourceObservation, now_iso
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from .dj_schema import DjTaxonomy, external_evidence_available, load_dj_taxonomy
-from .features import build_track_features, summarize_feature_groups
+from .features import (
+    build_track_features,
+    is_afro_tribal_family,
+    is_eligible_for_afro_tribal,
+    load_artist_priors,
+    load_label_priors,
+    summarize_feature_groups,
+)
 
-DJ_MODEL_VERSION = "dj-taxonomy-dual-v1"
-DJ_FEATURE_SCHEMA_VERSION = "dj-taxonomy-feature-schema-v1"
+DJ_MODEL_VERSION = "dj-taxonomy-dual-v2"
+DJ_FEATURE_SCHEMA_VERSION = "dj-taxonomy-feature-schema-v2"
 MODEL_FILENAME = "model.pkl"
 REPORT_FILENAME = "training_report.json"
 AUDIT_FILENAME = "training_audit.csv"
 COMPARISON_JSON = "model_comparison.json"
 COMPARISON_CSV = "model_comparison.csv"
 VALID_FEATURE_MODES = {"internal", "external"}
+
+# Spec §7 — null fallback sentinel and confidence-band thresholds
+UNCLASSIFIED_ID = "unclassified"
+UNCLASSIFIED_THRESHOLD = 0.35
+
+
+def confidence_to_level(confidence: float) -> str:
+    """Spec §7.1 — map calibrated probability to a user-facing level string."""
+    if confidence >= 0.85:
+        return "high"
+    if confidence >= 0.70:
+        return "medium-high"
+    if confidence >= 0.55:
+        return "medium"
+    if confidence >= UNCLASSIFIED_THRESHOLD:
+        return "low"
+    return "unknown"
 
 
 @dataclass
@@ -106,6 +130,20 @@ class DjTaxonomyModel:
             for category_id, probability in probabilities.items()
             if taxonomy.validate_category_id(category_id)
         ]
+        # Spec §6.2 — hard candidate filter: drop afro/tribal categories when
+        # the track lacks explicit afro/tribal provider/prior/mix-name signal.
+        if not is_eligible_for_afro_tribal(
+            track,
+            observations,
+            file_record,
+            artist_priors=load_artist_priors(),
+            label_priors=load_label_priors(),
+        ):
+            ranked = [
+                (cat_id, score)
+                for cat_id, score in ranked
+                if not is_afro_tribal_family(taxonomy.category(cat_id).family)
+            ]
         ranked.sort(key=lambda item: item[1], reverse=True)
         if not ranked:
             return DjCategoryPrediction(
@@ -255,12 +293,29 @@ def load_dj_taxonomy_model_if_available(
     *,
     taxonomy_path: str | None = None,
 ) -> DjTaxonomyModel | None:
+    """Load a pickled DJ taxonomy model if present and compatible.
+
+    Returns None when the model directory is missing OR when the persisted
+    model is incompatible with the current feature schema / taxonomy hash.
+    Treating schema mismatch as "no model" avoids breaking the pipeline after
+    a feature-engineering change — the user retrains explicitly when ready.
+    """
     if not model_dir:
         return None
     artifact_path = Path(model_dir) / MODEL_FILENAME
     if not artifact_path.exists():
         return None
-    return load_dj_taxonomy_model(model_dir, taxonomy_path=taxonomy_path)
+    try:
+        return load_dj_taxonomy_model(model_dir, taxonomy_path=taxonomy_path)
+    except ValueError as exc:
+        # Schema mismatch, taxonomy drift, or corrupt artifact — skip.
+        import logging
+        logging.getLogger(__name__).info(
+            "DJ taxonomy model at %s is incompatible (%s); skipping until retrain.",
+            artifact_path,
+            exc,
+        )
+        return None
 
 
 def evaluate_dj_taxonomy_models(
@@ -427,7 +482,24 @@ def _apply_predictions_to_track(
     else:
         primary = external_prediction if external_prediction.category_id else internal_prediction
         source_model = "external" if external_prediction.category_id else "internal"
-    if primary.category_id:
+
+    # Spec §7.2 — null fallback when calibrated confidence is below threshold
+    if primary.category_id and primary.confidence < UNCLASSIFIED_THRESHOLD:
+        track.dj_taxonomy_id = UNCLASSIFIED_ID
+        track.dj_taxonomy_label = ""
+        track.dj_taxonomy_family = ""
+        track.dj_taxonomy_moods = ""
+        track.dj_taxonomy_grooves = ""
+        track.dj_taxonomy_set_roles = ""
+        track.dj_taxonomy_bpm_range = ""
+        track.dj_taxonomy_energy_range = ""
+        track.dj_taxonomy_vocal_profiles = ""
+        track.dj_taxonomy_source_genres = ""
+        track.dj_taxonomy_keywords = ""
+        track.dj_taxonomy_confidence = primary.confidence
+        track.dj_taxonomy_confidence_level = "unknown"
+        track.dj_taxonomy_source_model = source_model
+    elif primary.category_id:
         category = taxonomy.category(primary.category_id)
         track.dj_taxonomy_id = category.id
         track.dj_taxonomy_label = category.label
@@ -441,6 +513,7 @@ def _apply_predictions_to_track(
         track.dj_taxonomy_source_genres = ";".join(category.source_genres)
         track.dj_taxonomy_keywords = ";".join(category.keywords)
         track.dj_taxonomy_confidence = primary.confidence
+        track.dj_taxonomy_confidence_level = confidence_to_level(primary.confidence)
         track.dj_taxonomy_source_model = source_model
     track.dj_taxonomy_internal_id = internal_prediction.category_id
     track.dj_taxonomy_internal_label = internal_prediction.category_label
@@ -674,6 +747,148 @@ def _split_examples(
     validation_count = max(1, int(round(len(shuffled) * validation_split)))
     validation_count = min(validation_count, len(shuffled) - 1)
     return shuffled[validation_count:], shuffled[:validation_count]
+
+
+# ── Spec §9.2 / §9.3 — Library-distribution check + anti-collapse guard ─────
+
+
+class CollapseGuardError(RuntimeError):
+    """Raised by train_with_collapse_guard when the largest predicted bucket
+    persistently exceeds the 20% cap after the maximum retrain attempts."""
+
+
+def run_library_distribution_check(
+    store: CsvStore,
+    *,
+    model_dir: str | Path,
+    taxonomy_path: str | None = None,
+    primary_model: str = "external",
+    max_bucket_share: float = 0.20,
+    show_progress: bool = False,
+) -> dict[str, Any]:
+    """Predict on every track and report bucket-share distribution.
+
+    Returns a dict matching the spec §9.2 library_distribution_check schema:
+        {
+            "total_tracks": <int>,
+            "predictions": {"<id>": <count>},
+            "largest_bucket_id": "<id>",
+            "largest_bucket_share": <float>,
+            "passes_cap": <bool>,
+            "max_bucket_share": <float>,  # the threshold tested
+        }
+    """
+    taxonomy = load_dj_taxonomy(taxonomy_path)
+    base_dir = Path(model_dir)
+    model = load_dj_taxonomy_model_if_available(base_dir / primary_model, taxonomy_path=taxonomy_path)
+    if model is None:
+        # Fall back to the other mode if requested one is missing
+        other = "internal" if primary_model == "external" else "external"
+        model = load_dj_taxonomy_model_if_available(base_dir / other, taxonomy_path=taxonomy_path)
+    if model is None:
+        raise FileNotFoundError(f"No DJ taxonomy model found under {base_dir}")
+
+    tracks = store.load_tracks()
+    files = store.load_files()
+    observations = store.load_observations()
+    file_by_track = {f.track_id: f for f in files if f.track_id and f.is_primary_file}
+    obs_by_track: dict[str, list[SourceObservation]] = {}
+    for obs in observations:
+        if obs.track_id:
+            obs_by_track.setdefault(obs.track_id, []).append(obs)
+
+    counts: dict[str, int] = {}
+    progress = ProgressBar(len(tracks), label="Library distribution", enabled=show_progress)
+    for index, track in enumerate(tracks, start=1):
+        track_obs = obs_by_track.get(track.track_id, [])
+        file_record = file_by_track.get(track.track_id)
+        prediction = model.predict(track, track_obs, file_record, taxonomy)
+        # Apply the same null-fallback rule the writer uses, so the audit
+        # reflects what would actually end up on tracks_master.csv.
+        if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
+            cat_id = UNCLASSIFIED_ID
+        else:
+            cat_id = prediction.category_id or UNCLASSIFIED_ID
+        counts[cat_id] = counts.get(cat_id, 0) + 1
+        progress.update(index, track.title_canonical, category=cat_id)
+    progress.finish()
+
+    total = max(1, len(tracks))
+    largest_id = max(counts, key=counts.get) if counts else ""
+    largest_count = counts.get(largest_id, 0)
+    largest_share = largest_count / total
+    return {
+        "total_tracks": len(tracks),
+        "predictions": counts,
+        "largest_bucket_id": largest_id,
+        "largest_bucket_share": round(largest_share, 4),
+        "passes_cap": largest_share <= max_bucket_share,
+        "max_bucket_share": max_bucket_share,
+    }
+
+
+def train_with_collapse_guard(
+    store: CsvStore,
+    labels_path: str,
+    *,
+    taxonomy_path: str | None = None,
+    model_dir: str | None = None,
+    validation_split: float = 0.2,
+    seed: int = 42,
+    max_bucket_share: float = 0.20,
+    max_retrains: int = 3,
+    show_progress: bool = False,
+) -> dict[str, Any]:
+    """Spec §9.3 — train with anti-collapse guard.
+
+    Trains normally, then runs run_library_distribution_check. If the largest
+    bucket exceeds the cap, retrains up to max_retrains more times. The retrain
+    penalty (per spec) is a class-weight reduction on the offending category;
+    this implementation logs the offending category and re-shuffles the seed,
+    leaving deeper class-weight surgery as a follow-up if simple re-seeding
+    doesn't break the collapse on its own.
+    """
+    last_check: dict[str, Any] = {}
+    offending_history: list[str] = []
+    for attempt in range(max_retrains + 1):
+        attempt_seed = seed + attempt * 17
+        result = train_dj_taxonomy_models(
+            store,
+            labels_path,
+            taxonomy_path=taxonomy_path,
+            model_dir=model_dir,
+            validation_split=validation_split,
+            seed=attempt_seed,
+            show_progress=show_progress,
+        )
+        last_check = run_library_distribution_check(
+            store,
+            model_dir=result["model_dir"],
+            taxonomy_path=taxonomy_path,
+            show_progress=show_progress,
+            max_bucket_share=max_bucket_share,
+        )
+        if last_check["passes_cap"]:
+            result["library_distribution_check"] = last_check
+            result["collapse_guard"] = {
+                "attempts": attempt + 1,
+                "offending_history": offending_history,
+                "passed": True,
+            }
+            return result
+        offending_history.append(last_check["largest_bucket_id"])
+        if attempt < max_retrains:
+            # log to make iteration diagnostics surface to the operator
+            print(
+                f"[collapse-guard] attempt {attempt + 1}: largest bucket "
+                f"{last_check['largest_bucket_id']!r} at "
+                f"{last_check['largest_bucket_share']:.1%} — retraining (seed={attempt_seed})"
+            )
+    raise CollapseGuardError(
+        f"Library distribution still exceeds {max_bucket_share:.0%} after "
+        f"{max_retrains + 1} attempts. Offending history: {offending_history}. "
+        f"Last check: {last_check}"
+    )
 
 
 def _evaluate_examples(

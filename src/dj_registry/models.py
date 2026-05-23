@@ -68,6 +68,7 @@ class LogicalTrack:
     dj_taxonomy_source_genres: str = ""
     dj_taxonomy_keywords: str = ""
     dj_taxonomy_confidence: float = 0.0
+    dj_taxonomy_confidence_level: str = ""  # high | medium-high | medium | low | unknown
     dj_taxonomy_source_model: str = ""
     dj_taxonomy_internal_id: str = ""
     dj_taxonomy_internal_label: str = ""

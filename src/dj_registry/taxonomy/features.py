@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import unicodedata
@@ -12,6 +13,149 @@ from dj_tagger.moods import MOOD_CUES_BY_CODE, normalize_mood_code
 from dj_tagger.vocals import VOCAL_PROFILE_CUES_BY_CODE, normalize_vocal_profile
 
 from ..models import FileRecord, LogicalTrack, SourceObservation
+
+
+# ── Spec §6: feature engineering data ───────────────────────────────────────
+
+# Mix-name phrase → canonical token. Substring (case-insensitive) match against
+# the mix_canonical / title / embedded_title / embedded_comment text pool.
+_MIX_NAME_TOKENS: dict[str, str] = {
+    "dub mix": "dub",
+    "dub remix": "dub",
+    "extended mix": "extended",
+    "extended version": "extended",
+    "tribal mix": "tribal",
+    "tribal remix": "tribal",
+    "afro mix": "afro",
+    "afro remix": "afro",
+    "club mix": "club",
+    "club edit": "club",
+    "rework": "rework",
+    "vip mix": "rework",
+    "vip edit": "rework",
+    "instrumental mix": "instrumental",
+    "radio edit": "radio",
+    "radio mix": "radio",
+    "shamanic mix": "shamanic",
+    "ritual mix": "ritual",
+}
+
+# Spec §6.6 — words that disambiguate to different families. The LR learns the
+# joint distribution with other signals.
+_DISAMBIGUATION_TERMS: tuple[str, ...] = (
+    "deep", "dark", "melodic", "progressive", "garage", "tribal", "dub", "organic",
+)
+
+# Spec §6.2 — the anti-collapse rule: any candidate category whose family
+# matches one of these patterns requires an explicit afro/tribal provider
+# signal (or artist/label prior, or mix-name cue) to be eligible for selection.
+AFRO_TRIBAL_FAMILY_PATTERNS: tuple[str, ...] = (
+    "afro",            # matches "Afro House", "Afro-Tech", "Afro House / *", "Afro / Deep House"
+    "tribal house",    # matches "Tribal House" but NOT "Techno / Tribal" (tribal techno stays)
+    "organic / tribal",
+)
+
+# Tokens that count as explicit afro/tribal evidence in any text field.
+_AFRO_TRIBAL_KEYWORDS_RE = re.compile(
+    r"\b(afro|tribal|spiritual\s+house|3[- ]step|shamanic|ritual)\b",
+    re.IGNORECASE,
+)
+
+# Substrings that count as afro/tribal evidence in an artist/label prior tag.
+_AFRO_TRIBAL_PRIOR_TAGS: tuple[str, ...] = ("afro", "tribal", "spiritual")
+
+
+def is_afro_tribal_family(family: str) -> bool:
+    """Return True if the family is gated by the §6.2 eligibility rule."""
+    if not family:
+        return False
+    fam = family.lower()
+    return any(pattern in fam for pattern in AFRO_TRIBAL_FAMILY_PATTERNS)
+
+
+def is_eligible_for_afro_tribal(
+    track: LogicalTrack | None,
+    observations: list[SourceObservation] | None,
+    file_record: FileRecord | None,
+    *,
+    artist_priors: dict[str, Any] | None = None,
+    label_priors: dict[str, Any] | None = None,
+) -> bool:
+    """Spec §6.2 hard rule for afro/tribal family eligibility.
+
+    A track may score for afro/tribal categories only if at least one holds:
+      (a) provider genre fields contain afro/tribal/spiritual/3-step token
+      (b) artist appears in artist_priors with an afro/tribal tag
+      (c) label appears in label_priors with an afro/tribal tag
+      (d) mix_canonical or title contains an afro/tribal/shamanic/ritual mix token
+    """
+    track = track or LogicalTrack()
+    observations = observations or []
+
+    # (a) Explicit provider genre token
+    provider_pool: list[str] = []
+    if file_record and file_record.embedded_genre:
+        provider_pool.append(file_record.embedded_genre)
+    for obs in observations:
+        if obs.genre:
+            provider_pool.append(obs.genre)
+        if obs.genres_all:
+            provider_pool.append(obs.genres_all)
+    if _AFRO_TRIBAL_KEYWORDS_RE.search(" | ".join(provider_pool)):
+        return True
+
+    # (b) Artist prior
+    artist = (track.artist_canonical or "").strip()
+    if artist and artist_priors and artist in artist_priors:
+        for prior in artist_priors[artist]:
+            tag = str(prior.get("tag", "") if isinstance(prior, dict) else prior).lower()
+            if any(t in tag for t in _AFRO_TRIBAL_PRIOR_TAGS):
+                return True
+
+    # (c) Label prior
+    label = (track.label_canonical or "").strip()
+    if label and label_priors and label in label_priors:
+        for prior in label_priors[label]:
+            tag = str(prior.get("tag", "") if isinstance(prior, dict) else prior).lower()
+            if any(t in tag for t in _AFRO_TRIBAL_PRIOR_TAGS):
+                return True
+
+    # (d) Mix-name / title token
+    mix_pool_parts = [track.mix_canonical or "", track.title_canonical or ""]
+    if file_record:
+        mix_pool_parts.append(file_record.embedded_title or "")
+        mix_pool_parts.append(file_record.embedded_comment or "")
+    if _AFRO_TRIBAL_KEYWORDS_RE.search(" | ".join(mix_pool_parts)):
+        return True
+
+    return False
+
+
+# ── Priors loading (spec §6.7) ──────────────────────────────────────────────
+
+_ARTIST_PRIORS_PATH = Path(__file__).parent / "data" / "artist_priors.json"
+_LABEL_PRIORS_PATH = Path(__file__).parent / "data" / "label_priors.json"
+
+
+def _load_priors_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+@functools.lru_cache(maxsize=1)
+def load_artist_priors() -> dict[str, Any]:
+    return _load_priors_json(_ARTIST_PRIORS_PATH)
+
+
+@functools.lru_cache(maxsize=1)
+def load_label_priors() -> dict[str, Any]:
+    return _load_priors_json(_LABEL_PRIORS_PATH)
 
 
 TEXT_CUES = {
@@ -93,13 +237,98 @@ def build_track_features(
 
     _add_identity_features(features, track, file_record, label_row)
     _add_tagger_features(features, track, observations, label_row)
+    _add_mix_name_features(features, track, file_record)
+    _add_disambiguation_flags(features, track, file_record)
     if feature_mode not in {"internal", "external"}:
         raise ValueError(f"Unsupported feature_mode: {feature_mode}")
     if feature_mode == "external":
         _add_provider_features(features, observations, file_record, label_row)
         _add_audio_features(features, observations)
+        _add_priors_features(features, track)
+    _add_afro_tribal_eligibility_feature(features, track, observations, file_record)
 
     return features
+
+
+def _add_mix_name_features(
+    features: dict[str, float],
+    track: LogicalTrack,
+    file_record: FileRecord | None,
+) -> None:
+    """Spec §6.3 — emit `mix:<token>` for recognized phrases in title / mix / filename / comment."""
+    pool_parts = [track.mix_canonical or "", track.title_canonical or ""]
+    if file_record:
+        pool_parts.append(file_record.file_name or "")
+        pool_parts.append(file_record.embedded_title or "")
+        pool_parts.append(file_record.embedded_comment or "")
+    pool = " ".join(pool_parts).lower()
+    if not pool.strip():
+        return
+    for phrase, token in _MIX_NAME_TOKENS.items():
+        if phrase in pool:
+            features[f"mix:{token}"] = 1.0
+
+
+def _add_disambiguation_flags(
+    features: dict[str, float],
+    track: LogicalTrack,
+    file_record: FileRecord | None,
+) -> None:
+    """Spec §6.6 — `disamb:<term>` for ambiguous words in title / mix / filename / embedded_genre."""
+    pool_parts = [track.title_canonical or "", track.mix_canonical or ""]
+    if file_record:
+        pool_parts.append(file_record.file_name or "")
+        pool_parts.append(file_record.embedded_genre or "")
+        pool_parts.append(file_record.embedded_comment or "")
+    pool = " ".join(pool_parts).lower()
+    for term in _DISAMBIGUATION_TERMS:
+        if re.search(r"\b" + re.escape(term) + r"\b", pool):
+            features[f"disamb:{term}"] = 1.0
+
+
+def _add_priors_features(features: dict[str, float], track: LogicalTrack) -> None:
+    """Spec §6.7 — `prior:artist:<cat>=<weight>` / `prior:label:<cat>=<weight>` from JSON priors."""
+    artist = (track.artist_canonical or "").strip()
+    label = (track.label_canonical or "").strip()
+    if artist:
+        for prior in load_artist_priors().get(artist, []):
+            if isinstance(prior, dict):
+                cat = prior.get("category_id", "")
+                weight = float(prior.get("weight", 0.0))
+                if cat and weight > 0:
+                    features[f"prior:artist:{cat}"] = weight
+    if label:
+        for prior in load_label_priors().get(label, []):
+            if isinstance(prior, dict):
+                cat = prior.get("category_id", "")
+                weight = float(prior.get("weight", 0.0))
+                if cat and weight > 0:
+                    features[f"prior:label:{cat}"] = weight
+
+
+def _add_afro_tribal_eligibility_feature(
+    features: dict[str, float],
+    track: LogicalTrack,
+    observations: list[SourceObservation],
+    file_record: FileRecord | None,
+) -> None:
+    """Spec §6.2 — surface eligibility flag so LR can learn it as a feature.
+
+    The hard candidate-filter rule is enforced post-prediction in dj_model.py
+    using is_eligible_for_afro_tribal() directly. The training-time feature here
+    gives the LR a chance to learn correlations.
+    """
+    eligible = is_eligible_for_afro_tribal(
+        track,
+        observations,
+        file_record,
+        artist_priors=load_artist_priors(),
+        label_priors=load_label_priors(),
+    )
+    if eligible:
+        features["eligibility:afro_tribal_allowed"] = 1.0
+    else:
+        features["eligibility:afro_tribal_blocked"] = 1.0
 
 
 def summarize_feature_groups(features: dict[str, float]) -> list[str]:
@@ -214,6 +443,7 @@ def _add_tagger_features(
     if bpm is not None:
         features["num:bpm"] = bpm
         features[f"bpm_band:{_bpm_band(bpm)}"] = 1.0
+        features[f"bpm_role:{_bpm_semantic_band(bpm)}"] = 1.0
 
 
 def _add_provider_features(
@@ -225,6 +455,9 @@ def _add_provider_features(
     if file_record:
         _add_text(features, "provider:embedded_genre", file_record.embedded_genre)
         _add_numeric(features, "embedded_bpm", _num(file_record.embedded_bpm))
+        # Spec §6.1 — emit normalized provider-genre tokens with elevated weight
+        # so the LR can lean on them ahead of tagger fields.
+        _add_provider_genre_tokens(features, file_record.embedded_genre, source="embedded")
 
     _add_text(features, "provider:label_row_genre", label_row.get("Genre"))
 
@@ -237,6 +470,41 @@ def _add_provider_features(
         _add_text(features, f"source:{source}:artist", obs.artist)
         _add_text(features, f"source:{source}:title", obs.title)
         _add_numeric(features, f"{source}:bpm", _num(obs.bpm))
+        # Spec §6.1 — elevated provider-genre tokens
+        _add_provider_genre_tokens(features, obs.genre, source=source)
+        _add_provider_genre_tokens(features, obs.genres_all, source=source)
+
+
+# Spec §6.1 source-weight uplift values. The DictVectorizer treats these as
+# scalar feature weights; the LR multiplies them by learned coefficients, so
+# values > 1 effectively up-weight the signal vs unit-valued tagger features.
+_PROVIDER_SOURCE_WEIGHTS: dict[str, float] = {
+    "rekordbox": 1.5,   # manually curated, highest trust
+    "embedded": 1.2,    # embedded tag genre, second-highest
+    "songstats": 1.3,   # provider with full genres_all
+    "spotify": 1.1,
+}
+
+
+def _add_provider_genre_tokens(
+    features: dict[str, float],
+    value: str | None,
+    *,
+    source: str,
+) -> None:
+    """Emit `provider_genre:<token>` with source-weighted value for each genre token."""
+    if not value:
+        return
+    weight = _PROVIDER_SOURCE_WEIGHTS.get(source, 1.0)
+    pool = _normalize_text(value)
+    if not pool:
+        return
+    # genres_all comes as semicolon-separated; split on common separators
+    for piece in re.split(r"[;,/|]+", pool):
+        token = piece.strip()
+        if not token:
+            continue
+        features[f"provider_genre:{token.replace(' ', '_')}"] = weight
 
 
 def _add_audio_features(features: dict[str, float], observations: list[SourceObservation]) -> None:
@@ -428,3 +696,22 @@ def _bpm_band(bpm: float) -> str:
     if bpm < 181:
         return "160_180"
     return "180_plus"
+
+
+def _bpm_semantic_band(bpm: float) -> str:
+    """Spec §6.5 — DJ-set-role-oriented BPM bands."""
+    if bpm < 100:
+        return "slow"
+    if bpm < 115:
+        return "warmup"
+    if bpm < 122:
+        return "builder"
+    if bpm < 128:
+        return "driver"
+    if bpm < 134:
+        return "peak"
+    if bpm < 145:
+        return "peak_plus"
+    if 150 <= bpm <= 180:
+        return "dnb"
+    return "other"

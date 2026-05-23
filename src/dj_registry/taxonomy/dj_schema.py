@@ -24,6 +24,10 @@ class DjTaxonomyCategory:
     energy_range: tuple[int, int] | tuple[()]
     vocal_profiles: tuple[str, ...]
     keywords: tuple[str, ...]
+    # Optional flag set during ground-truth audit; categories with fewer than
+    # the minimum number of labeled examples are flagged provisional and
+    # excluded from LR training. Defaults to False for backward compat.
+    provisional: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DjTaxonomyCategory":
@@ -44,6 +48,7 @@ class DjTaxonomyCategory:
             energy_range=_int_pair(data.get("energy_range")),
             vocal_profiles=tuple(_strings(data.get("vocal_profiles"))),
             keywords=tuple(_strings(data.get("keywords"))),
+            provisional=bool(data.get("provisional", False)),
         )
 
     def to_prompt_dict(self) -> dict[str, Any]:
