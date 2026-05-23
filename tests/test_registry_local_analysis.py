@@ -345,3 +345,63 @@ class TestRunAnalysis:
         assert refreshed is not None
         assert refreshed["vibe"] == expected["vibe"]
         assert refreshed["_tagger_raw_sig"] != "old-raw-signature"
+
+    def test_cache_miss_passes_cached_vocal_stem_to_worker(self, tmp_path, monkeypatch):
+        """A pre-seeded vocal_stem layer should be passed into compute_tagger_artifacts
+        so Demucs is not re-run for a tagger cache miss."""
+        wav_path = str(tmp_path / "track.wav")
+        _make_wav(wav_path, duration_sec=5.0)
+
+        monkeypatch.chdir(tmp_path)
+        os.makedirs("cache", exist_ok=True)
+        cache_dur = quick_duration(wav_path) or 5.0
+        ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+
+        cached_stem = {
+            "vocal_stem_rms_db": -22.5,
+            "vocal_stem_mix_ratio_db": -3.1,
+            "vocal_stem_activity_frac": 0.42,
+            "vocal_stem_envelope_var": 1.7,
+            "vocal_stem_n_slices": 5,
+        }
+        ucache.put_track("track.wav", cache_dur, "vocal_stem", cached_stem)
+        ucache.save()
+
+        captured: dict = {}
+        from dj_tagger import raw_features as rf
+
+        real_compute = rf.compute_tagger_artifacts
+
+        def spy(audio, *, audio_features=None, dsp=None, vocal_stem=None, use_essentia=False):
+            captured["vocal_stem"] = vocal_stem
+            return real_compute(
+                audio,
+                audio_features=audio_features,
+                dsp=dsp,
+                vocal_stem=vocal_stem,
+                use_essentia=use_essentia,
+            )
+
+        monkeypatch.setattr("dj_tagger.raw_features.compute_tagger_artifacts", spy)
+
+        self.config.output_dir = str(tmp_path / "registry")
+        self.config.analysis_workers = 1  # single-worker path; pool would re-import spy
+        store = CsvStore(self.config.output_dir)
+        store.save_tracks([
+            LogicalTrack(track_id="T-001", primary_file_id="F-001"),
+        ])
+        store.save_files([
+            FileRecord(
+                file_id="F-001", track_id="T-001", path_abs=wav_path,
+                file_name="track.wav",
+                is_primary_file=True, audio_duration_sec=5.0,
+            ),
+        ])
+        store.save_observations([])
+
+        stats = run_analysis(self.config, store, no_essentia=True)
+
+        assert stats["analyzed"] == 1
+        assert captured["vocal_stem"] == cached_stem
+        # And the cached layer is preserved (and re-stored) after the run
+        assert ucache.get_track("track.wav", cache_dur, "vocal_stem") == cached_stem

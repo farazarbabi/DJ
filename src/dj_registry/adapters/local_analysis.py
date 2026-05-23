@@ -67,8 +67,17 @@ def _merge_rederived_tagger(existing: dict | None, derived: dict, audio_features
     return merge_rederived_tagger(existing, derived, audio_features)
 
 
-def _analyze_full(path: str, use_essentia: bool, audio_features: dict[str, float] | None = None) -> dict:
-    """Run full tagger analysis + optional essentia key. Top-level for pickling."""
+def _analyze_full(
+    path: str,
+    use_essentia: bool,
+    audio_features: dict[str, float] | None = None,
+    vocal_stem: dict | None = None,
+) -> dict:
+    """Run full tagger analysis + optional essentia key. Top-level for pickling.
+
+    ``vocal_stem`` may be passed in by the caller (loaded from the universal
+    cache) to skip Demucs separation when the raw layer is already present.
+    """
     from dj_tagger.audio import load_audio_features
     from dj_tagger.raw_features import compute_tagger_artifacts
 
@@ -78,6 +87,7 @@ def _analyze_full(path: str, use_essentia: bool, audio_features: dict[str, float
         "dsp": None,
         "raw_analysis": None,
         "section_dsp": None,
+        "vocal_stem": None,
         "essentia": None,
     }
 
@@ -87,12 +97,14 @@ def _analyze_full(path: str, use_essentia: bool, audio_features: dict[str, float
         artifacts = compute_tagger_artifacts(
             audio,
             audio_features=audio_features,
+            vocal_stem=vocal_stem,
             use_essentia=False,
         )
         result["tagger_result"] = artifacts["tagger_result"]
         result["dsp"] = artifacts["dsp"]
         result["raw_analysis"] = artifacts["raw_analysis"]
         result["section_dsp"] = artifacts["section_dsp"]
+        result["vocal_stem"] = artifacts.get("vocal_stem") or {}
     except Exception as e:
         result["error"] = str(e)
         return result
@@ -440,6 +452,15 @@ def run_analysis(
         paths_to_analyze = [path for _, _, path, _, _ in cache_misses]
         n_total = len(paths_to_analyze)
 
+        # Pre-load cached Demucs vocal_stem scalars so the worker can skip the
+        # expensive separation when the raw layer is already present (e.g.,
+        # written by a prior grouper or registry run).
+        cached_vocal_stems: list[dict | None] = []
+        for _, _, path, _, duration in cache_misses:
+            fname = os.path.basename(path)
+            stem = ucache.get_track(fname, duration, "vocal_stem")
+            cached_vocal_stems.append(stem if isinstance(stem, dict) and stem else None)
+
         if config.analysis_workers <= 1:
             raw_results = []
             analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
@@ -447,7 +468,7 @@ def run_analysis(
                 track_id = cache_misses[i][0]
                 track = track_by_id.get(track_id)
                 audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
-                result = _analyze_full(p, use_essentia, audio_features)
+                result = _analyze_full(p, use_essentia, audio_features, cached_vocal_stems[i])
                 raw_results.append(result)
                 fname = os.path.basename(p)
                 if not show_progress:
@@ -468,6 +489,7 @@ def run_analysis(
                             ucache,
                             track_by_id.get(cache_misses[i][0]).isrc_canonical if track_by_id.get(cache_misses[i][0]) else "",
                         ),
+                        cached_vocal_stems[i],
                     ): i
                     for i, p in enumerate(paths_to_analyze)
                 }
