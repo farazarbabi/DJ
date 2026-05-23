@@ -444,13 +444,130 @@ def _instructions(validation_error: str | None = None) -> str:
         "filename/title/mix cues, provider audio features, provider genres, and label/artist context. "
         "If evidence is ambiguous, still choose the best allowed category but lower confidence and list allowed alternatives. "
         "Return JSON only. Few-shot guidance: "
-        "Example A: dark/hypnotic E4, 124-126 BPM, indie dance + tech house hints -> dark_indie_tech_house. "
+        "Example A: dark/hypnotic E4, 124-126 BPM, indie dance + tech house hints -> driving_dark_indie_tech. "
         "Example B: tech house hints with featured vocal or strong hook -> vocal_hook_tech_house. "
-        "Example C: organic/tribal mood, chant vocal, percussion/afro clues -> organic_chant_house or tribal_afro_driver. "
+        "Example C: organic/tribal mood + chant vocal alone is NOT enough for tribal_afro_driver — see Modern Subgenre Selection Rules. "
         "Example D: raw/warehouse mood, E5, 130+ BPM techno clues -> raw_warehouse_techno or peak_time_techno. "
         "Example E: minimal/deep/dub mood, sparse vocal, steady rolling low-mid energy -> minimal_deep_tech or dub_techno. "
+        "\n\n"
+        + _MODERN_SUBGENRE_SELECTION_RULES
         + retry
     )
+
+
+# Spec: specs/update_llm_ground_truth_prompt.md — conservative tribal/afro
+# subgenre classification. Tribal and Afro must be earned by evidence, not
+# triggered by mood, percussion, or internal shorthand tags.
+_MODERN_SUBGENRE_SELECTION_RULES = """\
+Modern Subgenre Selection Rules
+================================
+
+Tribal and Afro must be EARNED by evidence, not triggered by mood, percussion,
+or internal shorthand tags.
+
+1. Separate genre from descriptor tags
+--------------------------------------
+The following are TAXONOMY LABELS and may be used as the chosen genre/subgenre:
+  Organic House, Afro House, Tribal House, Melodic Techno, Dark Melodic Techno,
+  Driving Techno, Progressive House, Indie Dance, Dark Disco, Downtempo.
+
+The following are DESCRIPTOR TAGS and should NOT by themselves become the
+chosen genre/subgenre:
+  tribal, afro, mayan, ritual, ceremonial, shamanic, organic, percussive,
+  ethnic, desert, tulum, chant, driving, hypnotic, dark, tense,
+  female vocal, spoken vocal.
+
+A descriptor tag belongs in the rationale field as context — not as the
+chosen category.
+
+2. Be conservative with Afro and Tribal
+---------------------------------------
+Only choose an Afro House / Afro Tech / Tribal House / Tribal Techno /
+Tribal Organic House category if at least one STRONG evidence holds:
+  - Trusted provider genre explicitly says "Afro House", "Afro Tech",
+    "Tribal House", "Tribal Techno", or "Tribal Organic House".
+  - Manually-curated rekordbox/embedded genre explicitly says the same.
+  - Arrangement is dominated by organic hand-percussion, ritual vocals,
+    ceremonial rhythm, or tribal drum structure.
+  - Artist/label is clearly Afro House / Tulum-organic-house / ritual-house
+    / tribal-house scene.
+
+The following are WEAK evidence and are NOT sufficient on their own:
+  - dark mood, tense mood, driving groove, hypnotic groove,
+  - percussion exists, organic texture, female vocal, chant-like vocal,
+  - low vocal, Tulum/desert/ritual words in title/comment,
+  - internal tag containing TRIB / AFRO / DRV.
+
+If only weak evidence is present, put those words in the rationale as
+"secondary descriptors" and choose a non-afro/non-tribal category that
+actually matches the dominant musical character (e.g., Dark Melodic Techno,
+Driving Tech-House, Progressive House).
+
+3. Distinguish Afro from Tribal from Organic
+--------------------------------------------
+Afro House / Afro-Tech requires evidence of African or Afro-diasporic
+lineage — not just percussion, ritual, or organic atmosphere. Do NOT
+infer Afro from tribal, mayan, ritual, ceremonial, organic, desert,
+Tulum, shamanic, ethnic, chant, or percussion alone.
+
+Tribal House / Tribal Organic House requires that ritual/ceremonial/tribal
+percussion be STRUCTURALLY CENTRAL to the arrangement — not merely present.
+
+Organic House is for earthy/natural/melodic/ethnic/acoustic music
+(including desert/Tulum-style). Organic House may have tribal influence
+without becoming Tribal House.
+
+Melodic Techno / Dark Melodic Techno is the right call for tracks with a
+minor-key melody, emotional synth, progressive arrangement, tense/dark
+mood, and a driving-but-not-percussion-dominant groove — even if internal
+tags include TRIB/AFRO/DRV.
+
+4. Negative example: Erly Tepshi - Virgo
+----------------------------------------
+A track at 120 BPM with internal tags TRIB.AFRO.DRV, mood "tense", female
+vocal, source_genre "Techno", and no explicit Afro/Tribal provider hint
+must NOT be classified Afro/Tribal. The correct call is Dark Melodic
+Techno. Driving + tense + female vocal + TRIB shorthand are descriptor
+cues, not taxonomy labels.
+
+5. Positive example: PAAX Tulum - Crisol (MIICHII Remix)
+--------------------------------------------------------
+A track whose arrangement is built around organic/ritual/ceremonial
+percussion with Mayan/Tulum context CAN be Tribal Organic House. But it
+should NOT be Afro House unless explicit Afro/African/Afro-diasporic
+evidence exists.
+
+6. Decision gate before choosing any Afro/Tribal category
+---------------------------------------------------------
+Before assigning an Afro or Tribal category, the answer to all of these
+must be yes (or at least three independent weak signals must converge):
+
+  (a) Does a trusted provider genre explicitly say Afro/Tribal?
+  (b) If not, are there 3+ independent weak signals pointing to Afro/Tribal?
+  (c) Is percussion/ritual/ceremonial element STRUCTURALLY central?
+  (d) For Afro specifically: is there African or Afro-diasporic context?
+
+If "no", put those concepts into the rationale as secondary descriptors
+and pick a category that actually matches the music.
+
+7. Rejected-label reasoning
+---------------------------
+When you considered an Afro or Tribal category but rejected it, briefly
+note that in the rationale field (e.g., "Considered Tribal Techno but
+percussion is not structurally dominant; chose Dark Melodic Techno").
+
+8. Scoring guidance
+-------------------
+  - Explicit trusted provider genre dominates.
+  - Internal generated tags (TRIB / AFRO / DRV / etc.) are WEAK evidence.
+  - Mood words (dark, tense, romantic) are NOT genre evidence.
+  - Texture words (organic, hand-percussion) are NOT genre evidence
+    unless backed by source metadata or arrangement.
+  - Driving / rolling / hypnotic are groove descriptors, not genres.
+  - Tribal requires percussion/ritual structure to be CENTRAL.
+  - Afro requires Afro/African/Afro-diasporic lineage/context.
+
+"""
 
 
 def _response_schema() -> dict[str, Any]:
