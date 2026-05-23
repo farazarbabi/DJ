@@ -315,19 +315,22 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
         return 1 if stats.errors else 0
 
     if command == "train-models":
-        from .taxonomy.dj_model import train_dj_taxonomy_models
+        model_type = getattr(args, "model", "lr")
+        if model_type == "legacy-dual":
+            from .taxonomy.dj_model import train_dj_taxonomy_models
 
-        result = train_dj_taxonomy_models(
-            store,
-            getattr(args, "labels"),
-            taxonomy_path=getattr(args, "taxonomy", None),
-            model_dir=getattr(args, "model_dir", None),
-            validation_split=getattr(args, "validation_split", 0.2),
-            seed=getattr(args, "seed", 42),
-            show_progress=_show_progress(args),
-        )
-        _print_dj_taxonomy_locations(result["model_dir"], include_training=True)
-        return 0
+            result = train_dj_taxonomy_models(
+                store,
+                getattr(args, "labels"),
+                taxonomy_path=getattr(args, "taxonomy", None),
+                model_dir=getattr(args, "model_dir", None),
+                validation_split=getattr(args, "validation_split", 0.2),
+                seed=getattr(args, "seed", 42),
+                show_progress=_show_progress(args),
+            )
+            _print_dj_taxonomy_locations(result["model_dir"], include_training=True)
+            return 0
+        return _cmd_train_unified(args, store)
 
     if command == "evaluate":
         from .taxonomy.dj_model import evaluate_dj_taxonomy_models
@@ -382,6 +385,131 @@ def _print_dj_taxonomy_locations(model_dir: str, *, include_training: bool) -> N
         print(f"DJ taxonomy evaluation complete -> {base}")
     print(f"Comparison metrics -> {base / 'model_comparison.json'}")
     print(f"Per-track comparison -> {base / 'model_comparison.csv'}")
+
+
+def _cmd_train_unified(args: argparse.Namespace, store: CsvStore) -> int:
+    """Train LR / XGB / both via the unified entry point and print a comparison."""
+    from .taxonomy.dj_model import train_dj_taxonomy_unified
+
+    model_type = getattr(args, "model", "lr")
+    result = train_dj_taxonomy_unified(
+        store,
+        getattr(args, "labels"),
+        model_type=model_type,
+        taxonomy_path=getattr(args, "taxonomy", None),
+        model_dir=getattr(args, "model_dir", None),
+        validation_split=getattr(args, "validation_split", 0.2),
+        seed=getattr(args, "seed", 42),
+        tune_lr=getattr(args, "tune_lr", False),
+        xgb_n_iter=getattr(args, "xgb_n_iter", 30),
+        show_progress=_show_progress(args),
+    )
+
+    base_dir = Path(result["model_dir"])
+    lr_result = result.get("lr")
+    xgb_result = result.get("xgb")
+
+    print()
+    print("Training complete.")
+    if lr_result:
+        print(f"  LR  -> {lr_result['model_dir']}")
+    if xgb_result:
+        print(f"  XGB -> {xgb_result['model_dir']}")
+
+    # Comparison report when both were trained
+    if model_type == "both":
+        from .taxonomy.dj_model import run_library_distribution_check
+        from .taxonomy.dj_model_comparison import format_full_report
+
+        # Library distribution checks for each model variant
+        lr_check = None
+        xgb_check = None
+        try:
+            lr_check = _distribution_check_with_subdir(store, base_dir / "lr", args)
+        except Exception as exc:
+            print(f"  (LR library distribution check failed: {exc})")
+        try:
+            xgb_check = _distribution_check_with_subdir(store, base_dir / "xgb", args)
+        except Exception as exc:
+            print(f"  (XGB library distribution check failed: {exc})")
+
+        examples_total = result.get("examples_total")
+        classes = lr_result.get("classes") if lr_result else (xgb_result.get("classes") if xgb_result else None)
+        print()
+        print(format_full_report(
+            lr_result, xgb_result,
+            lr_check=lr_check, xgb_check=xgb_check,
+            examples_total=examples_total, classes=classes,
+        ))
+        print()
+        if "comparison_path" in result:
+            print(f"Comparison JSON -> {result['comparison_path']}")
+
+    return 0
+
+
+def _distribution_check_with_subdir(store: CsvStore, model_dir: Path, args: argparse.Namespace) -> dict:
+    """Helper: run run_library_distribution_check by pretending the per-variant
+    dir (lr/ or xgb/) is a 'mode' subdir under the base model dir.
+
+    run_library_distribution_check expects a base dir containing internal/ or
+    external/ subdirs; for unified models the subdir IS the model dir, so we
+    point it at the parent and let load_dj_taxonomy_model_if_available fall
+    through to the available mode.
+    """
+    from .taxonomy.dj_model import run_library_distribution_check
+    # The unified model lives at model_dir/model.pkl; run_library_distribution_check
+    # expects model_dir/{internal,external}/model.pkl. We restructure by passing
+    # the model_dir's parent and letting it fall through.
+    # Simpler: temporarily load the model directly here for the check.
+    from .taxonomy.dj_model import (
+        load_dj_taxonomy_model_if_available,
+        UNCLASSIFIED_ID,
+        UNCLASSIFIED_THRESHOLD,
+    )
+    from .taxonomy.dj_schema import load_dj_taxonomy
+
+    taxonomy = load_dj_taxonomy(getattr(args, "taxonomy", None))
+    # Try LR loader first; if model is XGB, use the XGB loader.
+    model = load_dj_taxonomy_model_if_available(model_dir, taxonomy_path=getattr(args, "taxonomy", None))
+    if model is None:
+        from .taxonomy.dj_model_xgb import load_xgb_model
+        model = load_xgb_model(model_dir, taxonomy_path=getattr(args, "taxonomy", None))
+    if model is None:
+        raise FileNotFoundError(f"No model found at {model_dir}")
+
+    tracks = store.load_tracks()
+    files = store.load_files()
+    observations = store.load_observations()
+    file_by_track = {f.track_id: f for f in files if f.track_id and f.is_primary_file}
+    obs_by_track: dict[str, list] = {}
+    for obs in observations:
+        if obs.track_id:
+            obs_by_track.setdefault(obs.track_id, []).append(obs)
+
+    counts: dict[str, int] = {}
+    for track in tracks:
+        track_obs = obs_by_track.get(track.track_id, [])
+        file_record = file_by_track.get(track.track_id)
+        prediction = model.predict(track, track_obs, file_record, taxonomy)
+        if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
+            cat_id = UNCLASSIFIED_ID
+        else:
+            cat_id = prediction.category_id or UNCLASSIFIED_ID
+        counts[cat_id] = counts.get(cat_id, 0) + 1
+
+    total = max(1, len(tracks))
+    largest_id = max(counts, key=counts.get) if counts else ""
+    largest_count = counts.get(largest_id, 0)
+    largest_share = largest_count / total
+    return {
+        "total_tracks": len(tracks),
+        "predictions": counts,
+        "largest_bucket_id": largest_id,
+        "largest_bucket_share": round(largest_share, 4),
+        "passes_cap": largest_share <= 0.20,
+        "max_bucket_share": 0.20,
+    }
 
 
 def _cmd_dj_taxonomy_report(args: argparse.Namespace, store: CsvStore) -> int:
@@ -682,9 +810,17 @@ def main(argv: list[str] | None = None) -> int:
     p_dj_tax_gt.add_argument("--output", default="./outputs/registry")
     add_no_progress(p_dj_tax_gt)
 
-    p_dj_tax_train = dj_tax_sub.add_parser("train-models", help="Train internal and external DJ taxonomy models")
+    p_dj_tax_train = dj_tax_sub.add_parser("train-models", help="Train DJ taxonomy models (LR and/or XGB)")
     p_dj_tax_train.add_argument("paths", nargs="*", help="Library paths (auto-derives --output)")
     p_dj_tax_train.add_argument("--labels", required=True, help="DJ taxonomy ground-truth labels CSV")
+    p_dj_tax_train.add_argument(
+        "--model",
+        choices=["lr", "xgb", "both", "legacy-dual"],
+        default="lr",
+        help="lr / xgb / both — train one or both. legacy-dual = old internal+external LR pipeline (back-compat).",
+    )
+    p_dj_tax_train.add_argument("--tune-lr", action="store_true", help="Enable RandomizedSearchCV hyperparameter tuning for LR")
+    p_dj_tax_train.add_argument("--xgb-n-iter", type=int, default=30, help="RandomizedSearchCV iterations for XGB (default 30)")
     p_dj_tax_train.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
     p_dj_tax_train.add_argument("--model-dir", default=None, help="Output model directory (default: <output>/dj_taxonomy_model)")
     p_dj_tax_train.add_argument("--validation-split", type=float, default=0.2)

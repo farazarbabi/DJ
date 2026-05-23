@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import pickle
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,8 @@ from sklearn.metrics import f1_score
 from ..models import FileRecord, LogicalTrack, SourceObservation, now_iso
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
+
+logger = logging.getLogger(__name__)
 from .dj_schema import DjTaxonomy, external_evidence_available, load_dj_taxonomy
 from .features import (
     build_track_features,
@@ -716,11 +720,45 @@ def _track_from_label_row(row: dict[str, str]) -> LogicalTrack:
     )
 
 
-def _fit_classifier(x: Any, labels: list[str]) -> Any:
+def _fit_classifier(x: Any, labels: list[str], *, tune: bool = False, seed: int = 42) -> Any:
+    """Fit a LogisticRegression classifier. Optionally hyperparameter-tune via
+    RandomizedSearchCV across C / solver / max_iter when `tune=True`.
+
+    max_iter raised from 1000 -> 2000 (the v1 model warned convergence issues
+    on the high-dim sparse feature space).
+    """
     unique = sorted(set(labels))
     if len(unique) == 1:
         return _ConstantClassifier(unique[0])
-    classifier = LogisticRegression(max_iter=1000, class_weight="balanced")
+    if tune:
+        from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+        import numpy as np
+        # CV requires at least 2 examples per class; fold count clamped accordingly.
+        from collections import Counter
+        min_per_class = min(Counter(labels).values())
+        cv_folds = min(3, min_per_class) if min_per_class >= 2 else 0
+        if cv_folds >= 2:
+            cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
+            base = LogisticRegression(class_weight="balanced", random_state=seed)
+            search = RandomizedSearchCV(
+                base,
+                param_distributions={
+                    "C": [0.01, 0.1, 1.0, 10.0, 100.0],
+                    "solver": ["lbfgs", "saga"],
+                    "max_iter": [2000, 4000],
+                    "penalty": ["l2"],
+                },
+                n_iter=10,
+                scoring="f1_macro",
+                cv=cv,
+                n_jobs=-1,
+                random_state=seed,
+                refit=True,
+            )
+            search.fit(x, labels)
+            logger.info("LR best params: %s (CV f1_macro=%.3f)", search.best_params_, search.best_score_)
+            return search.best_estimator_
+    classifier = LogisticRegression(max_iter=2000, class_weight="balanced")
     classifier.fit(x, labels)
     return classifier
 
@@ -889,6 +927,200 @@ def train_with_collapse_guard(
         f"{max_retrains + 1} attempts. Offending history: {offending_history}. "
         f"Last check: {last_check}"
     )
+
+
+# ── Unified single-model training (LR vs XGB head-to-head) ──────────────────
+
+
+def train_dj_taxonomy_unified(
+    store: CsvStore,
+    labels_path: str,
+    *,
+    model_type: str = "lr",
+    taxonomy_path: str | None = None,
+    model_dir: str | None = None,
+    validation_split: float = 0.2,
+    seed: int = 42,
+    tune_lr: bool = False,
+    xgb_n_iter: int = 30,
+    show_progress: bool = False,
+) -> dict[str, Any]:
+    """Train ONE model per algorithm on the unified (external) feature set.
+
+    model_type:
+      - "lr"   : LogisticRegression (default)
+      - "xgb"  : XGBoost with RandomizedSearchCV tuning
+      - "both" : train both and write a comparison report
+
+    Output directory layout:
+      <model_dir>/lr/model.pkl + training_report.json
+      <model_dir>/xgb/model.pkl + training_report.json + best_params.json
+      <model_dir>/comparison.json  (only when model_type='both')
+    """
+    if model_type not in {"lr", "xgb", "both"}:
+        raise ValueError(f"model_type must be one of lr|xgb|both, got {model_type!r}")
+
+    taxonomy = load_dj_taxonomy(taxonomy_path)
+    labels = _load_label_rows(labels_path, taxonomy)
+    base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build feature examples once (unified = external mode = superset of internal)
+    examples, skipped = _build_training_examples(
+        labels, store, mode="external", show_progress=show_progress
+    )
+    if not examples:
+        raise ValueError("No valid training examples could be built from labels CSV")
+
+    results: dict[str, Any] = {"model_dir": str(base_dir), "examples_total": len(examples), "skipped_rows": skipped}
+
+    if model_type in {"lr", "both"}:
+        results["lr"] = _train_lr_unified(
+            examples, taxonomy, labels_path=labels_path,
+            model_dir=base_dir / "lr",
+            validation_split=validation_split, seed=seed, tune=tune_lr,
+        )
+
+    if model_type in {"xgb", "both"}:
+        from .dj_model_xgb import train_xgb_model
+
+        fit_start = time.perf_counter()
+        xgb_model, xgb_metrics, xgb_warnings = train_xgb_model(
+            examples, taxonomy,
+            labels_path=labels_path,
+            validation_split=validation_split,
+            seed=seed,
+            n_iter=xgb_n_iter,
+            show_progress=show_progress,
+        )
+        xgb_dir = base_dir / "xgb"
+        xgb_model.save(xgb_dir)
+        xgb_stats = DjTrainingStats(
+            labels_path=labels_path,
+            model_dir=str(xgb_dir),
+            examples=len(examples),
+            classes=len({example["category_id"] for example in examples}),
+            skipped_rows=skipped,
+            mode="external",
+            metrics=xgb_metrics,
+            warnings=xgb_warnings,
+        )
+        _write_xgb_training_report(xgb_dir / REPORT_FILENAME, xgb_stats, xgb_model)
+        results["xgb"] = {
+            "model_dir": str(xgb_dir),
+            "examples": len(examples),
+            "classes": xgb_stats.classes,
+            "metrics": xgb_metrics,
+            "warnings": xgb_warnings,
+            "best_params": xgb_model.best_params,
+            "fit_time_seconds": xgb_metrics.get("fit_time_seconds", round(time.perf_counter() - fit_start, 2)),
+        }
+
+    if model_type == "both":
+        from .dj_model_comparison import write_comparison_json
+
+        write_comparison_json(base_dir / "comparison.json", results.get("lr"), results.get("xgb"))
+        results["comparison_path"] = str(base_dir / "comparison.json")
+
+    return results
+
+
+def _train_lr_unified(
+    examples: list[dict[str, Any]],
+    taxonomy: DjTaxonomy,
+    *,
+    labels_path: str,
+    model_dir: Path,
+    validation_split: float,
+    seed: int,
+    tune: bool,
+) -> dict[str, Any]:
+    """Train a single LR model on the unified feature set + write artifacts."""
+    fit_start = time.perf_counter()
+
+    # Validation split, mirroring _train_final_model_with_metrics
+    if len(examples) < 8 or validation_split <= 0:
+        train_examples = examples
+        validation_examples = examples
+        validation_kind = "in_sample"
+        warnings_list = ["Dataset is small; LR metrics are in-sample."]
+    else:
+        train_examples, validation_examples = _split_examples(
+            examples, validation_split=validation_split, seed=seed
+        )
+        validation_kind = "holdout"
+        if not validation_examples:
+            validation_examples = train_examples
+            validation_kind = "in_sample"
+            warnings_list = ["Validation split produced no holdout rows; metrics are in-sample."]
+        else:
+            warnings_list = []
+
+    # Fit on train split for validation metrics
+    vec_val = DictVectorizer(sparse=True)
+    x_train = vec_val.fit_transform([e["features"] for e in train_examples])
+    y_train = [e["category_id"] for e in train_examples]
+    val_clf = _fit_classifier(x_train, y_train, tune=tune, seed=seed)
+    val_model = DjTaxonomyModel(
+        vectorizer=vec_val,
+        classifier=val_clf,
+        feature_mode="external",
+        taxonomy_version=taxonomy.version,
+        taxonomy_hash=taxonomy.hash(),
+        feature_schema_version=DJ_FEATURE_SCHEMA_VERSION,
+        trained_at=now_iso(),
+        labels_hash=_file_hash(Path(labels_path)),
+        examples=len(train_examples),
+    )
+    metrics = _evaluate_examples(val_model, validation_examples, taxonomy)
+    metrics["validation_kind"] = validation_kind
+    metrics["validation_examples"] = len(validation_examples)
+    metrics["fit_time_seconds"] = round(time.perf_counter() - fit_start, 2)
+    metrics["model_version"] = DJ_MODEL_VERSION
+    metrics["model_type"] = "lr"
+
+    # Refit on all examples for the final shipped model
+    final_model = _fit_model(examples, taxonomy, feature_mode="external", labels_path=labels_path)
+    final_model.save(model_dir)
+    stats = DjTrainingStats(
+        labels_path=labels_path,
+        model_dir=str(model_dir),
+        examples=len(examples),
+        classes=len({e["category_id"] for e in examples}),
+        skipped_rows=0,
+        mode="external",
+        metrics=metrics,
+        warnings=warnings_list,
+    )
+    _write_training_audit(model_dir / AUDIT_FILENAME, examples)
+    _write_training_report(model_dir / REPORT_FILENAME, stats, final_model)
+    return {
+        "model_dir": str(model_dir),
+        "examples": len(examples),
+        "classes": stats.classes,
+        "metrics": metrics,
+        "warnings": warnings_list,
+        "fit_time_seconds": metrics["fit_time_seconds"],
+    }
+
+
+def _write_xgb_training_report(path: Path, stats: DjTrainingStats, model: "Any") -> None:
+    """Write a training report for an XGB model (mirrors LR's _write_training_report)."""
+    payload = _stats_to_dict(stats)
+    payload.update(
+        {
+            "model_version": getattr(model, "best_params", None)
+            and stats.metrics.get("model_version", "dj-taxonomy-xgb-v1"),
+            "feature_schema_version": DJ_FEATURE_SCHEMA_VERSION,
+            "trained_at": model.trained_at,
+            "labels_hash": model.labels_hash,
+            "taxonomy_hash": model.taxonomy_hash,
+            "best_params": getattr(model, "best_params", {}),
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
 
 
 def _evaluate_examples(

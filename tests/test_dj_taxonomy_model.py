@@ -234,6 +234,7 @@ def test_dj_taxonomy_cli_train_models_prints_locations_only(tmp_path, capsys):
             seed=42,
             quiet=False,
             no_progress=True,
+            model="legacy-dual",
         )
     )
 
@@ -261,6 +262,7 @@ def test_dj_taxonomy_cli_evaluate_prints_locations_only(tmp_path, capsys):
             seed=42,
             quiet=False,
             no_progress=True,
+            model="legacy-dual",
         )
     )
     capsys.readouterr()
