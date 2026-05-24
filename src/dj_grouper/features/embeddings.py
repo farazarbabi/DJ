@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
+import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +17,14 @@ logger = logging.getLogger(__name__)
 _clap_model = None
 
 CLAP_BATCH_SIZE = 20  # save cache after every batch
+
+# Project-local model cache. laion_clap by default downloads to its package
+# directory (inside site-packages) which is invisible in the project tree;
+# we mirror the weight file here so it's discoverable and survives venv
+# rebuilds.
+_CLAP_WEIGHT_FILENAME = "630k-audioset-best.pt"
+_CLAP_LOCAL_DIR = Path("cache") / "models"
+_CLAP_LOCAL_PATH = _CLAP_LOCAL_DIR / _CLAP_WEIGHT_FILENAME
 
 
 # ─── CLAP availability ──────────────────────────────────────────────────────
@@ -28,13 +40,69 @@ def is_clap_available() -> bool:
 
 
 def _get_clap_model():
-    """Lazy-load the CLAP model."""
+    """Lazy-load the CLAP HTSAT-tiny model, caching weights under cache/models/.
+
+    First call: loads from cache/models/630k-audioset-best.pt if present,
+    otherwise lets laion_clap download to its package dir and mirrors the
+    weight file into cache/models/ for next time.
+
+    laion_clap's loader is verbose (one line per parameter tensor and a few
+    unconditional banner prints). We suppress all of that and emit a single
+    info line summarizing where the weight came from.
+    """
     global _clap_model
-    if _clap_model is None:
+    if _clap_model is not None:
+        return _clap_model
+
+    # Set env vars BEFORE importing laion_clap; huggingface_hub checks these
+    # on its own import and prints an HF-auth warning when missing.
+    import os
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+
+    explicit_ckpt = str(_CLAP_LOCAL_PATH) if _CLAP_LOCAL_PATH.exists() else None
+    t0 = time.time()
+
+    # laion_clap.load_ckpt prints unconditionally even with verbose=False; the
+    # verbose flag only gates per-parameter status lines. transformers prints
+    # a missing/unexpected-keys table directly to stderr. huggingface_hub
+    # prints an auth-warning at import time. Wrap the entire import-and-load
+    # block in stdout+stderr capture so the populate script's output stays
+    # readable. Errors during load propagate via exception, not stderr.
+    silent_out = io.StringIO()
+    silent_err = io.StringIO()
+    with contextlib.redirect_stdout(silent_out), contextlib.redirect_stderr(silent_err):
         import laion_clap
+        try:
+            import transformers
+            transformers.logging.set_verbosity_error()
+        except Exception:
+            pass
+        try:
+            import huggingface_hub
+            huggingface_hub.logging.set_verbosity_error()
+        except Exception:
+            pass
         _clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-tiny")
-        _clap_model.load_ckpt()
-        logger.info("CLAP model loaded")
+        _clap_model.load_ckpt(ckpt=explicit_ckpt, verbose=False)
+
+    elapsed = time.time() - t0
+
+    # If we just downloaded, copy the weight from laion_clap's package dir into
+    # cache/models/ so subsequent runs read from the project-local path.
+    if explicit_ckpt is None:
+        try:
+            pkg_dir = Path(laion_clap.__file__).resolve().parent
+            src_path = pkg_dir / _CLAP_WEIGHT_FILENAME
+            if src_path.exists():
+                _CLAP_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+                if not _CLAP_LOCAL_PATH.exists():
+                    shutil.copy2(src_path, _CLAP_LOCAL_PATH)
+        except Exception as exc:
+            logger.debug("Could not mirror CLAP weight to %s: %s", _CLAP_LOCAL_PATH, exc)
+
+    location = str(_CLAP_LOCAL_PATH) if _CLAP_LOCAL_PATH.exists() else "package default"
+    logger.info("CLAP HTSAT-tiny ready (%.1fs, %s)", elapsed, location)
     return _clap_model
 
 

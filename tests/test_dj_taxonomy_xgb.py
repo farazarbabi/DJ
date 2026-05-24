@@ -87,7 +87,7 @@ def _build_examples(store: CsvStore, taxonomy):
         for i in range(2 * len(_CATEGORIES))
     ]
     # Insert directly into _build_training_examples by faking the loader
-    examples, _ = _build_training_examples(labels_rows, store, mode="external", show_progress=False)
+    examples, _, _ = _build_training_examples(labels_rows, store, mode="external", show_progress=False)
     return examples
 
 

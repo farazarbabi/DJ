@@ -75,12 +75,15 @@ class XGBTaxonomyModel:
         observations: list[SourceObservation],
         file_record: FileRecord | None,
         taxonomy: DjTaxonomy,
+        *,
+        ucache: Any | None = None,
     ) -> DjCategoryPrediction:
         features = build_track_features(
             track,
             observations,
             file_record,
             feature_mode=self.feature_mode,
+            ucache=ucache,
         )
         if not features:
             return DjCategoryPrediction(

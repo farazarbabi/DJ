@@ -224,11 +224,18 @@ def build_track_features(
     *,
     label_row: dict[str, str] | None = None,
     feature_mode: str = "external",
+    ucache: Any | None = None,
 ) -> dict[str, float]:
     """Build a DictVectorizer-ready feature map from all available evidence.
 
     Provider genre fields are intentionally ordinary text features. They are
     never treated as labels or hard overrides by this extractor.
+
+    When ``ucache`` is provided and ``file_record`` has a usable file name,
+    dense audio features (DSP scalars, CLAP embedding, vocal-stem scalars)
+    are looked up from the universal cache and added to the feature map.
+    Cache misses are silent — the helpers no-op so models trained without
+    these features stay usable.
     """
     track = track or LogicalTrack()
     observations = observations or []
@@ -245,9 +252,144 @@ def build_track_features(
         _add_provider_features(features, observations, file_record, label_row)
         _add_audio_features(features, observations)
         _add_priors_features(features, track)
+        cache_key = _cache_key_from_file_record(file_record) if ucache is not None else None
+        if ucache is not None and cache_key is not None:
+            _add_dsp_features(features, ucache, cache_key)
+            _add_clap_features(features, ucache, cache_key)
+            _add_vocal_stem_features(features, ucache, cache_key)
     _add_afro_tribal_eligibility_feature(features, track, observations, file_record)
 
     return features
+
+
+def _cache_key_from_file_record(
+    file_record: FileRecord | None,
+) -> tuple[str, float | None] | None:
+    """Build a ``(filename, duration)`` cache key from a FileRecord.
+
+    Uses ``quick_duration(path_abs)`` so the key matches the convention used by
+    the grouper and registry (rounded librosa duration, not the persisted
+    ``audio_duration_sec`` which can drift by a fraction of a second).
+    """
+    if file_record is None:
+        return None
+    filename = file_record.file_name or ""
+    if not filename and file_record.path_abs:
+        filename = Path(file_record.path_abs).name
+    if not filename:
+        return None
+    duration: float | None = None
+    if file_record.path_abs:
+        try:
+            from dj_tagger.universal_cache import quick_duration
+
+            duration = quick_duration(file_record.path_abs)
+        except Exception:
+            duration = None
+    if duration is None and file_record.audio_duration_sec:
+        try:
+            duration = float(file_record.audio_duration_sec)
+        except (TypeError, ValueError):
+            duration = None
+    return (filename, duration)
+
+
+def _add_dsp_features(
+    features: dict[str, float],
+    ucache: Any,
+    cache_key: tuple[str, float | None],
+) -> None:
+    """Emit ``num:dsp:<name>`` scalars for the curated DSP feature set.
+
+    No-op on cache miss (track wasn't analyzed yet, or analyzed before the
+    DSP layer existed).
+    """
+    filename, duration = cache_key
+    try:
+        data = ucache.get_track(filename, duration, "dsp")
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    try:
+        from dj_grouper.features.dsp import DSP_CURATED_NAMES
+    except ImportError:
+        return
+    for name in DSP_CURATED_NAMES:
+        value = _num(data.get(name))
+        if value is not None:
+            features[f"num:dsp:{name}"] = value
+
+
+def _add_clap_features(
+    features: dict[str, float],
+    ucache: Any,
+    cache_key: tuple[str, float | None],
+) -> None:
+    """Emit 512 L2-normalized CLAP audio-embedding dims as ``clap:d<i>``.
+
+    The CLAP embedding ships as a 512-dim float vector from
+    laion_clap HTSAT-tiny. We L2-normalize at emission so the vector lives on
+    the unit sphere — this keeps the values in a tight range so LR's L2
+    penalty doesn't trivially zero them out next to small text features, and
+    leaves XGB (tree-based, scale-invariant) unaffected.
+    """
+    filename, duration = cache_key
+    try:
+        data = ucache.get_track(filename, duration, "clap")
+    except Exception:
+        return
+    if data is None:
+        return
+    try:
+        import numpy as np
+    except ImportError:
+        return
+    try:
+        arr = np.asarray(data, dtype=np.float32).ravel()
+    except (TypeError, ValueError):
+        return
+    if arr.size == 0:
+        return
+    norm = float(np.linalg.norm(arr))
+    if not (norm > 0) or not np.isfinite(norm):
+        return
+    unit = arr / norm
+    for i, value in enumerate(unit):
+        v = float(value)
+        if np.isfinite(v):
+            features[f"clap:d{i}"] = v
+
+
+def _add_vocal_stem_features(
+    features: dict[str, float],
+    ucache: Any,
+    cache_key: tuple[str, float | None],
+) -> None:
+    """Emit the four Demucs vocal-stem scalars as ``num:vocal_stem:<field>``.
+
+    These four scalars (RMS, mix ratio, activity fraction, envelope variance)
+    are the FVOC/VOC/INST discriminator that the tagger uses post-Demucs.
+    Giving them to the subgenre classifier helps the model separate categories
+    that differ by vocal profile within the same BPM/mood band (e.g.
+    vocal_hook_tech_house vs dark_tech_house_driver).
+    """
+    filename, duration = cache_key
+    try:
+        data = ucache.get_track(filename, duration, "vocal_stem")
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    for name in (
+        "vocal_stem_rms_db",
+        "vocal_stem_mix_ratio_db",
+        "vocal_stem_activity_frac",
+        "vocal_stem_envelope_var",
+    ):
+        value = _num(data.get(name))
+        if value is not None:
+            features[f"num:vocal_stem:{name.removeprefix('vocal_stem_')}"] = value
 
 
 def _add_mix_name_features(
@@ -523,6 +665,13 @@ def _add_audio_features(features: dict[str, float], observations: list[SourceObs
             _add_numeric(features, f"{source}:{name}", value)
             if value is not None:
                 features[f"audio_band:{name}:{_value_band(value)}"] = 1.0
+        # Spotify popularity (0-100). Normalize to 0-1 for the numeric feature
+        # and emit a 3-band categorical for the LR to lean on without scaling.
+        popularity_raw = _num(getattr(obs, "popularity", ""))
+        if popularity_raw is not None and popularity_raw >= 0:
+            popularity = max(0.0, min(1.0, popularity_raw / 100.0))
+            features[f"num:{source}:popularity"] = popularity
+            features[f"popularity_band:{source}:{_popularity_band(popularity)}"] = 1.0
         if _num(obs.acousticness) is not None and _num(obs.acousticness) >= 0.60:
             _add_cue(features, "acoustic")
             _add_cue(features, "rock")
@@ -533,6 +682,15 @@ def _add_audio_features(features: dict[str, float], observations: list[SourceObs
         if _num(obs.energy) is not None and _num(obs.energy) >= 0.78:
             _add_cue(features, "driving")
             _add_cue(features, "peak")
+
+
+def _popularity_band(popularity: float) -> str:
+    """3-band popularity bucket; mid covers the most common Spotify range."""
+    if popularity < 0.25:
+        return "lo"
+    if popularity < 0.60:
+        return "mid"
+    return "hi"
 
 
 def _add_text(features: dict[str, float], prefix: str, value: Any) -> None:

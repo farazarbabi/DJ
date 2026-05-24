@@ -487,11 +487,13 @@ def _distribution_check_with_subdir(store: CsvStore, model_dir: Path, args: argp
         if obs.track_id:
             obs_by_track.setdefault(obs.track_id, []).append(obs)
 
+    from .taxonomy.dj_model import _resolve_cache
+    ucache = _resolve_cache()
     counts: dict[str, int] = {}
     for track in tracks:
         track_obs = obs_by_track.get(track.track_id, [])
         file_record = file_by_track.get(track.track_id)
-        prediction = model.predict(track, track_obs, file_record, taxonomy)
+        prediction = model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
         if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
             cat_id = UNCLASSIFIED_ID
         else:

@@ -33,7 +33,11 @@ from .features import (
 )
 
 DJ_MODEL_VERSION = "dj-taxonomy-dual-v2"
-DJ_FEATURE_SCHEMA_VERSION = "dj-taxonomy-feature-schema-v2"
+# Bumped v2 -> v3 when dense audio features (DSP, popularity, CLAP, vocal_stem)
+# were wired through build_track_features. Old pickles will be auto-skipped by
+# load_dj_taxonomy_model_if_available / load_xgb_model.
+DJ_FEATURE_SCHEMA_VERSION = "dj-taxonomy-feature-schema-v3"
+MIN_EXAMPLES_PER_CATEGORY = 3
 MODEL_FILENAME = "model.pkl"
 REPORT_FILENAME = "training_report.json"
 AUDIT_FILENAME = "training_audit.csv"
@@ -113,12 +117,15 @@ class DjTaxonomyModel:
         observations: list[SourceObservation],
         file_record: FileRecord | None,
         taxonomy: DjTaxonomy,
+        *,
+        ucache: Any | None = None,
     ) -> DjCategoryPrediction:
         features = build_track_features(
             track,
             observations,
             file_record,
             feature_mode=self.feature_mode,
+            ucache=ucache,
         )
         if not features:
             return DjCategoryPrediction(
@@ -222,14 +229,16 @@ def train_dj_taxonomy_models(
     base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
     base_dir.mkdir(parents=True, exist_ok=True)
 
+    ucache = _resolve_cache()
     stats: dict[str, DjTrainingStats] = {}
     examples_by_mode: dict[str, list[dict[str, Any]]] = {}
     for mode in ("internal", "external"):
-        examples, skipped = _build_training_examples(
+        examples, skipped, dropped = _build_training_examples(
             labels,
             store,
             mode=mode,
             show_progress=show_progress,
+            ucache=ucache,
         )
         if not examples:
             raise ValueError(f"No valid {mode} DJ taxonomy training examples could be built from labels CSV")
@@ -241,6 +250,12 @@ def train_dj_taxonomy_models(
             validation_split=validation_split,
             seed=seed,
         )
+        if dropped:
+            warnings = list(warnings) + [
+                f"Dropped {sum(dropped.values())} rows in {len(dropped)} under-supported "
+                f"categories (<{MIN_EXAMPLES_PER_CATEGORY} examples): "
+                f"{sorted(dropped.keys())}"
+            ]
         mode_dir = base_dir / mode
         model.save(mode_dir)
         _write_training_audit(mode_dir / AUDIT_FILENAME, examples)
@@ -336,17 +351,20 @@ def evaluate_dj_taxonomy_models(
     internal_model = load_dj_taxonomy_model(base_dir / "internal", taxonomy_path=taxonomy_path)
     external_model = load_dj_taxonomy_model(base_dir / "external", taxonomy_path=taxonomy_path)
 
-    internal_examples, internal_skipped = _build_training_examples(
+    ucache = _resolve_cache()
+    internal_examples, internal_skipped, _internal_dropped = _build_training_examples(
         labels,
         store,
         mode="internal",
         show_progress=show_progress,
+        ucache=ucache,
     )
-    external_examples, external_skipped = _build_training_examples(
+    external_examples, external_skipped, _external_dropped = _build_training_examples(
         labels,
         store,
         mode="external",
         show_progress=show_progress,
+        ucache=ucache,
     )
     examples_by_key = {
         _example_key(example): {"internal": example}
@@ -365,11 +383,11 @@ def evaluate_dj_taxonomy_models(
             continue
         expected = example["category_id"]
         internal_prediction = (
-            _predict_for_example(internal_model, internal_example, taxonomy)
+            _predict_for_example(internal_model, internal_example, taxonomy, ucache=ucache)
             if internal_example else DjCategoryPrediction(feature_mode="internal")
         )
         external_prediction = (
-            _predict_for_example(external_model, external_example, taxonomy)
+            _predict_for_example(external_model, external_example, taxonomy, ucache=ucache)
             if external_example else DjCategoryPrediction(feature_mode="external")
         )
         rows.append(
@@ -445,16 +463,17 @@ def classify_all_dj_taxonomies(
         if obs.track_id:
             obs_by_track.setdefault(obs.track_id, []).append(obs)
 
+    ucache = _resolve_cache()
     progress = ProgressBar(len(tracks), label="Classify DJ taxonomy", enabled=show_progress)
     for index, track in enumerate(tracks, start=1):
         track_obs = obs_by_track.get(track.track_id, [])
         file_record = file_by_track.get(track.track_id)
         internal_prediction = (
-            internal_model.predict(track, track_obs, file_record, taxonomy)
+            internal_model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
             if internal_model else DjCategoryPrediction(feature_mode="internal")
         )
         external_prediction = (
-            external_model.predict(track, track_obs, file_record, taxonomy)
+            external_model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
             if external_model else DjCategoryPrediction(feature_mode="external")
         )
         _apply_predictions_to_track(
@@ -619,6 +638,21 @@ def _fit_model(
     )
 
 
+def _resolve_cache() -> Any | None:
+    """Resolve the UniversalCache singleton; return None if unavailable.
+
+    Used by training and inference to feed dense audio features (DSP scalars,
+    CLAP, vocal_stem) when they're cached. Returns None silently so callers
+    without a cache fall back to today's behavior — no error path is needed.
+    """
+    try:
+        from dj_tagger.universal_cache import get_cache
+        return get_cache()
+    except Exception:
+        logger.debug("Universal cache unavailable; dense audio features will be skipped.")
+        return None
+
+
 def _load_label_rows(labels_path: str, taxonomy: DjTaxonomy) -> list[dict[str, str]]:
     with open(labels_path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
@@ -646,7 +680,18 @@ def _build_training_examples(
     *,
     mode: str,
     show_progress: bool = False,
-) -> tuple[list[dict[str, Any]], int]:
+    ucache: Any | None = None,
+    min_examples_per_category: int = MIN_EXAMPLES_PER_CATEGORY,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """Build training examples from the registry + labels CSV.
+
+    Returns ``(examples, skipped, dropped_categories)``:
+      - ``examples``: feature-bearing rows ready for vectorization.
+      - ``skipped``: count of label rows that yielded no usable features.
+      - ``dropped_categories``: ``{category_id: count}`` for classes with
+        fewer than ``min_examples_per_category`` rows — surfaced to warnings
+        so the operator can target them for data growth.
+    """
     tracks = store.load_tracks()
     files = store.load_files()
     observations = store.load_observations()
@@ -683,6 +728,7 @@ def _build_training_examples(
             file_record,
             label_row=row,
             feature_mode=mode,
+            ucache=ucache,
         )
         if not features:
             skipped += 1
@@ -701,7 +747,27 @@ def _build_training_examples(
         )
         progress.update(index, row.get("file_name", ""), examples=len(examples), skipped=skipped)
     progress.finish()
-    return examples, skipped
+
+    # Spec §9 — drop categories with <N examples. They overfit instead of learn,
+    # and they consume train/val budget that the long-tail can't afford.
+    # Skipped when the dataset is below 8 rows total (mirrors the small-dataset
+    # branch in _train_final_model_with_metrics) — smoke-test fixtures must
+    # still train successfully even though every category has 1 example.
+    dropped: dict[str, int] = {}
+    if min_examples_per_category > 1 and len(examples) >= 8:
+        from collections import Counter
+
+        counts = Counter(example["category_id"] for example in examples)
+        keep = {cid for cid, n in counts.items() if n >= min_examples_per_category}
+        if len(keep) < len(counts) and len(keep) >= 2:
+            dropped = {cid: n for cid, n in counts.items() if cid not in keep}
+            examples = [e for e in examples if e["category_id"] in keep]
+            logger.info(
+                "Dropped %d categories with <%d examples: %s",
+                len(dropped), min_examples_per_category, sorted(dropped),
+            )
+
+    return examples, skipped, dropped
 
 
 def _track_from_label_row(row: dict[str, str]) -> LogicalTrack:
@@ -769,7 +835,12 @@ def _probability_map(model: Any, x: Any) -> dict[str, float]:
 
 
 def _confidence_from_model_score(score: float, margin: float, features: dict[str, float]) -> float:
-    richness = min(0.12, len(features) / 420.0)
+    # Richness scales with the *number of distinct feature groups* present (not
+    # the raw key count). Counting groups makes the bonus invariant when wide
+    # dense blocks (CLAP, DSP) are added — adding 512 CLAP dims shouldn't
+    # trivially saturate confidence.
+    group_count = len({key.split(":", 1)[0] for key in features})
+    richness = min(0.12, group_count / 30.0)
     raw = 0.18 + 0.64 * max(0.0, min(score, 1.0)) + 0.18 * max(0.0, min(margin, 1.0)) + richness
     return round(max(0.05, min(0.98, raw)), 3)
 
@@ -780,11 +851,56 @@ def _split_examples(
     validation_split: float,
     seed: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    shuffled = list(examples)
-    random.Random(seed).shuffle(shuffled)
-    validation_count = max(1, int(round(len(shuffled) * validation_split)))
-    validation_count = min(validation_count, len(shuffled) - 1)
-    return shuffled[validation_count:], shuffled[:validation_count]
+    """Split into train/validation with stratification + same-artist leakage guard.
+
+    Priority order:
+      1. ``GroupShuffleSplit`` by ``track.artist_canonical`` — prevents the
+         classifier from being graded on tracks by the same artist it trained
+         on (the identity-token features make that a real leak).
+      2. Plain stratified ``train_test_split`` — keeps every class in both
+         splits when group-aware splitting can't satisfy the class coverage
+         (e.g., a class has only one artist).
+      3. Random shuffle — fall-through when even stratification is infeasible
+         (any class has <2 examples).
+    """
+    from collections import Counter
+
+    ys = [example["category_id"] for example in examples]
+    class_counts = Counter(ys)
+
+    # Fall-through: any class with <2 examples means we can't stratify cleanly.
+    if not class_counts or min(class_counts.values()) < 2:
+        shuffled = list(examples)
+        random.Random(seed).shuffle(shuffled)
+        n_val = max(1, int(round(len(shuffled) * validation_split)))
+        n_val = min(n_val, len(shuffled) - 1)
+        return shuffled[n_val:], shuffled[:n_val]
+
+    # Try group-aware split by artist when most rows have an artist.
+    from sklearn.model_selection import GroupShuffleSplit, train_test_split
+
+    artists = [(example["track"].artist_canonical or "").strip() for example in examples]
+    if sum(1 for a in artists if a) >= int(len(artists) * 0.6):
+        groups = [
+            artist or (example["track"].track_id or example.get("file_name") or f"_row{i}")
+            for i, (artist, example) in enumerate(zip(artists, examples))
+        ]
+        try:
+            splitter = GroupShuffleSplit(n_splits=1, test_size=validation_split, random_state=seed)
+            train_idx, val_idx = next(splitter.split(examples, ys, groups=groups))
+            # GroupShuffleSplit is not stratified; verify class coverage and
+            # fall through if any class is entirely missing from training.
+            train_classes = {ys[i] for i in train_idx}
+            if set(ys).issubset(train_classes) and len(val_idx) > 0:
+                return [examples[i] for i in train_idx], [examples[i] for i in val_idx]
+        except ValueError:
+            pass
+
+    # Stratified split — every class represented proportionally in both.
+    train_examples, val_examples = train_test_split(
+        examples, test_size=validation_split, stratify=ys, random_state=seed
+    )
+    return train_examples, val_examples
 
 
 # ── Spec §9.2 / §9.3 — Library-distribution check + anti-collapse guard ─────
@@ -835,12 +951,13 @@ def run_library_distribution_check(
         if obs.track_id:
             obs_by_track.setdefault(obs.track_id, []).append(obs)
 
+    ucache = _resolve_cache()
     counts: dict[str, int] = {}
     progress = ProgressBar(len(tracks), label="Library distribution", enabled=show_progress)
     for index, track in enumerate(tracks, start=1):
         track_obs = obs_by_track.get(track.track_id, [])
         file_record = file_by_track.get(track.track_id)
-        prediction = model.predict(track, track_obs, file_record, taxonomy)
+        prediction = model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
         # Apply the same null-fallback rule the writer uses, so the audit
         # reflects what would actually end up on tracks_master.csv.
         if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
@@ -966,20 +1083,37 @@ def train_dj_taxonomy_unified(
     base_dir.mkdir(parents=True, exist_ok=True)
 
     # Build feature examples once (unified = external mode = superset of internal)
-    examples, skipped = _build_training_examples(
-        labels, store, mode="external", show_progress=show_progress
+    ucache = _resolve_cache()
+    examples, skipped, dropped_categories = _build_training_examples(
+        labels, store, mode="external", show_progress=show_progress, ucache=ucache,
     )
     if not examples:
         raise ValueError("No valid training examples could be built from labels CSV")
 
-    results: dict[str, Any] = {"model_dir": str(base_dir), "examples_total": len(examples), "skipped_rows": skipped}
+    results: dict[str, Any] = {
+        "model_dir": str(base_dir),
+        "examples_total": len(examples),
+        "skipped_rows": skipped,
+        "dropped_categories": dropped_categories,
+    }
+
+    dropped_warning = ""
+    if dropped_categories:
+        dropped_warning = (
+            f"Dropped {sum(dropped_categories.values())} rows in "
+            f"{len(dropped_categories)} under-supported categories "
+            f"(<{MIN_EXAMPLES_PER_CATEGORY} examples): {sorted(dropped_categories.keys())}"
+        )
 
     if model_type in {"lr", "both"}:
-        results["lr"] = _train_lr_unified(
+        lr_result = _train_lr_unified(
             examples, taxonomy, labels_path=labels_path,
             model_dir=base_dir / "lr",
             validation_split=validation_split, seed=seed, tune=tune_lr,
         )
+        if dropped_warning:
+            lr_result["warnings"] = list(lr_result.get("warnings") or []) + [dropped_warning]
+        results["lr"] = lr_result
 
     if model_type in {"xgb", "both"}:
         from .dj_model_xgb import train_xgb_model
@@ -993,6 +1127,8 @@ def train_dj_taxonomy_unified(
             n_iter=xgb_n_iter,
             show_progress=show_progress,
         )
+        if dropped_warning:
+            xgb_warnings = list(xgb_warnings) + [dropped_warning]
         xgb_dir = base_dir / "xgb"
         xgb_model.save(xgb_dir)
         xgb_stats = DjTrainingStats(
@@ -1127,10 +1263,14 @@ def _evaluate_examples(
     model: DjTaxonomyModel,
     examples: list[dict[str, Any]],
     taxonomy: DjTaxonomy,
+    *,
+    ucache: Any | None = None,
 ) -> dict[str, Any]:
+    if ucache is None:
+        ucache = _resolve_cache()
     rows = []
     for example in examples:
-        prediction = _predict_for_example(model, example, taxonomy)
+        prediction = _predict_for_example(model, example, taxonomy, ucache=ucache)
         top3 = [alt["category_id"] for alt in prediction.alternatives]
         top3.insert(0, prediction.category_id)
         rows.append(
@@ -1148,17 +1288,20 @@ def _evaluate_examples(
 
 
 def _predict_for_example(
-    model: DjTaxonomyModel,
+    model: Any,
     example: dict[str, Any] | None,
     taxonomy: DjTaxonomy,
+    *,
+    ucache: Any | None = None,
 ) -> DjCategoryPrediction:
     if not example:
-        return DjCategoryPrediction(feature_mode=model.feature_mode)
+        return DjCategoryPrediction(feature_mode=getattr(model, "feature_mode", "external"))
     return model.predict(
         example["track"],
         example.get("observations", []),
         example.get("file_record"),
         taxonomy,
+        ucache=ucache,
     )
 
 
@@ -1186,6 +1329,42 @@ def _metrics_from_rows(rows: list[dict[str, Any]], prefix: str) -> dict[str, Any
         "average_confidence": round(sum(confidences) / len(confidences), 3),
         "confidence_buckets": _confidence_buckets(rows, prefix),
         "per_category": _per_category_metrics(rows, prefix),
+        "per_class": _per_class_classification_report(y_true, y_pred),
+    }
+
+
+def _per_class_classification_report(
+    y_true: list[str], y_pred: list[str]
+) -> dict[str, dict[str, float]]:
+    """Full precision/recall/F1 per category from sklearn.classification_report.
+
+    Use this in conjunction with ``per_category`` (top-1 accuracy + support) to
+    diagnose which categories are dragging macro-F1 — bottom-quartile recall
+    is what the data-growth phase should target.
+    """
+    if not y_true:
+        return {}
+    from sklearn.metrics import classification_report
+
+    labels = sorted({label for label in y_true + y_pred if label})
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=labels,
+        output_dict=True,
+        zero_division=0,
+    )
+    # Drop sklearn's aggregate keys; the macro/weighted aggregates are already
+    # represented in the top-level metrics.
+    return {
+        label: {
+            "precision": round(float(stats.get("precision", 0.0)), 3),
+            "recall": round(float(stats.get("recall", 0.0)), 3),
+            "f1": round(float(stats.get("f1-score", 0.0)), 3),
+            "support": int(stats.get("support", 0)),
+        }
+        for label, stats in report.items()
+        if isinstance(stats, dict) and label not in {"accuracy", "macro avg", "weighted avg"}
     }
 
 

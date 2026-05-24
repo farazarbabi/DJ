@@ -350,3 +350,160 @@ def _write_dj_labels(tmp_path):
             ]
         )
     return labels_path
+
+
+# ── Phase 2: data-hygiene additions ─────────────────────────────────────────
+
+
+def _make_example(category_id, *, artist=""):
+    """Tiny synthetic example matching the shape of _build_training_examples."""
+    return {
+        "track": LogicalTrack(track_id=f"T-{category_id}-{artist}", artist_canonical=artist),
+        "features": {"text:title:token=x": 1.0},
+        "category_id": category_id,
+        "file_name": f"{category_id}.mp3",
+        "observations": [],
+        "file_record": None,
+        "external_evidence_available": False,
+    }
+
+
+def test_split_examples_stratifies_classes_when_feasible():
+    """Every class should land in both train and test when each has ≥2 examples."""
+    from dj_registry.taxonomy.dj_model import _split_examples
+
+    examples = (
+        [_make_example("a", artist=f"A{i}") for i in range(5)]
+        + [_make_example("b", artist=f"B{i}") for i in range(5)]
+        + [_make_example("c", artist=f"C{i}") for i in range(5)]
+    )
+    train, val = _split_examples(examples, validation_split=0.4, seed=42)
+    train_classes = {e["category_id"] for e in train}
+    val_classes = {e["category_id"] for e in val}
+    assert train_classes == {"a", "b", "c"}, f"train classes incomplete: {train_classes}"
+    assert val_classes == {"a", "b", "c"}, f"val classes incomplete: {val_classes}"
+
+
+def test_split_examples_falls_back_to_random_shuffle_for_thin_classes():
+    """When any class has <2 examples, stratification fails — must not crash."""
+    from dj_registry.taxonomy.dj_model import _split_examples
+
+    examples = [
+        _make_example("a"),
+        _make_example("a"),
+        _make_example("b"),
+        _make_example("c"),  # singleton — blocks stratified split
+    ]
+    train, val = _split_examples(examples, validation_split=0.25, seed=42)
+    assert len(train) + len(val) == 4
+    assert len(val) >= 1
+
+
+def test_split_examples_avoids_same_artist_leakage():
+    """All tracks by the same artist should land in the same split."""
+    from dj_registry.taxonomy.dj_model import _split_examples
+
+    examples = (
+        [_make_example("a", artist="X") for _ in range(3)]
+        + [_make_example("a", artist="Y") for _ in range(3)]
+        + [_make_example("b", artist="Z") for _ in range(3)]
+        + [_make_example("b", artist="W") for _ in range(3)]
+    )
+    train, val = _split_examples(examples, validation_split=0.25, seed=42)
+    train_artists = {e["track"].artist_canonical for e in train}
+    val_artists = {e["track"].artist_canonical for e in val}
+    # Some artist set should be disjoint between train and val
+    assert train_artists & val_artists == set(), (
+        f"artist leakage: train={train_artists}, val={val_artists}"
+    )
+
+
+def test_build_training_examples_drops_under_supported_categories(tmp_path):
+    """Categories with fewer than MIN_EXAMPLES_PER_CATEGORY rows are dropped
+    when the dataset is large enough; the dropped set is returned."""
+    from dj_registry.taxonomy.dj_model import _build_training_examples, MIN_EXAMPLES_PER_CATEGORY
+
+    store = CsvStore(str(tmp_path / "registry"))
+    # Make 8 rows total: one popular category × 5 + one singleton × 3, plus
+    # an under-supported category × 1 that should be dropped.
+    tracks = []
+    files = []
+    label_rows = []
+    cat_popular = "dark_tech_house_driver"
+    cat_under = "vocal_hook_tech_house"
+    cat_tiny = "raw_warehouse_techno"
+    # popular: 5
+    for i in range(5):
+        tid = f"T{i+1}"
+        tracks.append(LogicalTrack(track_id=tid, artist_canonical=f"A{i}",
+                                   tagger_energy="E4", tagger_vibe="dark", tagger_structure="16H", tagger_bpm="126"))
+        files.append(FileRecord(file_id=f"F{i+1}", track_id=tid, is_primary_file=True, file_name=f"f{i+1}.mp3"))
+        label_rows.append({"track_id": tid, "file_name": f"f{i+1}.mp3", "category_id": cat_popular})
+    # under: 3 — at the boundary (>=3 = kept)
+    for i in range(5, 8):
+        tid = f"T{i+1}"
+        tracks.append(LogicalTrack(track_id=tid, artist_canonical=f"B{i}",
+                                   tagger_energy="E4", tagger_vibe="dark", tagger_structure="16H", tagger_bpm="126"))
+        files.append(FileRecord(file_id=f"F{i+1}", track_id=tid, is_primary_file=True, file_name=f"f{i+1}.mp3"))
+        label_rows.append({"track_id": tid, "file_name": f"f{i+1}.mp3", "category_id": cat_under})
+    # tiny: 1 — should be dropped (< 3)
+    tracks.append(LogicalTrack(track_id="T9", artist_canonical="C0",
+                               tagger_energy="E4", tagger_vibe="dark", tagger_structure="16H", tagger_bpm="126"))
+    files.append(FileRecord(file_id="F9", track_id="T9", is_primary_file=True, file_name="f9.mp3"))
+    label_rows.append({"track_id": "T9", "file_name": "f9.mp3", "category_id": cat_tiny})
+
+    store.save_tracks(tracks)
+    store.save_files(files)
+    store.save_observations([])
+
+    examples, _, dropped = _build_training_examples(
+        label_rows, store, mode="external", show_progress=False,
+    )
+
+    assert MIN_EXAMPLES_PER_CATEGORY == 3
+    kept_categories = {e["category_id"] for e in examples}
+    assert cat_popular in kept_categories
+    assert cat_under in kept_categories
+    assert cat_tiny not in kept_categories
+    assert dropped == {cat_tiny: 1}
+
+
+def test_metrics_include_per_class_precision_recall_f1():
+    """_metrics_from_rows should now also surface a per-class report dict."""
+    from dj_registry.taxonomy.dj_model import _metrics_from_rows
+
+    rows = [
+        {"expected_category_id": "a", "ext_category_id": "a", "ext_correct": True,
+         "ext_top3_correct": True, "ext_confidence": 0.8},
+        {"expected_category_id": "a", "ext_category_id": "b", "ext_correct": False,
+         "ext_top3_correct": True, "ext_confidence": 0.5},
+        {"expected_category_id": "b", "ext_category_id": "b", "ext_correct": True,
+         "ext_top3_correct": True, "ext_confidence": 0.9},
+    ]
+    metrics = _metrics_from_rows(rows, prefix="ext")
+    assert "per_class" in metrics
+    assert set(metrics["per_class"].keys()) >= {"a", "b"}
+    for stats in metrics["per_class"].values():
+        assert {"precision", "recall", "f1", "support"} == set(stats.keys())
+    # Class "b" has 1 true positive and 1 false positive → precision 0.5
+    assert metrics["per_class"]["b"]["precision"] == pytest.approx(0.5)
+    assert metrics["per_class"]["b"]["recall"] == pytest.approx(1.0)
+
+
+def test_confidence_formula_uses_feature_group_count():
+    """Adding more keys within a group must not inflate confidence — the bonus
+    counts distinct prefixes, so wide dense blocks (CLAP, DSP) stay neutral."""
+    from dj_registry.taxonomy.dj_model import _confidence_from_model_score
+
+    sparse = {"text:a:b": 1.0, "num:bpm": 124, "cue:dark": 1.0}
+    bloated = {f"num:dsp:f{i}": 0.1 for i in range(512)}
+    bloated.update(sparse)
+
+    sparse_conf = _confidence_from_model_score(0.6, 0.1, sparse)
+    bloated_conf = _confidence_from_model_score(0.6, 0.1, bloated)
+    # Adding hundreds of `num:dsp:*` keys creates only ONE new group ("num"
+    # already exists from num:bpm), so the bonus must not jump dramatically.
+    assert abs(bloated_conf - sparse_conf) < 0.05
+
+
+import pytest  # noqa: E402  (used by approx assertions above)
