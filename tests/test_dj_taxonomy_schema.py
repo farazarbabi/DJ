@@ -137,11 +137,9 @@ def test_named_split_categories_present():
     raw = _load_raw()
     ids = {entry["id"] for entry in raw["categories"]}
     expected_new_ids = {
-        # Tribal Afro splits
-        "afro_tribal_warmup",
-        "afro_tribal_builder",
+        # Tribal Afro splits (warmup/builder/cinematic_builder were consolidated
+        # away in the v2.2 reshuffle; surviving splits are the chant and 3-step)
         "spiritual_afro_chant",
-        "afro_cinematic_builder",
         "afro_3_step",
         # Organic House splits
         "organic_house_warmup",

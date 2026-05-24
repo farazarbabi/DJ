@@ -346,7 +346,7 @@ def _write_dj_labels(tmp_path):
                 {"track_id": "T1", "file_name": "dark driver.mp3", "category_id": "dark_tech_house_driver"},
                 {"track_id": "T2", "file_name": "vocal hook.mp3", "category_id": "vocal_hook_tech_house"},
                 {"track_id": "T3", "file_name": "warehouse peak.mp3", "category_id": "raw_warehouse_techno"},
-                {"track_id": "T4", "file_name": "organic chant.mp3", "category_id": "organic_chant_house"},
+                {"track_id": "T4", "file_name": "organic chant.mp3", "category_id": "ritual_chant_house"},
             ]
         )
     return labels_path

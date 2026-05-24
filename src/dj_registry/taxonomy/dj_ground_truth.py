@@ -1,4 +1,24 @@
-"""GPT-assisted ground truth for flat DJ-functional taxonomy categories."""
+"""GPT-assisted ground-truth labeling for the DJ subgenre taxonomy.
+
+Used to label tracks (aiff / mp3) against ``dj_taxonomy.json`` v2.2 to produce
+a ground-truth CSV for the LR baseline and XGBoost subgenre classifiers. The
+system prompt encodes:
+
+- hard rules (only pick from taxonomy, JSON-only output)
+- a 5-step decision process (BPM gate → mood/groove → keywords → provider → confidence)
+- anti-bias rules that block the previous afro over-tagging
+- evidence weighting (STRONG / MEDIUM / WEAK / NOT-evidence)
+- confidence calibration bands
+- few-shot examples covering the high-confusion clusters
+- a fully-specified JSON output schema with ``rejected_afro`` flag
+
+The taxonomy is sent inline ahead of the per-track evidence so the LLM has
+access to ``allowed_dj_taxonomy.categories`` referenced by the prompt.
+
+CSV note: list-valued LLM fields (``alternatives``, ``evidence_used``) are
+written as semicolon-joined strings so they round-trip cleanly through
+``csv.DictReader`` for downstream training.
+"""
 
 from __future__ import annotations
 
@@ -136,21 +156,14 @@ class OpenAIDjGroundTruthClient:
 
         payload = {
             "model": self.model,
-            "instructions": _instructions(validation_error),
+            "instructions": _system_prompt(validation_error),
             "input": [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "input_text",
-                            "text": json.dumps(
-                                {
-                                    "allowed_dj_taxonomy": taxonomy_json,
-                                    "track_context": context,
-                                },
-                                ensure_ascii=True,
-                                sort_keys=True,
-                            ),
+                            "text": _build_input_text(context, taxonomy_json),
                         }
                     ],
                 }
@@ -188,17 +201,10 @@ class OpenAIDjGroundTruthClient:
     ) -> dict[str, Any]:
         payload = {
             "messages": [
-                {"role": "system", "content": _instructions(validation_error)},
+                {"role": "system", "content": _system_prompt(validation_error)},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {
-                            "allowed_dj_taxonomy": taxonomy_json,
-                            "track_context": context,
-                        },
-                        ensure_ascii=True,
-                        sort_keys=True,
-                    ),
+                    "content": _build_input_text(context, taxonomy_json),
                 },
             ],
             "response_format": {
@@ -433,141 +439,320 @@ def validate_dj_label(label: dict[str, Any], taxonomy: DjTaxonomy) -> str | None
     return None
 
 
+SYSTEM_PROMPT = """\
+You are a DJ-music subgenre classifier producing ground-truth labels for an
+XGBoost training set. For each track, output exactly one category_id from
+`allowed_dj_taxonomy.categories` plus structured metadata.
+
+# Hard rules
+1. Pick exactly one category_id that exists in the taxonomy. NEVER invent ids,
+   labels, moods, grooves, or any taxonomy field.
+2. Provider genres (Rekordbox, Spotify, Songstats, embedded ID3 tags) are
+   HINTS ONLY — they are often wrong, outdated, or generic ("world", "house",
+   "electronic"). Trust audio features and keyword fingerprints over provider
+   strings when they conflict.
+3. If evidence is ambiguous, still pick the single best category, lower the
+   confidence, and list 1-3 allowed alternatives in `alternate_category_ids`.
+4. Output JSON only. No prose outside the JSON object.
+
+# Decision process (apply in order)
+Step 1 — BPM gate: keep only categories whose `bpm_range` covers the track BPM
+  (±2 BPM tolerance at the edges). This usually cuts candidates to 5-15.
+Step 2 — Mood / groove / vocal profile / energy match: rank remaining
+  candidates by overlap with detected features.
+Step 3 — Keyword fingerprint: scan title, filename, artist, label, mix name,
+  and provider tags for taxonomy `keywords`. A strong keyword hit (e.g. "saz",
+  "oud", "tulum", "schranz", "amapiano", "drill", "anyma", "tim reaper")
+  OUTRANKS provider genre strings.
+Step 4 — Provider genre as tie-breaker only.
+Step 5 — Set confidence per the calibration bands below.
+
+# Anti-bias rules (CRITICAL — afro was previously over-predicted)
+"Tribal" mood + percussion + chant vocal is NOT sufficient for any afro_*
+category. Check regional / scene keywords FIRST, in this order:
+
+  tulum / mayan / jungle / cenote / sunrise          -> tulum_tribal_*
+  saz / baglama / altin gun / anatolian / turkish    -> anatolian_psych_house
+  oud / qanun / darbuka / arabic / maqam             -> oriental_arabic_house
+  duduk / ney / persian / indian / desert            -> desert_mystic_driver
+  balkan / gypsy / brass / klezmer / romani          -> balkan_gypsy_groove
+  bouzouki / greek / italian / mediterranean         -> mediterranean_folk_house
+  baile / samba / candombe / brazilian / favela      -> latin_tribal_percussion
+  slavic / russian / siberian / post-soviet          -> slavic_folk_chug
+  playa / burning man / robot heart / wild west      -> burner_desert_house
+  icaros / didgeridoo / ayahuasca / shamanic         -> ritual_shamanic_house
+
+Only assign an afro_* category when at least ONE of these holds:
+  - artist origin South Africa / Angola / Nigeria / Mozambique / Senegal
+  - log drums audible (then strongly prefer amapiano_groove)
+  - Yoruba / Zulu / Xhosa / Swahili / Wolof vocal
+  - label such as MoBlack, Get Physical Afro, Stoney Boy, Realm Of
+    Consciousness, Innervisions Afro, Cuttin' Headz, Madorasindahouse
+
+A generic "world music" or "ethnic" provider tag is NEVER enough to pick afro.
+
+# Evidence weighting
+Score each evidence source according to its strength. Stronger evidence
+overrides weaker evidence when they conflict.
+
+STRONG (treat as decisive):
+  - Trusted curated provider genre (Beatport sublabel, Bandcamp artist-set
+    genre, label catalogue page).
+  - Specific artist / label match against the named rosters above.
+  - Audible distinctive instrumentation (saz, log drum, oud, amen break,
+    303 line, reverse-bass kick).
+  - Vocal language identification (Zulu, Turkish, Portuguese-BR, etc.).
+
+MEDIUM (supports a candidate but rarely decides alone):
+  - BPM in a tight range with low overlap.
+  - Mix-name / version cues ("Sunset Edit", "Sped Up", "Dub Mix").
+  - Energy level and structural arrangement.
+
+WEAK (corroborating only — never decisive):
+  - Internally-generated tagger tokens (TRIB / AFRO / DRV / HYP / ORG, etc.).
+    These reflect a prior model's guess and frequently inherit its bias.
+  - Generic provider strings ("electronic", "world", "house", "club").
+
+NOT genre evidence on their own (these belong to other taxonomy fields):
+  - Mood words (dark, tense, romantic, melodic, warm) -> moods, not lineage.
+  - Texture words (organic, hand-percussion, acoustic, dusty) -> only count
+    when backed by source metadata or a specific arrangement cue.
+  - Groove descriptors (driving, rolling, hypnotic, swinging, chugging) ->
+    grooves, not lineage.
+
+Two hard lineage requirements:
+  - `tribal_*` and tribal-tagged slots require percussion or ritual structure
+    to be CENTRAL to the arrangement — not merely present in a fill or break.
+  - `afro_*` requires explicit Afro / African / Afro-diasporic lineage or
+    context (see the afro-allow conditions above). Percussion alone never
+    satisfies this. Tribal and Afro must be EARNED by evidence, not triggered
+    by mood, percussion, or internal shorthand tags.
+
+# Other disambiguation rules
+- UK 4x4 wobble bass: `bassline_niche` (Sheffield, 132-142) or
+  `speed_garage_revival` (UKG-leaning, 128-138), NOT the older `garage_house`.
+- Modern jungle producers (Tim Reaper, Coco Bryce, Sully, Tapes label, Future
+  Retro London) -> `jungle_revival_modern`, not generic `jungle_breaks`.
+- Sliding 808s + UK rap accent -> `uk_drill`, not `trap_bass_bridge`.
+- Memphis cowbell + drift / car aesthetic -> `drift_phonk`.
+- Anyma, Afterlife, Massano-style euphoric arpeggios at 128-138 BPM ->
+  `trance_revival_modern`, not `melodic_techno_driver`, when the build is
+  clearly trance-shaped (long sweep, supersaw lead, climactic drop).
+- Pitched-up / TikTok-edited versions -> `sped_up_edit` ONLY if the title
+  or tag explicitly says "sped up" / "nightcore". Otherwise classify the
+  underlying genre.
+- Amapiano log drum is distinctive — if heard, pick `amapiano_groove` even
+  when the provider tag says "afro house".
+
+# Confidence calibration
+- 0.85-1.00: BPM in range + 3+ keyword/feature hits + clear mood/groove match.
+- 0.60-0.85: BPM in range + 1-2 keyword hits + plausible mood/groove.
+- 0.40-0.60: BPM in range, mood plausible, no strong keywords, provider hint
+  agrees. Always list 2-3 alternatives at this band.
+- <0.40: weak evidence. Pick best candidate, list 3+ alternatives, and add a
+  short note in `rationale` flagging the ambiguity.
+
+# Output schema (return EXACTLY this JSON shape, no extra keys)
+{
+  "category_id": "<one id from taxonomy>",
+  "confidence": <float 0..1>,
+  "rationale": "<one or two sentences: which evidence drove the choice, which obvious-looking category you rejected (especially if you considered any afro_* category and rejected it), and the short evidence tags that supported the call (e.g. 'keyword:saz, bpm:118, vocal:zulu')>",
+  "alternate_category_ids": ["<id>", "<id>"],
+  "warnings": "<empty string unless evidence is thin or ambiguous; otherwise a one-line flag>"
+}
+
+When you considered any afro_* category and rejected it (required true for
+any tribal / percussive / chant-vocal track that is NOT genuinely afro),
+state that explicitly inside `rationale`, e.g. "Rejected Afro House: no
+African / Afro-diasporic lineage despite the provider tag."
+
+Short evidence tags use the form `<source>:<value>`, e.g.: "bpm:122",
+"mood:dark", "keyword:saz", "artist:Tim Reaper", "label:MoBlack",
+"provider:tech_house", "vocal:zulu". Inline them in `rationale`.
+
+# Few-shot examples
+
+Example 1 — Indie tech, dark hypnotic
+Input: "Hate (Original Mix) - Bedouin", BPM 124, mood dark/hypnotic, indie dance + tech house provider hints, instrumental.
+Output: {"category_id":"driving_dark_indie_tech","confidence":0.9,"rationale":"124 BPM dark hypnotic with indie + tech house hints; classic Bedouin driver. Evidence: bpm:124, mood:dark, mood:hypnotic, provider:indie_dance.","alternate_category_ids":["rolling_dark_indie_tech","hypnotic_dark_indie_tech"],"warnings":""}
+
+Example 2 — World/tribal that is NOT afro (the key case)
+Input: "Üsküdara - Dönüş Edit", BPM 118, organic+tribal mood, female chant vocal, provider tag "world / afro house", saz audible.
+Output: {"category_id":"anatolian_psych_house","confidence":0.88,"rationale":"Saz keyword + Turkish title outranks the generic afro provider tag; clearly Anatolian. Rejected Afro House: no African / Afro-diasporic lineage. Evidence: keyword:saz, title:turkish, bpm:118, mood:tribal.","alternate_category_ids":["oriental_arabic_house","desert_mystic_driver"],"warnings":""}
+
+Example 3 — Tulum vs afro disambiguation
+Input: "Yucatán Sunrise - Bona Fide", BPM 120, tribal/cinematic, chant vocal, provider "afro house, organic house".
+Output: {"category_id":"tulum_tribal_driver","confidence":0.82,"rationale":"Yucatán/sunrise keywords + cinematic-tribal at 120 BPM fit the Tulum scene over generic Afro House Peak. Rejected Afro House: no African / Afro-diasporic context. Evidence: keyword:yucatan, keyword:sunrise, bpm:120, mood:cinematic.","alternate_category_ids":["tulum_tribal_sunrise","cinematic_tribal_builder","afro_house_peak"],"warnings":""}
+
+Example 4 — Genuine afro (so the model knows the floor)
+Input: "Umqombothi - Caiiro Remix", BPM 122, tribal/euphoric, Zulu vocal, label MoBlack.
+Output: {"category_id":"afro_house_peak","confidence":0.93,"rationale":"Zulu vocal + MoBlack label + 122 BPM tribal-euphoric = clear afro house peak; no other regional cues. Evidence: label:MoBlack, vocal:zulu, artist:Caiiro, bpm:122.","alternate_category_ids":["deep_afro_house","afro_tech_driver"],"warnings":""}
+
+Example 5 — UK bass disambiguation
+Input: "Move (Skepsis Remix)", BPM 138, raw/playful, wobble bass, vocal hook, provider "uk garage / bassline".
+Output: {"category_id":"bassline_niche","confidence":0.9,"rationale":"Skepsis + 138 BPM + wobble bass is core bassline; faster and rawer than garage_house, slightly above speed_garage_revival range. Evidence: artist:Skepsis, bpm:138, keyword:wobble, provider:bassline.","alternate_category_ids":["speed_garage_revival","garage_house"],"warnings":""}
+
+Example 6 — Modern jungle revival
+Input: "Tribute - Tim Reaper", BPM 168, amen breaks, modern production, provider "jungle / drum and bass".
+Output: {"category_id":"jungle_revival_modern","confidence":0.94,"rationale":"Tim Reaper is the canonical modern jungle revival artist; cleaner production than 90s jungle_breaks. Evidence: artist:Tim Reaper, bpm:168, keyword:amen.","alternate_category_ids":["jungle_breaks","liquid_drum_and_bass"],"warnings":""}
+
+Example 7 — Amapiano vs afro
+Input: "Asibe Happy - Kabza De Small", BPM 113, warm/soulful, vocal, provider "afro house".
+Output: {"category_id":"amapiano_groove","confidence":0.95,"rationale":"Kabza De Small + 113 BPM + log-drum bass is core amapiano, not afro_house_peak despite the provider tag. Rejected Afro House Peak: amapiano lineage is the right call when log drums are audible. Evidence: artist:Kabza De Small, bpm:113, keyword:log_drum, provider:afro_house.","alternate_category_ids":["deep_afro_house","afro_house_peak"],"warnings":""}
+
+Example 8 — Ambiguous, low confidence
+Input: "Untitled 04", BPM 121, vocal "spoken", mood "warm", no keywords, provider "house".
+Output: {"category_id":"warm_deep_house","confidence":0.45,"rationale":"Warm + 121 BPM + spoken vocal best fits warm_deep_house but evidence is thin; multiple deep house slots plausible. Rejected any afro_*: no afro/tribal cues. Evidence: bpm:121, mood:warm, vocal:spoken.","alternate_category_ids":["lo_fi_deep_house","melodic_house_builder","organic_house_builder"],"warnings":"thin evidence"}
+
+Example 9 — Minimal techno (Cocoon-style driver)
+Input: "Steady Roller - Sven Väth", BPM 128, mood minimal/hypnotic, instrumental, provider "minimal techno / techno".
+Output: {"category_id":"minimal_techno_tool","confidence":0.88,"rationale":"Sven Väth + 128 BPM + minimal/hypnotic instrumental fits minimal_techno_tool; mood is minimal not deep, ruling out hypnotic_deep_techno. Evidence: artist:Sven Väth, bpm:128, mood:minimal, provider:minimal_techno.","alternate_category_ids":["hypnotic_deep_techno","minimal_deep_tech"],"warnings":""}
+
+Example 10 — Dub techno (Basic Channel)
+Input: "Mantle - Maurizio", BPM 122, mood deep/dub/atmospheric, dub chord stab, provider "dub techno".
+Output: {"category_id":"dub_techno","confidence":0.95,"rationale":"Maurizio + Basic Channel chord stab + 122 BPM + deep/dub/atmospheric is canonical dub_techno. Evidence: artist:Maurizio, label:Basic Channel, bpm:122, mood:dub.","alternate_category_ids":["hypnotic_deep_techno","minimal_dub_tool"],"warnings":""}
+
+Example 11 — Micro house (Perlon)
+Input: "Easy Lee - Ricardo Villalobos", BPM 124, mood minimal/warm/playful, clicks and textures, provider "minimal / micro house".
+Output: {"category_id":"micro_house","confidence":0.92,"rationale":"Villalobos + Perlon-style clicks + 124 BPM + warm/playful minimal is core micro_house, warmer than minimal_techno_tool. Evidence: artist:Ricardo Villalobos, label:Perlon, bpm:124, keyword:clicks.","alternate_category_ids":["minimal_techno_tool","minimal_deep_tech"],"warnings":""}
+
+Example 12 — Warm deep house (Larry Heard)
+Input: "Can You Feel It - Mr. Fingers", BPM 118, mood warm/deep/soulful, vocal pads, provider "deep house / classic deep house".
+Output: {"category_id":"warm_deep_house","confidence":0.94,"rationale":"Mr. Fingers is canonical warm deep house; 118 BPM + warm/deep/soulful with vocal pads fits cleanly. Evidence: artist:Mr. Fingers, bpm:118, mood:warm, mood:soulful.","alternate_category_ids":["soulful_vocal_house","melodic_house_builder"],"warnings":""}
+
+Example 13 — Lo-fi deep house (dusty)
+Input: "Don't You Want My Love - Moodymann", BPM 116, mood warm/gritty/deep, dusty texture, sampled vocal, provider "deep house / lo-fi house".
+Output: {"category_id":"lo_fi_deep_house","confidence":0.91,"rationale":"Moodymann + dusty texture + sampled vocal at 116 BPM is core lo_fi_deep_house, distinct from cleaner warm_deep_house. Evidence: artist:Moodymann, bpm:116, keyword:dusty, keyword:lofi.","alternate_category_ids":["warm_deep_house","dub_deep_house"],"warnings":""}
+
+Example 14 — Sunset Balearic (sub-110 BPM)
+Input: "Sirius (Sunset Edit) - DJ Tennis", BPM 102, mood sunlit/warm/atmospheric, vocal, provider "balearic / chillout".
+Output: {"category_id":"sunset_balearic_house","confidence":0.86,"rationale":"102 BPM + sunlit/atmospheric + 'Sunset Edit' mix cue fits sunset_balearic_house; below balearic_deep_house groove range. Evidence: bpm:102, mood:sunlit, mix_name:sunset_edit.","alternate_category_ids":["balearic_deep_house","balearic_organic_house"],"warnings":""}
+
+Example 15 — Classic house (Frankie Knuckles piano)
+Input: "Your Love - Frankie Knuckles", BPM 122, mood warm/euphoric/playful, vocal, piano hook, provider "house / classic house".
+Output: {"category_id":"classic_house","confidence":0.96,"rationale":"Frankie Knuckles + piano hook + warm/euphoric vocal at 122 BPM is definitional classic_house. Evidence: artist:Frankie Knuckles, bpm:122, keyword:piano, mood:euphoric.","alternate_category_ids":["soulful_vocal_house","funky_disco_house"],"warnings":""}
+
+Example 16 — Raw acid house (TB-303)
+Input: "Acid Tracks - Phuture", BPM 124, mood acidic/raw/warehouse, instrumental, provider "acid house".
+Output: {"category_id":"raw_acid_house","confidence":0.97,"rationale":"Phuture + 303 acid line + 124 BPM warehouse is foundational raw_acid_house; slower and looser than acid_tech_house_peak. Evidence: artist:Phuture, bpm:124, keyword:303, mood:acidic.","alternate_category_ids":["acid_tech_house_peak","acid_techno"],"warnings":""}
+
+Example 17 — Funky disco house (French touch)
+Input: "Music Sounds Better With You - Stardust", BPM 124, mood euphoric/playful/warm, vocal disco loop, provider "french house / disco".
+Output: {"category_id":"funky_disco_house","confidence":0.92,"rationale":"Stardust + filtered disco loop + euphoric vocal is funky_disco_house origin material; nu_disco_house refers to the modern revival, not the original wave. Evidence: artist:Stardust, bpm:124, mood:euphoric, provider:french_house.","alternate_category_ids":["nu_disco_house","classic_house"],"warnings":""}
+"""
+
+
+def _system_prompt(validation_error: str | None = None) -> str:
+    """Return the system prompt, with an optional retry suffix appended."""
+    if not validation_error:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}\nPrevious response was invalid: {validation_error}\n"
+
+
+# Kept as a thin alias so external callers that reach in for the prompt by
+# its historical name continue to work.
 def _instructions(validation_error: str | None = None) -> str:
-    retry = f"\nPrevious response was invalid: {validation_error}\n" if validation_error else ""
-    return (
-        "Create one ground-truth label for a DJ-functional music taxonomy classifier. "
-        "Choose exactly one category_id from allowed_dj_taxonomy.categories. "
-        "Never invent category IDs, labels, moods, grooves, or metadata. "
-        "Provider genres from Rekordbox, Spotify, Songstats, or embedded tags are hints only; "
-        "they may be wrong. Prefer the full evidence pattern: local tagger energy/mood/vocal/structure/BPM, "
-        "filename/title/mix cues, provider audio features, provider genres, and label/artist context. "
-        "If evidence is ambiguous, still choose the best allowed category but lower confidence and list allowed alternatives. "
-        "Return JSON only. Few-shot guidance: "
-        "Example A: dark/hypnotic E4, 124-126 BPM, indie dance + tech house hints -> driving_dark_indie_tech. "
-        "Example B: tech house hints with featured vocal or strong hook -> vocal_hook_tech_house. "
-        "Example C: organic/tribal mood + chant vocal alone is NOT enough for tribal_afro_driver — see Modern Subgenre Selection Rules. "
-        "Example D: raw/warehouse mood, E5, 130+ BPM techno clues -> raw_warehouse_techno or peak_time_techno. "
-        "Example E: minimal/deep/dub mood, sparse vocal, steady rolling low-mid energy -> minimal_deep_tech or dub_techno. "
-        "\n\n"
-        + _MODERN_SUBGENRE_SELECTION_RULES
-        + retry
+    return _system_prompt(validation_error)
+
+
+def build_user_message(track: dict) -> str:
+    """Format a single track's evidence into a per-track user message.
+
+    Pass any subset of the fields below; missing or empty values are skipped
+    so the LLM only sees signal, not placeholders.
+
+    Recommended keys: title, artist, label, mix_name, filename, bpm,
+    musical_key, energy, moods, grooves, vocal_profile, structure,
+    provider_genres, provider_tags, audio_features.
+
+    Returns a string ending with the explicit JSON-only instruction so the
+    model doesn't drift into prose.
+    """
+    if not track:
+        raise ValueError("track evidence is empty")
+
+    lines = ["TRACK EVIDENCE:"]
+    for key, val in track.items():
+        if val in (None, "", [], {}):
+            continue
+        lines.append(f"  {key}: {val}")
+    lines.append("")
+    lines.append("Return the JSON object only.")
+    return "\n".join(lines)
+
+
+def _flatten_for_prompt(context: dict[str, Any]) -> dict[str, Any]:
+    """Project the rich `_track_context` dict into the flat evidence form
+    expected by `build_user_message`.
+
+    Empty / placeholder values are kept here so the build_user_message filter
+    can drop them — keeps the projection rule in one place.
+    """
+    file_info = context.get("file") or {}
+    track_info = context.get("track") or {}
+    observations = context.get("observations") or []
+
+    provider_genres = sorted({
+        (obs.get("genre") or "").strip()
+        for obs in observations
+        if isinstance(obs, dict) and obs.get("genre")
+    })
+    audio_feature_keys = (
+        "energy", "valence", "danceability",
+        "instrumentalness", "acousticness", "speechiness", "liveness",
+    )
+    audio_features: dict[str, Any] = {}
+    for key in audio_feature_keys:
+        for obs in observations:
+            if not isinstance(obs, dict):
+                continue
+            val = obs.get(key)
+            if val not in (None, "", []):
+                audio_features[key] = val
+                break
+
+    bpm = (
+        track_info.get("canonical_bpm")
+        or track_info.get("tagger_bpm")
+        or file_info.get("embedded_bpm")
+        or ""
     )
 
+    return {
+        "filename": file_info.get("file_name") or "",
+        "title": track_info.get("title") or file_info.get("embedded_title") or "",
+        "artist": track_info.get("artist") or file_info.get("embedded_artist") or "",
+        "mix_name": track_info.get("mix") or "",
+        "label": track_info.get("label") or "",
+        "bpm": bpm,
+        "musical_key": track_info.get("canonical_key") or "",
+        "energy": track_info.get("tagger_energy") or "",
+        "moods": track_info.get("tagger_mood") or "",
+        "vocal_profile": track_info.get("tagger_vocal") or "",
+        "structure": track_info.get("tagger_structure") or "",
+        "provider_genres": ", ".join(g for g in provider_genres if g),
+        "provider_tags": file_info.get("embedded_genre") or "",
+        "audio_features": (
+            ", ".join(f"{k}={v}" for k, v in audio_features.items())
+            if audio_features else ""
+        ),
+    }
 
-# Spec: specs/update_llm_ground_truth_prompt.md — conservative tribal/afro
-# subgenre classification. Tribal and Afro must be earned by evidence, not
-# triggered by mood, percussion, or internal shorthand tags.
-_MODERN_SUBGENRE_SELECTION_RULES = """\
-Modern Subgenre Selection Rules
-================================
 
-Tribal and Afro must be EARNED by evidence, not triggered by mood, percussion,
-or internal shorthand tags.
+def _build_input_text(context: dict[str, Any], taxonomy_json: dict[str, Any]) -> str:
+    """Build the single text payload sent as the user-message content.
 
-1. Separate genre from descriptor tags
---------------------------------------
-The following are TAXONOMY LABELS and may be used as the chosen genre/subgenre:
-  Organic House, Afro House, Tribal House, Melodic Techno, Dark Melodic Techno,
-  Driving Techno, Progressive House, Indie Dance, Dark Disco, Downtempo.
-
-The following are DESCRIPTOR TAGS and should NOT by themselves become the
-chosen genre/subgenre:
-  tribal, afro, mayan, ritual, ceremonial, shamanic, organic, percussive,
-  ethnic, desert, tulum, chant, driving, hypnotic, dark, tense,
-  female vocal, spoken vocal.
-
-A descriptor tag belongs in the rationale field as context — not as the
-chosen category.
-
-2. Be conservative with Afro and Tribal
----------------------------------------
-Only choose an Afro House / Afro Tech / Tribal House / Tribal Techno /
-Tribal Organic House category if at least one STRONG evidence holds:
-  - Trusted provider genre explicitly says "Afro House", "Afro Tech",
-    "Tribal House", "Tribal Techno", or "Tribal Organic House".
-  - Manually-curated rekordbox/embedded genre explicitly says the same.
-  - Arrangement is dominated by organic hand-percussion, ritual vocals,
-    ceremonial rhythm, or tribal drum structure.
-  - Artist/label is clearly Afro House / Tulum-organic-house / ritual-house
-    / tribal-house scene.
-
-The following are WEAK evidence and are NOT sufficient on their own:
-  - dark mood, tense mood, driving groove, hypnotic groove,
-  - percussion exists, organic texture, female vocal, chant-like vocal,
-  - low vocal, Tulum/desert/ritual words in title/comment,
-  - internal tag containing TRIB / AFRO / DRV.
-
-If only weak evidence is present, put those words in the rationale as
-"secondary descriptors" and choose a non-afro/non-tribal category that
-actually matches the dominant musical character (e.g., Dark Melodic Techno,
-Driving Tech-House, Progressive House).
-
-3. Distinguish Afro from Tribal from Organic
---------------------------------------------
-Afro House / Afro-Tech requires evidence of African or Afro-diasporic
-lineage — not just percussion, ritual, or organic atmosphere. Do NOT
-infer Afro from tribal, mayan, ritual, ceremonial, organic, desert,
-Tulum, shamanic, ethnic, chant, or percussion alone.
-
-Tribal House / Tribal Organic House requires that ritual/ceremonial/tribal
-percussion be STRUCTURALLY CENTRAL to the arrangement — not merely present.
-
-Organic House is for earthy/natural/melodic/ethnic/acoustic music
-(including desert/Tulum-style). Organic House may have tribal influence
-without becoming Tribal House.
-
-Melodic Techno / Dark Melodic Techno is the right call for tracks with a
-minor-key melody, emotional synth, progressive arrangement, tense/dark
-mood, and a driving-but-not-percussion-dominant groove — even if internal
-tags include TRIB/AFRO/DRV.
-
-4. Negative example: Erly Tepshi - Virgo
-----------------------------------------
-A track at 120 BPM with internal tags TRIB.AFRO.DRV, mood "tense", female
-vocal, source_genre "Techno", and no explicit Afro/Tribal provider hint
-must NOT be classified Afro/Tribal. The correct call is Dark Melodic
-Techno. Driving + tense + female vocal + TRIB shorthand are descriptor
-cues, not taxonomy labels.
-
-5. Positive example: PAAX Tulum - Crisol (MIICHII Remix)
---------------------------------------------------------
-A track whose arrangement is built around organic/ritual/ceremonial
-percussion with Mayan/Tulum context CAN be Tribal Organic House. But it
-should NOT be Afro House unless explicit Afro/African/Afro-diasporic
-evidence exists.
-
-6. Decision gate before choosing any Afro/Tribal category
----------------------------------------------------------
-Before assigning an Afro or Tribal category, the answer to all of these
-must be yes (or at least three independent weak signals must converge):
-
-  (a) Does a trusted provider genre explicitly say Afro/Tribal?
-  (b) If not, are there 3+ independent weak signals pointing to Afro/Tribal?
-  (c) Is percussion/ritual/ceremonial element STRUCTURALLY central?
-  (d) For Afro specifically: is there African or Afro-diasporic context?
-
-If "no", put those concepts into the rationale as secondary descriptors
-and pick a category that actually matches the music.
-
-7. Rejected-label reasoning
----------------------------
-When you considered an Afro or Tribal category but rejected it, briefly
-note that in the rationale field (e.g., "Considered Tribal Techno but
-percussion is not structurally dominant; chose Dark Melodic Techno").
-
-8. Scoring guidance
--------------------
-  - Explicit trusted provider genre dominates.
-  - Internal generated tags (TRIB / AFRO / DRV / etc.) are WEAK evidence.
-  - Mood words (dark, tense, romantic) are NOT genre evidence.
-  - Texture words (organic, hand-percussion) are NOT genre evidence
-    unless backed by source metadata or arrangement.
-  - Driving / rolling / hypnotic are groove descriptors, not genres.
-  - Tribal requires percussion/ritual structure to be CENTRAL.
-  - Afro requires Afro/African/Afro-diasporic lineage/context.
-
-"""
+    The new prompt assumes `allowed_dj_taxonomy.categories` is accessible to
+    the LLM. We inline the taxonomy JSON ahead of the track evidence so it
+    arrives in the same turn as the per-track context.
+    """
+    taxonomy_blob = json.dumps(
+        {"allowed_dj_taxonomy": taxonomy_json},
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    track_block = build_user_message(_flatten_for_prompt(context))
+    return f"{taxonomy_blob}\n\n{track_block}"
 
 
 def _response_schema() -> dict[str, Any]:

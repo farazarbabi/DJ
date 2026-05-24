@@ -1,10 +1,13 @@
-"""Tests for the LLM ground-truth prompt's conservative tribal/afro rules.
+"""Tests for the LLM ground-truth subgenre-classifier prompt.
 
-Per specs/update_llm_ground_truth_prompt.md, the prompt must:
-  - separate taxonomy labels from descriptor tags
-  - require strong evidence for Afro/Tribal categories
-  - include explicit Virgo (negative) and PAAX (positive) examples
-  - include a decision gate before assigning Afro/Tribal
+The prompt encodes:
+  - hard rules (only pick from taxonomy, JSON-only output)
+  - a 5-step decision process with BPM gate first
+  - anti-bias rules blocking afro over-tagging by routing world/tribal cues
+    to their proper regional categories
+  - evidence weighting (STRONG / MEDIUM / WEAK / NOT-evidence)
+  - the wired output schema (category_id / confidence / rationale /
+    alternate_category_ids / warnings)
 
 These tests verify the prompt STRING content. End-to-end validation of LLM
 behavior happens via the existing FakeClient pattern in
@@ -21,7 +24,9 @@ import pytest
 from dj_registry.models import FileRecord, LogicalTrack
 from dj_registry.store.csv_store import CsvStore
 from dj_registry.taxonomy.dj_ground_truth import (
-    _instructions,
+    SYSTEM_PROMPT,
+    _system_prompt,
+    build_user_message,
     generate_dj_ground_truth_csv,
 )
 
@@ -29,86 +34,141 @@ from dj_registry.taxonomy.dj_ground_truth import (
 # ── Prompt-content assertions ───────────────────────────────────────────────
 
 
-def test_prompt_includes_modern_subgenre_selection_rules_header():
-    prompt = _instructions()
-    assert "Modern Subgenre Selection Rules" in prompt
+def test_prompt_declares_classifier_role_and_taxonomy_constraint():
+    assert "subgenre classifier" in SYSTEM_PROMPT
+    assert "allowed_dj_taxonomy.categories" in SYSTEM_PROMPT
 
 
-def test_prompt_distinguishes_taxonomy_labels_from_descriptor_tags():
-    prompt = _instructions()
-    assert "TAXONOMY LABELS" in prompt
-    assert "DESCRIPTOR TAGS" in prompt
+def test_prompt_includes_hard_rules_and_json_only_constraint():
+    assert "Hard rules" in SYSTEM_PROMPT
+    assert "Output JSON only" in SYSTEM_PROMPT
+    assert "NEVER invent" in SYSTEM_PROMPT
 
 
-def test_prompt_lists_weak_evidence_categories():
-    prompt = _instructions()
-    # Spec §2 weak-evidence examples must be enumerated
-    for term in (
-        "dark mood",
-        "tense mood",
-        "female vocal",
-        "chant-like vocal",
-        "Tulum",
-        "TRIB",
-        "AFRO",
-        "DRV",
+def test_prompt_includes_five_step_decision_process_with_bpm_gate_first():
+    assert "Decision process" in SYSTEM_PROMPT
+    assert "Step 1 — BPM gate" in SYSTEM_PROMPT
+    assert "Step 5 — Set confidence" in SYSTEM_PROMPT
+
+
+def test_prompt_includes_anti_bias_rules_with_regional_routing():
+    assert "Anti-bias rules" in SYSTEM_PROMPT
+    # Each regional scene routes to a specific taxonomy id, not generic afro
+    for scene, target in (
+        ("anatolian", "anatolian_psych_house"),
+        ("saz", "anatolian_psych_house"),
+        ("oud", "oriental_arabic_house"),
+        ("tulum", "tulum_tribal_"),
+        ("balkan", "balkan_gypsy_groove"),
+        ("amapiano", "amapiano_groove"),
     ):
-        assert term in prompt, f"prompt missing weak-evidence term: {term!r}"
+        assert scene in SYSTEM_PROMPT.lower(), f"prompt missing scene keyword {scene!r}"
+        assert target in SYSTEM_PROMPT, f"prompt missing routing target {target!r}"
 
 
-def test_prompt_distinguishes_afro_tribal_organic():
-    prompt = _instructions()
-    assert "African or Afro-diasporic" in prompt
-    assert "STRUCTURALLY CENTRAL" in prompt
-    # Organic House gets its own paragraph
-    assert "Organic House" in prompt
+def test_prompt_enforces_afro_lineage_requirements():
+    """afro_* requires explicit Afro / African / Afro-diasporic lineage."""
+    assert "Afro / African / Afro-diasporic" in SYSTEM_PROMPT
+    assert "MoBlack" in SYSTEM_PROMPT  # named afro-allow label
+    assert "Zulu" in SYSTEM_PROMPT  # named afro-allow vocal language
 
 
-def test_prompt_contains_virgo_negative_example():
-    prompt = _instructions()
-    assert "Erly Tepshi" in prompt
-    assert "Virgo" in prompt
-    assert "TRIB.AFRO.DRV" in prompt
-    assert "Dark Melodic Techno" in prompt
-
-
-def test_prompt_contains_paax_positive_example():
-    prompt = _instructions()
-    assert "PAAX Tulum" in prompt
-    assert "Crisol" in prompt
-    # PAAX may be Tribal Organic House but should NOT be Afro House
-    assert "Tribal Organic House" in prompt
-
-
-def test_prompt_includes_decision_gate():
-    prompt = _instructions()
-    assert "Decision gate" in prompt or "decision gate" in prompt
-    # The four-question gate from spec §6
-    assert "trusted provider genre" in prompt.lower()
-    assert "3+" in prompt or "three independent" in prompt.lower()
+def test_prompt_evidence_weighting_separates_strong_medium_weak():
+    assert "STRONG" in SYSTEM_PROMPT
+    assert "MEDIUM" in SYSTEM_PROMPT
+    assert "WEAK" in SYSTEM_PROMPT
+    # Mood / texture / groove words are explicitly disqualified as lineage
+    for term in ("Mood words", "Texture words", "Groove descriptors"):
+        assert term in SYSTEM_PROMPT, f"prompt missing evidence demotion: {term!r}"
 
 
 def test_prompt_states_tribal_and_afro_must_be_earned():
-    """Spec §10 acceptance criterion 8 verbatim."""
-    prompt = _instructions()
     assert (
-        "Tribal and Afro must be EARNED by evidence" in prompt
-        or "Tribal and Afro must be earned by evidence" in prompt
+        "Tribal and Afro must be EARNED by evidence" in SYSTEM_PROMPT
+        or "Tribal and Afro must be earned by evidence" in SYSTEM_PROMPT
     )
 
 
-def test_prompt_no_longer_recommends_tribal_afro_driver_for_organic_chant_alone():
-    """The old Example C suggested tribal_afro_driver for 'organic/tribal mood + chant'.
-    The updated few-shot guidance must reflect the conservative rule."""
-    prompt = _instructions()
-    # The old few-shot text shouldn't auto-recommend tribal_afro_driver from chant alone
-    assert "organic/tribal mood + chant vocal alone is NOT enough" in prompt
+def test_prompt_documents_wired_output_schema():
+    """Schema lines must use the wired field names (rationale,
+    alternate_category_ids, warnings) — not the spec's old draft names."""
+    assert "Output schema" in SYSTEM_PROMPT
+    assert '"category_id"' in SYSTEM_PROMPT
+    assert '"confidence"' in SYSTEM_PROMPT
+    assert '"rationale"' in SYSTEM_PROMPT
+    assert '"alternate_category_ids"' in SYSTEM_PROMPT
+    assert '"warnings"' in SYSTEM_PROMPT
+    # Spec draft names that didn't make it into the wired schema must NOT
+    # appear in the output-schema instructions (folded into rationale instead)
+    assert '"reasoning"' not in SYSTEM_PROMPT
+    assert '"alternatives"' not in SYSTEM_PROMPT
+    assert '"rejected_afro"' not in SYSTEM_PROMPT
+    assert '"evidence_used"' not in SYSTEM_PROMPT
+
+
+def test_prompt_includes_confidence_calibration_bands():
+    assert "Confidence calibration" in SYSTEM_PROMPT
+    assert "0.85" in SYSTEM_PROMPT
+    assert "0.40" in SYSTEM_PROMPT
+
+
+def test_prompt_includes_diverse_few_shot_examples():
+    """At least one example per major confusion cluster the prompt targets."""
+    needed_anchors = (
+        "Bedouin",            # indie-tech dark
+        "Üsküdara",           # anatolian non-afro
+        "Bona Fide",          # tulum tribal non-afro
+        "Caiiro",             # genuine afro floor
+        "Skepsis",            # uk bass
+        "Tim Reaper",         # jungle revival
+        "Kabza De Small",     # amapiano vs afro
+        "Mr. Fingers",        # warm deep house
+        "Moodymann",          # lo-fi deep house
+        "Frankie Knuckles",   # classic house
+        "Phuture",            # raw acid
+    )
+    for anchor in needed_anchors:
+        assert anchor in SYSTEM_PROMPT, f"prompt missing few-shot anchor: {anchor!r}"
 
 
 def test_prompt_includes_retry_message_when_validation_error_supplied():
-    """Retry feedback path stays intact after the prompt expansion."""
-    prompt = _instructions(validation_error="missing category_id")
+    prompt = _system_prompt(validation_error="missing category_id")
     assert "Previous response was invalid: missing category_id" in prompt
+
+
+def test_prompt_unchanged_when_no_validation_error():
+    assert _system_prompt() == SYSTEM_PROMPT
+    assert _system_prompt(validation_error="") == SYSTEM_PROMPT
+
+
+# ── build_user_message contract ─────────────────────────────────────────────
+
+
+def test_build_user_message_emits_track_evidence_header_and_json_directive():
+    out = build_user_message({"title": "X", "artist": "Y", "bpm": 124})
+    assert out.startswith("TRACK EVIDENCE:")
+    assert "title: X" in out
+    assert "artist: Y" in out
+    assert "bpm: 124" in out
+    assert out.rstrip().endswith("Return the JSON object only.")
+
+
+def test_build_user_message_drops_empty_values():
+    out = build_user_message({
+        "title": "X", "artist": "", "label": None, "moods": [], "extras": {},
+        "bpm": 124,
+    })
+    assert "title: X" in out
+    assert "artist" not in out
+    assert "label" not in out
+    assert "moods" not in out
+    assert "extras" not in out
+    assert "bpm: 124" in out
+
+
+def test_build_user_message_raises_on_empty_track():
+    with pytest.raises(ValueError):
+        build_user_message({})
 
 
 # ── End-to-end via FakeClient (Virgo and PAAX scenarios) ───────────────────
@@ -200,7 +260,7 @@ def test_paax_style_can_still_be_tribal_organic_when_llm_obeys(tmp_path):
     client = _FakeClient(response={
         "category_id": "spiritual_afro_chant",
         "confidence": 0.78,
-        "alternate_category_ids": ["organic_chant_house", "desert_organic_house"],
+        "alternate_category_ids": ["ritual_chant_house", "desert_organic_house"],
         "rationale": (
             "Arrangement is dominated by organic/ceremonial percussion with Mayan/Tulum "
             "context. Strong tribal-percussion evidence is STRUCTURALLY CENTRAL. "
