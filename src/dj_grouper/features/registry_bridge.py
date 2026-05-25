@@ -148,9 +148,12 @@ def _parse_row(row: dict[str, str]) -> RegistryEnrichment:
     """Parse a single registry_overview.csv row into RegistryEnrichment."""
     enr = RegistryEnrichment()
 
-    # Songstats audio features
-    enr.danceability = _parse_float(row.get("danceability"))
-    enr.valence = _parse_float(row.get("valence"))
+    # Songstats audio features. The export writes these under the ss_*
+    # prefix (see dj_registry/sync/export.py: ss_danceability, ss_valence,
+    # etc.). Older versions of this reader looked for the unprefixed names
+    # and silently reported "0 with Songstats" for every track.
+    enr.danceability = _parse_float(row.get("ss_danceability") or row.get("danceability"))
+    enr.valence = _parse_float(row.get("ss_valence") or row.get("valence"))
     enr.has_songstats = enr.danceability is not None
 
     # Genre (prefer Songstats, fall back to Rekordbox)
