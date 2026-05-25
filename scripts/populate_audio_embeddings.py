@@ -108,12 +108,23 @@ def _populate_clap(files: list[Path], cache_dir: Path, limit: int = 0) -> None:
     print(f"  CLAP done in {time.time() - t0:.1f}s")
 
 
-def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> None:
-    """Run Demucs over each file, write the four scalar metrics to the cache.
+def _populate_vocal_stem(
+    files: list[Path],
+    cache_dir: Path,
+    limit: int = 0,
+    only_legacy: bool = False,
+) -> None:
+    """Run Demucs over each file, write per-stem metrics to the cache.
 
     Mirrors scripts/refresh_vocal_stem.py but scoped to a caller-supplied file
     list (so we can target ground-truth rows or a specific directory rather
     than always scanning the project's local Music/ folder).
+
+    When ``only_legacy=True`` the pass targets only tracks whose cache entry
+    exists with the old vocals-only schema (vocal_stem_* keys present but no
+    stem_drums_* keys). Useful when you've already let Demucs run partway and
+    want to upgrade those entries to the full per-stem schema before kicking
+    off a much longer "never-cached" sweep.
     """
     from dj_tagger.analyzers.vocal_stem import (
         analyze_vocal_stem,
@@ -133,6 +144,7 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
     todo: list[tuple[Path, float]] = []
     already_cached = 0
     legacy_only = 0
+    never_cached = 0
     too_short = 0
     for path in files:
         dur = quick_duration(str(path)) or 0.0
@@ -141,18 +153,21 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
             too_short += 1
             continue
         existing = ucache.get_track(path.name, dur, "vocal_stem")
-        if isinstance(existing, dict):
-            # The expanded analyzer also writes per-stem keys
-            # (stem_drums_*, dominance_*) on top of the legacy vocal_stem_*
-            # keys. If only the legacy keys are present, re-extract so the
-            # subgenre classifier sees the full stem palette.
-            has_new_schema = any(k.startswith("stem_drums_") for k in existing)
-            if has_new_schema:
-                already_cached += 1
-                continue
-            if "vocal_stem_mix_ratio_db" in existing:
-                legacy_only += 1
-        todo.append((path, dur))
+        is_legacy = (
+            isinstance(existing, dict)
+            and "vocal_stem_mix_ratio_db" in existing
+            and not any(k.startswith("stem_drums_") for k in existing)
+        )
+        if isinstance(existing, dict) and any(k.startswith("stem_drums_") for k in existing):
+            already_cached += 1
+            continue
+        if is_legacy:
+            legacy_only += 1
+            todo.append((path, dur))
+        else:
+            never_cached += 1
+            if not only_legacy:
+                todo.append((path, dur))
 
     unlimited_todo = len(todo)
     limited = bool(limit and unlimited_todo > limit)
@@ -165,6 +180,8 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
     ]
     if legacy_only:
         pieces.append(f"{legacy_only} have legacy schema only (re-extracting)")
+    if only_legacy and never_cached:
+        pieces.append(f"{never_cached} never cached (skipped, --only-legacy-stems)")
     if too_short:
         pieces.append(f"{too_short} too short to analyze")
     if limited:
@@ -250,6 +267,14 @@ def main() -> int:
                     help="Directory containing raw_cache.pkl (default: ./cache).")
     ap.add_argument("--skip-clap", action="store_true", help="Skip CLAP extraction.")
     ap.add_argument("--skip-demucs", action="store_true", help="Skip Demucs vocal_stem extraction.")
+    ap.add_argument(
+        "--only-legacy-stems",
+        action="store_true",
+        help="Demucs pass: only re-extract tracks that have the old vocals-only "
+             "schema (vocal_stem_* keys without stem_drums_*). Never-cached tracks "
+             "are left alone. Useful for upgrading partial coverage without "
+             "kicking off the full overnight sweep.",
+    )
     ap.add_argument("--limit", type=int, default=0,
                     help="Stop after N new extractions per layer (0 = all). For smoke-testing.")
     ap.add_argument("--verbose", action="store_true")
@@ -272,7 +297,9 @@ def main() -> int:
     if not args.skip_clap:
         _populate_clap(files, cache_dir, limit=args.limit)
     if not args.skip_demucs:
-        _populate_vocal_stem(files, cache_dir, limit=args.limit)
+        _populate_vocal_stem(
+            files, cache_dir, limit=args.limit, only_legacy=args.only_legacy_stems,
+        )
 
     _print_coverage(files, cache_dir)
     return 0
