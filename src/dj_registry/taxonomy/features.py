@@ -366,13 +366,20 @@ def _add_vocal_stem_features(
     ucache: Any,
     cache_key: tuple[str, float | None],
 ) -> None:
-    """Emit the four Demucs vocal-stem scalars as ``num:vocal_stem:<field>``.
+    """Emit Demucs per-stem scalars as model features.
 
-    These four scalars (RMS, mix ratio, activity fraction, envelope variance)
-    are the FVOC/VOC/INST discriminator that the tagger uses post-Demucs.
-    Giving them to the subgenre classifier helps the model separate categories
-    that differ by vocal profile within the same BPM/mood band (e.g.
-    vocal_hook_tech_house vs dark_tech_house_driver).
+    Three families of keys (all read from the ``vocal_stem`` cache layer):
+      - ``num:vocal_stem:<field>``  — legacy vocals-only metrics (RMS, mix
+        ratio, activity, envelope_var). Kept so older models keep working.
+      - ``num:stem:<name>:<metric>`` — per-stem metrics for drums / bass /
+        other / vocals (rms_db, mix_ratio_db, activity_frac, centroid_hz,
+        flatness, onset_rate, zcr, envelope_var).
+      - ``num:dominance:<name>``    — fraction of total stem energy by stem.
+
+    The non-vocals stems are typically the strongest single signal for
+    subgenre: drum dominance separates tribal/afro from melodic; bass
+    centroid + flatness separates amapiano log drums from straight 4/4;
+    other-stem onset density separates minimal tools from melodic builders.
     """
     filename, duration = cache_key
     try:
@@ -381,6 +388,8 @@ def _add_vocal_stem_features(
         return
     if not isinstance(data, dict):
         return
+
+    # Legacy vocals metrics (cache schema v1).
     for name in (
         "vocal_stem_rms_db",
         "vocal_stem_mix_ratio_db",
@@ -390,6 +399,24 @@ def _add_vocal_stem_features(
         value = _num(data.get(name))
         if value is not None:
             features[f"num:vocal_stem:{name.removeprefix('vocal_stem_')}"] = value
+
+    # Per-stem metrics (cache schema v2 — additive, optional).
+    for key, value in data.items():
+        if key.startswith("stem_"):
+            num = _num(value)
+            if num is None:
+                continue
+            # key is "stem_<name>_<metric...>"; split on first two underscores.
+            remainder = key[len("stem_"):]
+            try:
+                stem_name, metric = remainder.split("_", 1)
+            except ValueError:
+                continue
+            features[f"num:stem:{stem_name}:{metric}"] = num
+        elif key.startswith("dominance_"):
+            num = _num(value)
+            if num is not None:
+                features[f"num:dominance:{key.removeprefix('dominance_')}"] = num
 
 
 def _add_mix_name_features(

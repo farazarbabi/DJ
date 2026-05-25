@@ -132,6 +132,7 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
 
     todo: list[tuple[Path, float]] = []
     already_cached = 0
+    legacy_only = 0
     too_short = 0
     for path in files:
         dur = quick_duration(str(path)) or 0.0
@@ -140,9 +141,17 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
             too_short += 1
             continue
         existing = ucache.get_track(path.name, dur, "vocal_stem")
-        if isinstance(existing, dict) and "vocal_stem_mix_ratio_db" in existing:
-            already_cached += 1
-            continue
+        if isinstance(existing, dict):
+            # The expanded analyzer also writes per-stem keys
+            # (stem_drums_*, dominance_*) on top of the legacy vocal_stem_*
+            # keys. If only the legacy keys are present, re-extract so the
+            # subgenre classifier sees the full stem palette.
+            has_new_schema = any(k.startswith("stem_drums_") for k in existing)
+            if has_new_schema:
+                already_cached += 1
+                continue
+            if "vocal_stem_mix_ratio_db" in existing:
+                legacy_only += 1
         todo.append((path, dur))
 
     unlimited_todo = len(todo)
@@ -151,9 +160,11 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
         todo = todo[:limit]
 
     pieces = [
-        f"Demucs vocal_stem: {already_cached} already cached",
+        f"Demucs stems: {already_cached} fully cached",
         f"{unlimited_todo} pending",
     ]
+    if legacy_only:
+        pieces.append(f"{legacy_only} have legacy schema only (re-extracting)")
     if too_short:
         pieces.append(f"{too_short} too short to analyze")
     if limited:
@@ -162,8 +173,14 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
     if not todo:
         return
 
+    from dj_registry.progress import ProgressBar
+
     t0 = time.time()
     failed = 0
+    bar = ProgressBar(len(todo), label="Demucs vocal_stem")
+    # Pre-publish so the bar appears on screen before the first slow track —
+    # otherwise the user stares at a blank line for ~90 seconds.
+    bar.update(0, path_label(todo[0][0]), ok=0, failed=0)
     for idx, (path, dur) in enumerate(todo, start=1):
         ts = time.time()
         try:
@@ -171,28 +188,38 @@ def _populate_vocal_stem(files: list[Path], cache_dir: Path, limit: int = 0) -> 
             result = analyze_vocal_stem(audio)
         except Exception as exc:
             failed += 1
-            print(f"  [{idx}/{len(todo)}] FAIL  {path.name}: {exc}", flush=True)
+            logger.warning("Demucs FAIL %s: %s", path.name, exc)
+            bar.update(idx, path_label(path), ok=idx - failed, failed=failed)
             continue
         if result is None:
             failed += 1
-            print(f"  [{idx}/{len(todo)}] SKIP  {path.name}", flush=True)
+            logger.info("Demucs SKIP %s (analyzer returned None)", path.name)
+            bar.update(idx, path_label(path), ok=idx - failed, failed=failed)
             continue
         data = result_to_dict(result)
         ucache.put_track(path.name, dur, "vocal_stem", data)
         if idx % 10 == 0:
             ucache.save()
-        elapsed = time.time() - ts
-        print(
-            f"  [{idx}/{len(todo)}] OK  ratio={data['vocal_stem_mix_ratio_db']:6.2f}  "
-            f"act={data['vocal_stem_activity_frac']:.2f}  ({elapsed:.1f}s)  {path.name[:60]}",
-            flush=True,
+        logger.info(
+            "Demucs OK %s  ratio=%.2f act=%.2f (%.1fs)",
+            path.name, data["vocal_stem_mix_ratio_db"],
+            data["vocal_stem_activity_frac"], time.time() - ts,
         )
+        bar.update(idx, path_label(path), ok=idx - failed, failed=failed)
 
+    bar.finish("complete")
     ucache.save()
+    elapsed = time.time() - t0
     print(
-        f"  Demucs done in {time.time() - t0:.1f}s "
-        f"({(time.time() - t0) / max(1, len(todo)):.1f}s/track avg, {failed} failed/skipped)"
+        f"  Demucs done in {elapsed:.1f}s "
+        f"({elapsed / max(1, len(todo)):.1f}s/track avg, {failed} failed/skipped)"
     )
+
+
+def path_label(path: Path) -> str:
+    """Truncate a filename for the progress-bar postfix."""
+    name = path.name
+    return name if len(name) <= 40 else name[:37] + "..."
 
 
 def _print_coverage(files: list[Path], cache_dir: Path) -> None:
