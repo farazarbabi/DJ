@@ -130,16 +130,16 @@ def _dj_taxonomy_model_dir_for_tags(store) -> str | None:
     from pathlib import Path
 
     active = Path(store.output_dir) / "dj_taxonomy_model"
-    if (active / "internal").exists() or (active / "external").exists():
+    if (active / "xgb" / "model.pkl").exists():
         return str(active)
     fallback = Path("outputs") / "registry" / "dj_taxonomy_model"
-    if (fallback / "internal").exists() or (fallback / "external").exists():
+    if (fallback / "xgb" / "model.pkl").exists():
         return str(fallback)
     return None
 
 
 def _run_dj_taxonomy_for_tags(store, *, show_progress: bool = False) -> int:
-    """Populate internal DJ category fields before COMMENT tag sync when models exist."""
+    """Populate DJ category fields before COMMENT tag sync when a model exists."""
     try:
         from dj_registry.taxonomy.dj_model import classify_all_dj_taxonomies
 
@@ -150,7 +150,6 @@ def _run_dj_taxonomy_for_tags(store, *, show_progress: bool = False) -> int:
         return classify_all_dj_taxonomies(
             store,
             model_dir=model_dir,
-            primary_model="internal",
             show_progress=show_progress,
         )
     except FileNotFoundError as exc:

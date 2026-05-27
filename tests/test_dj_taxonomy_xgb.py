@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 
 from dj_registry.models import FileRecord, LogicalTrack, SourceObservation
 from dj_registry.store.csv_store import CsvStore
-from dj_registry.taxonomy.dj_model import train_dj_taxonomy_unified
+from dj_registry.taxonomy.dj_model import train_dj_taxonomy_models
 from dj_registry.taxonomy.dj_model_xgb import (
     XGB_MODEL_VERSION,
     XGBTaxonomyModel,
@@ -16,14 +15,13 @@ from dj_registry.taxonomy.dj_model_xgb import (
     train_xgb_model,
 )
 from dj_registry.taxonomy.dj_schema import load_dj_taxonomy
-from dj_registry.taxonomy.features import build_track_features
 
 
 _CATEGORIES = [
     "dark_tech_house_driver",
     "vocal_hook_tech_house",
     "raw_warehouse_techno",
-    "organic_chant_house",
+    "ritual_chant_house",
 ]
 
 
@@ -182,7 +180,7 @@ def test_xgb_predict_filters_afro_tribal_when_ineligible(tmp_path):
         "tribal_afro_driver", "afro_tribal_warmup", "afro_tribal_builder",
         "afro_house_peak", "spiritual_afro_chant", "afro_cinematic_builder",
         "afro_3_step", "afro_tech_driver", "deep_afro_house",
-        "organic_chant_house", "tribal_house",
+        "ritual_chant_house", "tribal_house",
     }
     assert prediction.category_id not in afro_tribal_ids, (
         f"Predicted {prediction.category_id!r} despite no afro/tribal signal"
@@ -218,46 +216,24 @@ def test_xgb_label_encoder_roundtrip(tmp_path):
     assert taxonomy.validate_category_id(prediction.category_id)
 
 
-# ── train_dj_taxonomy_unified dispatch ────────────────────────────────────
+# ── train_dj_taxonomy_models orchestrator ─────────────────────────────────
 
 
-def test_train_dj_taxonomy_unified_lr_only(tmp_path):
+def test_train_dj_taxonomy_models_writes_xgb_artifacts(tmp_path):
     store = _store(tmp_path)
     labels = _labels_csv(tmp_path)
-    result = train_dj_taxonomy_unified(
+    result = train_dj_taxonomy_models(
         store, str(labels),
-        model_type="lr",
-        model_dir=str(tmp_path / "dj_model"),
-        validation_split=0.25,
-        seed=42,
-    )
-    assert "lr" in result
-    assert "xgb" not in result
-    assert (tmp_path / "dj_model" / "lr" / "model.pkl").exists()
-    assert (tmp_path / "dj_model" / "lr" / "training_report.json").exists()
-
-
-def test_train_dj_taxonomy_unified_both(tmp_path):
-    store = _store(tmp_path)
-    labels = _labels_csv(tmp_path)
-    result = train_dj_taxonomy_unified(
-        store, str(labels),
-        model_type="both",
         model_dir=str(tmp_path / "dj_model"),
         validation_split=0.25,
         seed=42,
         xgb_n_iter=2,
     )
-    assert "lr" in result
     assert "xgb" in result
-    assert (tmp_path / "dj_model" / "lr" / "model.pkl").exists()
     assert (tmp_path / "dj_model" / "xgb" / "model.pkl").exists()
-    assert (tmp_path / "dj_model" / "comparison.json").exists()
-
-    with (tmp_path / "dj_model" / "comparison.json").open("r", encoding="utf-8") as f:
-        comparison = json.load(f)
-    assert "lr" in comparison
-    assert "xgb" in comparison
-    assert "deltas" in comparison
-    assert "gates_pass_lr" in comparison
-    assert "gates_pass_xgb" in comparison
+    assert (tmp_path / "dj_model" / "xgb" / "training_report.json").exists()
+    assert (tmp_path / "dj_model" / "xgb" / "training_audit.csv").exists()
+    # Comparison artifacts are gone — the unified path no longer writes them.
+    assert not (tmp_path / "dj_model" / "comparison.json").exists()
+    assert "lr" not in result
+    assert result["xgb"]["classes"] == len(_CATEGORIES)

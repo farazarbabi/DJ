@@ -1,48 +1,45 @@
-"""Dual supervised models for flat DJ-functional taxonomy categories."""
+"""XGBoost-only supervised classifier for the flat DJ-functional taxonomy.
+
+This module holds the orchestration + shared helpers (feature building,
+splits, metrics, prediction-to-track wiring). The XGBoost training code
+itself lives in ``dj_model_xgb.py``. The previous LogisticRegression
+pipeline has been removed; XGB is the only model.
+
+The dual ``dj_taxonomy_internal_*`` / ``dj_taxonomy_external_*`` columns
+on ``LogicalTrack`` are preserved (exports + tag-writer depend on them)
+and now both receive the SAME XGB prediction.
+"""
 
 from __future__ import annotations
 
 import csv
 import json
 import logging
-import pickle
 import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from sklearn.feature_extraction import DictVectorizer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 
 from ..models import FileRecord, LogicalTrack, SourceObservation, now_iso
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
+from .dj_schema import DjTaxonomy, external_evidence_available, load_dj_taxonomy
+from .features import build_track_features
 
 logger = logging.getLogger(__name__)
-from .dj_schema import DjTaxonomy, external_evidence_available, load_dj_taxonomy
-from .features import (
-    build_track_features,
-    is_afro_tribal_family,
-    is_eligible_for_afro_tribal,
-    load_artist_priors,
-    load_label_priors,
-    summarize_feature_groups,
-)
 
-DJ_MODEL_VERSION = "dj-taxonomy-dual-v2"
+DJ_MODEL_VERSION = "dj-taxonomy-xgb-v1"
 # Bumped v2 -> v3 when dense audio features (DSP, popularity, CLAP, vocal_stem)
-# were wired through build_track_features. Old pickles will be auto-skipped by
+# were wired through build_track_features. Old pickles are auto-skipped by
 # load_dj_taxonomy_model_if_available / load_xgb_model.
-DJ_FEATURE_SCHEMA_VERSION = "dj-taxonomy-feature-schema-v3"
+DJ_FEATURE_SCHEMA_VERSION = "dj-taxonomy-feature-schema-v4"
 MIN_EXAMPLES_PER_CATEGORY = 3
 MODEL_FILENAME = "model.pkl"
 REPORT_FILENAME = "training_report.json"
 AUDIT_FILENAME = "training_audit.csv"
-COMPARISON_JSON = "model_comparison.json"
-COMPARISON_CSV = "model_comparison.csv"
 VALID_FEATURE_MODES = {"internal", "external"}
 
 # Spec §7 — null fallback sentinel and confidence-band thresholds
@@ -86,134 +83,6 @@ class DjTrainingStats:
     warnings: list[str] = field(default_factory=list)
 
 
-@dataclass
-class _ConstantClassifier:
-    label: str
-
-    def predict_proba(self, x: Any) -> np.ndarray:
-        rows = x.shape[0] if hasattr(x, "shape") else len(x)
-        return np.ones((rows, 1), dtype=float)
-
-    @property
-    def classes_(self) -> np.ndarray:
-        return np.array([self.label])
-
-
-@dataclass
-class DjTaxonomyModel:
-    vectorizer: DictVectorizer
-    classifier: Any
-    feature_mode: str
-    taxonomy_version: str
-    taxonomy_hash: str
-    feature_schema_version: str
-    trained_at: str
-    labels_hash: str
-    examples: int
-
-    def predict(
-        self,
-        track: LogicalTrack,
-        observations: list[SourceObservation],
-        file_record: FileRecord | None,
-        taxonomy: DjTaxonomy,
-        *,
-        ucache: Any | None = None,
-    ) -> DjCategoryPrediction:
-        features = build_track_features(
-            track,
-            observations,
-            file_record,
-            feature_mode=self.feature_mode,
-            ucache=ucache,
-        )
-        if not features:
-            return DjCategoryPrediction(
-                confidence=0.0,
-                feature_mode=self.feature_mode,
-                warnings=["No usable features for DJ taxonomy model."],
-            )
-
-        x = self.vectorizer.transform([features])
-        probabilities = _probability_map(self.classifier, x)
-        ranked = [
-            (category_id, probability)
-            for category_id, probability in probabilities.items()
-            if taxonomy.validate_category_id(category_id)
-        ]
-        # Spec §6.2 — hard candidate filter: drop afro/tribal categories when
-        # the track lacks explicit afro/tribal provider/prior/mix-name signal.
-        if not is_eligible_for_afro_tribal(
-            track,
-            observations,
-            file_record,
-            artist_priors=load_artist_priors(),
-            label_priors=load_label_priors(),
-        ):
-            ranked = [
-                (cat_id, score)
-                for cat_id, score in ranked
-                if not is_afro_tribal_family(taxonomy.category(cat_id).family)
-            ]
-        ranked.sort(key=lambda item: item[1], reverse=True)
-        if not ranked:
-            return DjCategoryPrediction(
-                confidence=0.0,
-                feature_mode=self.feature_mode,
-                evidence={"feature_groups": summarize_feature_groups(features)},
-                warnings=["Model produced no valid DJ taxonomy category."],
-            )
-
-        selected_id, selected_score = ranked[0]
-        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-        margin = max(0.0, selected_score - second_score)
-        category = taxonomy.category(selected_id)
-        confidence = _confidence_from_model_score(selected_score, margin, features)
-        alternatives = [
-            {
-                "category_id": alt_id,
-                "label": taxonomy.category(alt_id).label,
-                "score": round(score, 3),
-            }
-            for alt_id, score in ranked[1:4]
-        ]
-        warnings: list[str] = []
-        if confidence < 0.55:
-            warnings.append("Low-confidence DJ taxonomy inferred by trained model.")
-        if margin < 0.08 and len(ranked) > 1:
-            warnings.append("Low DJ taxonomy model margin between top categories.")
-
-        return DjCategoryPrediction(
-            category_id=selected_id,
-            category_label=category.label,
-            confidence=confidence,
-            alternatives=alternatives,
-            evidence={
-                "model_signals": [
-                    f"model_version={DJ_MODEL_VERSION}",
-                    f"feature_mode={self.feature_mode}",
-                    f"category_score={selected_score:.3f}",
-                    f"category_margin={margin:.3f}",
-                ],
-                "feature_groups": summarize_feature_groups(features),
-                "top_categories": [
-                    f"{taxonomy.category(category_id).label} ({score:.3f})"
-                    for category_id, score in ranked[:3]
-                ],
-            },
-            warnings=warnings,
-            feature_mode=self.feature_mode,
-        )
-
-    def save(self, model_dir: str | Path) -> Path:
-        path = Path(model_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        artifact_path = path / MODEL_FILENAME
-        with artifact_path.open("wb") as f:
-            pickle.dump(self, f)
-        return artifact_path
-
-
 def train_dj_taxonomy_models(
     store: CsvStore,
     labels_path: str,
@@ -222,119 +91,79 @@ def train_dj_taxonomy_models(
     model_dir: str | None = None,
     validation_split: float = 0.2,
     seed: int = 42,
+    xgb_n_iter: int = 30,
+    feature_mode: str = "external",
     show_progress: bool = False,
 ) -> dict[str, Any]:
+    """Train the XGB DJ taxonomy classifier.
+
+    The unified feature mode is ``external`` (superset of internal). The
+    trained model lives at ``<model_dir>/xgb/model.pkl``. Reports go to
+    ``training_report.json`` + ``training_audit.csv`` alongside it.
+    """
+    from .dj_model_xgb import train_xgb_model
+
+    if feature_mode not in VALID_FEATURE_MODES:
+        raise ValueError(f"feature_mode must be one of {sorted(VALID_FEATURE_MODES)}, got {feature_mode!r}")
+
     taxonomy = load_dj_taxonomy(taxonomy_path)
     labels = _load_label_rows(labels_path, taxonomy)
     base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
     base_dir.mkdir(parents=True, exist_ok=True)
 
     ucache = _resolve_cache()
-    stats: dict[str, DjTrainingStats] = {}
-    examples_by_mode: dict[str, list[dict[str, Any]]] = {}
-    for mode in ("internal", "external"):
-        examples, skipped, dropped = _build_training_examples(
-            labels,
-            store,
-            mode=mode,
-            show_progress=show_progress,
-            ucache=ucache,
-        )
-        if not examples:
-            raise ValueError(f"No valid {mode} DJ taxonomy training examples could be built from labels CSV")
-        model, metrics, warnings = _train_final_model_with_metrics(
-            examples,
-            taxonomy,
-            feature_mode=mode,
-            labels_path=labels_path,
-            validation_split=validation_split,
-            seed=seed,
-        )
-        if dropped:
-            warnings = list(warnings) + [
-                f"Dropped {sum(dropped.values())} rows in {len(dropped)} under-supported "
-                f"categories (<{MIN_EXAMPLES_PER_CATEGORY} examples): "
-                f"{sorted(dropped.keys())}"
-            ]
-        mode_dir = base_dir / mode
-        model.save(mode_dir)
-        _write_training_audit(mode_dir / AUDIT_FILENAME, examples)
-        mode_stats = DjTrainingStats(
-            labels_path=labels_path,
-            model_dir=str(mode_dir),
-            examples=len(examples),
-            classes=len({example["category_id"] for example in examples}),
-            skipped_rows=skipped,
-            mode=mode,
-            metrics=metrics,
-            warnings=warnings,
-        )
-        _write_training_report(mode_dir / REPORT_FILENAME, mode_stats, model)
-        stats[mode] = mode_stats
-        examples_by_mode[mode] = examples
+    examples, skipped, dropped_categories = _build_training_examples(
+        labels, store, mode=feature_mode, show_progress=show_progress, ucache=ucache,
+    )
+    if not examples:
+        raise ValueError("No valid DJ taxonomy training examples could be built from labels CSV")
 
-    comparison = evaluate_dj_taxonomy_models(
-        store,
-        labels_path,
-        model_dir=str(base_dir),
-        taxonomy_path=taxonomy_path,
+    fit_start = time.perf_counter()
+    model, metrics, warnings_list = train_xgb_model(
+        examples, taxonomy,
+        labels_path=labels_path,
+        validation_split=validation_split,
+        seed=seed,
+        n_iter=xgb_n_iter,
+        feature_mode=feature_mode,
         show_progress=show_progress,
     )
+    if dropped_categories:
+        warnings_list = list(warnings_list) + [
+            f"Dropped {sum(dropped_categories.values())} rows in "
+            f"{len(dropped_categories)} under-supported categories "
+            f"(<{MIN_EXAMPLES_PER_CATEGORY} examples): {sorted(dropped_categories.keys())}"
+        ]
+
+    xgb_dir = base_dir / "xgb"
+    model.save(xgb_dir)
+    stats = DjTrainingStats(
+        labels_path=labels_path,
+        model_dir=str(xgb_dir),
+        examples=len(examples),
+        classes=len({example["category_id"] for example in examples}),
+        skipped_rows=skipped,
+        mode=feature_mode,
+        metrics=metrics,
+        warnings=warnings_list,
+    )
+    _write_training_audit(xgb_dir / AUDIT_FILENAME, examples)
+    _write_xgb_training_report(xgb_dir / REPORT_FILENAME, stats, model)
     return {
         "model_dir": str(base_dir),
-        "internal": _stats_to_dict(stats["internal"]),
-        "external": _stats_to_dict(stats["external"]),
-        "comparison": comparison,
+        "xgb": {
+            "model_dir": str(xgb_dir),
+            "examples": len(examples),
+            "classes": stats.classes,
+            "metrics": metrics,
+            "warnings": warnings_list,
+            "best_params": model.best_params,
+            "fit_time_seconds": metrics.get("fit_time_seconds", round(time.perf_counter() - fit_start, 2)),
+        },
+        "examples_total": len(examples),
+        "skipped_rows": skipped,
+        "dropped_categories": dropped_categories,
     }
-
-
-def load_dj_taxonomy_model(model_dir: str | Path, *, taxonomy_path: str | None = None) -> DjTaxonomyModel:
-    artifact_path = Path(model_dir) / MODEL_FILENAME
-    with artifact_path.open("rb") as f:
-        model = pickle.load(f)
-    if not isinstance(model, DjTaxonomyModel):
-        raise ValueError(f"{artifact_path} does not contain a DJ taxonomy model artifact")
-    if model.feature_schema_version != DJ_FEATURE_SCHEMA_VERSION:
-        raise ValueError(
-            f"DJ taxonomy model feature schema mismatch: "
-            f"{model.feature_schema_version} != {DJ_FEATURE_SCHEMA_VERSION}"
-        )
-    taxonomy = load_dj_taxonomy(taxonomy_path)
-    if model.taxonomy_hash and model.taxonomy_hash != taxonomy.hash():
-        raise ValueError("DJ taxonomy model was trained against a different dj_taxonomy.json")
-    if model.feature_mode not in VALID_FEATURE_MODES:
-        raise ValueError(f"Invalid DJ taxonomy model feature mode: {model.feature_mode}")
-    return model
-
-
-def load_dj_taxonomy_model_if_available(
-    model_dir: str | Path | None,
-    *,
-    taxonomy_path: str | None = None,
-) -> DjTaxonomyModel | None:
-    """Load a pickled DJ taxonomy model if present and compatible.
-
-    Returns None when the model directory is missing OR when the persisted
-    model is incompatible with the current feature schema / taxonomy hash.
-    Treating schema mismatch as "no model" avoids breaking the pipeline after
-    a feature-engineering change — the user retrains explicitly when ready.
-    """
-    if not model_dir:
-        return None
-    artifact_path = Path(model_dir) / MODEL_FILENAME
-    if not artifact_path.exists():
-        return None
-    try:
-        return load_dj_taxonomy_model(model_dir, taxonomy_path=taxonomy_path)
-    except ValueError as exc:
-        # Schema mismatch, taxonomy drift, or corrupt artifact — skip.
-        import logging
-        logging.getLogger(__name__).info(
-            "DJ taxonomy model at %s is incompatible (%s); skipping until retrain.",
-            artifact_path,
-            exc,
-        )
-        return None
 
 
 def evaluate_dj_taxonomy_models(
@@ -345,95 +174,20 @@ def evaluate_dj_taxonomy_models(
     taxonomy_path: str | None = None,
     show_progress: bool = False,
 ) -> dict[str, Any]:
+    """Re-evaluate the trained XGB model against the labels CSV."""
     taxonomy = load_dj_taxonomy(taxonomy_path)
     labels = _load_label_rows(labels_path, taxonomy)
-    base_dir = Path(model_dir)
-    internal_model = load_dj_taxonomy_model(base_dir / "internal", taxonomy_path=taxonomy_path)
-    external_model = load_dj_taxonomy_model(base_dir / "external", taxonomy_path=taxonomy_path)
+    model = load_dj_taxonomy_model_if_available(model_dir, taxonomy_path=taxonomy_path)
+    if model is None:
+        raise FileNotFoundError(f"No XGB DJ taxonomy model found under {model_dir}")
 
     ucache = _resolve_cache()
-    internal_examples, internal_skipped, _internal_dropped = _build_training_examples(
-        labels,
-        store,
-        mode="internal",
-        show_progress=show_progress,
-        ucache=ucache,
+    examples, skipped, _dropped = _build_training_examples(
+        labels, store, mode=model.feature_mode, show_progress=show_progress, ucache=ucache,
     )
-    external_examples, external_skipped, _external_dropped = _build_training_examples(
-        labels,
-        store,
-        mode="external",
-        show_progress=show_progress,
-        ucache=ucache,
-    )
-    examples_by_key = {
-        _example_key(example): {"internal": example}
-        for example in internal_examples
-    }
-    for example in external_examples:
-        examples_by_key.setdefault(_example_key(example), {})["external"] = example
-
-    rows: list[dict[str, Any]] = []
-    progress = ProgressBar(len(examples_by_key), label="Evaluate DJ taxonomy models", enabled=show_progress)
-    for index, (key, pair) in enumerate(sorted(examples_by_key.items()), start=1):
-        internal_example = pair.get("internal")
-        external_example = pair.get("external")
-        example = external_example or internal_example
-        if not example:
-            continue
-        expected = example["category_id"]
-        internal_prediction = (
-            _predict_for_example(internal_model, internal_example, taxonomy, ucache=ucache)
-            if internal_example else DjCategoryPrediction(feature_mode="internal")
-        )
-        external_prediction = (
-            _predict_for_example(external_model, external_example, taxonomy, ucache=ucache)
-            if external_example else DjCategoryPrediction(feature_mode="external")
-        )
-        rows.append(
-            {
-                "track_id": example["track"].track_id,
-                "file_name": example.get("file_name", ""),
-                "artist": example["track"].artist_canonical,
-                "title": example["track"].title_canonical,
-                "expected_category_id": expected,
-                "expected_category_label": taxonomy.category(expected).label,
-                "internal_category_id": internal_prediction.category_id,
-                "internal_label": internal_prediction.category_label,
-                "internal_confidence": internal_prediction.confidence,
-                "internal_correct": internal_prediction.category_id == expected,
-                "internal_top3_correct": _top3_contains(internal_prediction, expected),
-                "external_category_id": external_prediction.category_id,
-                "external_label": external_prediction.category_label,
-                "external_confidence": external_prediction.confidence,
-                "external_correct": external_prediction.category_id == expected,
-                "external_top3_correct": _top3_contains(external_prediction, expected),
-                "models_agree": internal_prediction.category_id == external_prediction.category_id,
-                "confidence_delta": round(external_prediction.confidence - internal_prediction.confidence, 3),
-                "external_evidence_available": example.get("external_evidence_available", False),
-            }
-        )
-        progress.update(index, example["track"].title_canonical)
-    progress.finish()
-
-    out_dir = Path(model_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_comparison_csv(out_dir / COMPARISON_CSV, rows)
-    metrics = {
-        "examples": len(rows),
-        "skipped_rows": {"internal": internal_skipped, "external": external_skipped},
-        "internal": _metrics_from_rows(rows, "internal"),
-        "external": _metrics_from_rows(rows, "external"),
-        "agreement_rate": _safe_rate(sum(1 for row in rows if row["models_agree"]), len(rows)),
-        "external_improved": sum(
-            1 for row in rows if row["external_correct"] and not row["internal_correct"]
-        ),
-        "external_worsened": sum(
-            1 for row in rows if row["internal_correct"] and not row["external_correct"]
-        ),
-    }
-    with (out_dir / COMPARISON_JSON).open("w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, sort_keys=True)
+    metrics = _evaluate_examples(model, examples, taxonomy, ucache=ucache)
+    metrics["examples"] = len(examples)
+    metrics["skipped_rows"] = skipped
     return metrics
 
 
@@ -442,17 +196,22 @@ def classify_all_dj_taxonomies(
     *,
     taxonomy_path: str | None = None,
     model_dir: str | None = None,
-    primary_model: str = "external",
     show_progress: bool = False,
+    primary_model: str | None = None,  # accepted + ignored for back-compat
 ) -> int:
-    if primary_model not in VALID_FEATURE_MODES:
-        raise ValueError(f"Invalid primary DJ taxonomy model: {primary_model}")
+    """Classify every track via the XGB model. Writes results to track columns.
+
+    ``primary_model`` is accepted but ignored — there's only one model now.
+    Both ``dj_taxonomy_internal_*`` and ``dj_taxonomy_external_*`` columns
+    are populated with the same XGB prediction so downstream consumers
+    (exports, tag-writer) keep working.
+    """
+    del primary_model  # only one model now
     taxonomy = load_dj_taxonomy(taxonomy_path)
     base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
-    internal_model = load_dj_taxonomy_model_if_available(base_dir / "internal", taxonomy_path=taxonomy_path)
-    external_model = load_dj_taxonomy_model_if_available(base_dir / "external", taxonomy_path=taxonomy_path)
-    if internal_model is None and external_model is None:
-        raise FileNotFoundError(f"No DJ taxonomy models found under {base_dir}")
+    model = load_dj_taxonomy_model_if_available(base_dir, taxonomy_path=taxonomy_path)
+    if model is None:
+        raise FileNotFoundError(f"No XGB DJ taxonomy model found under {base_dir}")
 
     tracks = store.load_tracks()
     files = store.load_files()
@@ -468,21 +227,12 @@ def classify_all_dj_taxonomies(
     for index, track in enumerate(tracks, start=1):
         track_obs = obs_by_track.get(track.track_id, [])
         file_record = file_by_track.get(track.track_id)
-        internal_prediction = (
-            internal_model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
-            if internal_model else DjCategoryPrediction(feature_mode="internal")
-        )
-        external_prediction = (
-            external_model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
-            if external_model else DjCategoryPrediction(feature_mode="external")
-        )
-        _apply_predictions_to_track(
+        prediction = model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
+        _apply_prediction_to_track(
             track,
             taxonomy,
-            internal_prediction,
-            external_prediction,
+            prediction,
             has_external_evidence=external_evidence_available(track_obs),
-            primary_model=primary_model,
         )
         progress.update(index, track.title_canonical, category=track.dj_taxonomy_id)
     progress.finish()
@@ -490,24 +240,47 @@ def classify_all_dj_taxonomies(
     return len(tracks)
 
 
-def _apply_predictions_to_track(
+def load_dj_taxonomy_model_if_available(
+    model_dir: str | Path | None,
+    *,
+    taxonomy_path: str | None = None,
+):
+    """Load a pickled XGB DJ taxonomy model if present and compatible.
+
+    Accepts either the base model dir (containing ``xgb/``) or the
+    ``xgb/`` dir directly. Returns ``None`` when nothing usable is found.
+    """
+    if not model_dir:
+        return None
+    from .dj_model_xgb import load_xgb_model
+
+    candidates: list[Path] = []
+    base = Path(model_dir)
+    candidates.append(base / "xgb")
+    candidates.append(base)
+    for cand in candidates:
+        if (cand / MODEL_FILENAME).exists():
+            model = load_xgb_model(cand, taxonomy_path=taxonomy_path)
+            if model is not None:
+                return model
+    return None
+
+
+def _apply_prediction_to_track(
     track: LogicalTrack,
     taxonomy: DjTaxonomy,
-    internal_prediction: DjCategoryPrediction,
-    external_prediction: DjCategoryPrediction,
+    prediction: DjCategoryPrediction,
     *,
     has_external_evidence: bool,
-    primary_model: str = "external",
 ) -> None:
-    if primary_model == "internal":
-        primary = internal_prediction if internal_prediction.category_id else external_prediction
-        source_model = "internal" if internal_prediction.category_id else "external"
-    else:
-        primary = external_prediction if external_prediction.category_id else internal_prediction
-        source_model = "external" if external_prediction.category_id else "internal"
+    """Write a single XGB prediction to BOTH internal and external track columns.
 
-    # Spec §7.2 — null fallback when calibrated confidence is below threshold
-    if primary.category_id and primary.confidence < UNCLASSIFIED_THRESHOLD:
+    With only one model, the two column sets are populated identically. We
+    keep the dual columns so the existing CSV schema, tag-writer, and
+    downstream consumers don't break.
+    """
+    source_model = "xgb"
+    if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
         track.dj_taxonomy_id = UNCLASSIFIED_ID
         track.dj_taxonomy_label = ""
         track.dj_taxonomy_family = ""
@@ -519,11 +292,11 @@ def _apply_predictions_to_track(
         track.dj_taxonomy_vocal_profiles = ""
         track.dj_taxonomy_source_genres = ""
         track.dj_taxonomy_keywords = ""
-        track.dj_taxonomy_confidence = primary.confidence
+        track.dj_taxonomy_confidence = prediction.confidence
         track.dj_taxonomy_confidence_level = "unknown"
         track.dj_taxonomy_source_model = source_model
-    elif primary.category_id:
-        category = taxonomy.category(primary.category_id)
+    elif prediction.category_id:
+        category = taxonomy.category(prediction.category_id)
         track.dj_taxonomy_id = category.id
         track.dj_taxonomy_label = category.label
         track.dj_taxonomy_family = category.family
@@ -535,107 +308,30 @@ def _apply_predictions_to_track(
         track.dj_taxonomy_vocal_profiles = ";".join(category.vocal_profiles)
         track.dj_taxonomy_source_genres = ";".join(category.source_genres)
         track.dj_taxonomy_keywords = ";".join(category.keywords)
-        track.dj_taxonomy_confidence = primary.confidence
-        track.dj_taxonomy_confidence_level = confidence_to_level(primary.confidence)
+        track.dj_taxonomy_confidence = prediction.confidence
+        track.dj_taxonomy_confidence_level = confidence_to_level(prediction.confidence)
         track.dj_taxonomy_source_model = source_model
-    track.dj_taxonomy_internal_id = internal_prediction.category_id
-    track.dj_taxonomy_internal_label = internal_prediction.category_label
-    track.dj_taxonomy_internal_confidence = internal_prediction.confidence
-    track.dj_taxonomy_external_id = external_prediction.category_id
-    track.dj_taxonomy_external_label = external_prediction.category_label
-    track.dj_taxonomy_external_confidence = external_prediction.confidence
-    track.dj_taxonomy_models_agree = (
-        "YES"
-        if internal_prediction.category_id
-        and external_prediction.category_id
-        and internal_prediction.category_id == external_prediction.category_id
-        else "NO"
-    )
+    track.dj_taxonomy_internal_id = prediction.category_id
+    track.dj_taxonomy_internal_label = prediction.category_label
+    track.dj_taxonomy_internal_confidence = prediction.confidence
+    track.dj_taxonomy_external_id = prediction.category_id
+    track.dj_taxonomy_external_label = prediction.category_label
+    track.dj_taxonomy_external_confidence = prediction.confidence
+    track.dj_taxonomy_models_agree = "YES" if prediction.category_id else "NO"
     track.dj_taxonomy_external_evidence_available = "YES" if has_external_evidence else "NO"
     track.dj_taxonomy_alternatives = json.dumps(
-        {
-            "internal": internal_prediction.alternatives,
-            "external": external_prediction.alternatives,
-        },
+        {"internal": prediction.alternatives, "external": prediction.alternatives},
         sort_keys=True,
     )
     track.dj_taxonomy_evidence = json.dumps(
         {
-            "internal": internal_prediction.evidence,
-            "external": external_prediction.evidence,
-            "warnings": {
-                "internal": internal_prediction.warnings,
-                "external": external_prediction.warnings,
-            },
+            "internal": prediction.evidence,
+            "external": prediction.evidence,
+            "warnings": {"internal": prediction.warnings, "external": prediction.warnings},
         },
         sort_keys=True,
     )
     track.dj_taxonomy_version = taxonomy.version
-
-
-def _train_final_model_with_metrics(
-    examples: list[dict[str, Any]],
-    taxonomy: DjTaxonomy,
-    *,
-    feature_mode: str,
-    labels_path: str,
-    validation_split: float,
-    seed: int,
-) -> tuple[DjTaxonomyModel, dict[str, Any], list[str]]:
-    warnings: list[str] = []
-    if len(examples) < 8 or validation_split <= 0:
-        train_examples = examples
-        validation_examples = examples
-        validation_kind = "in_sample"
-        warnings.append("Dataset is small; metrics are in-sample and should be treated as smoke-test metrics.")
-    else:
-        train_examples, validation_examples = _split_examples(examples, validation_split=validation_split, seed=seed)
-        validation_kind = "holdout"
-        if not validation_examples:
-            validation_examples = train_examples
-            validation_kind = "in_sample"
-            warnings.append("Validation split produced no holdout rows; metrics are in-sample.")
-
-    validation_model = _fit_model(
-        train_examples,
-        taxonomy,
-        feature_mode=feature_mode,
-        labels_path=labels_path,
-    )
-    metrics = _evaluate_examples(validation_model, validation_examples, taxonomy)
-    metrics["validation_kind"] = validation_kind
-    metrics["validation_examples"] = len(validation_examples)
-
-    final_model = _fit_model(
-        examples,
-        taxonomy,
-        feature_mode=feature_mode,
-        labels_path=labels_path,
-    )
-    return final_model, metrics, warnings
-
-
-def _fit_model(
-    examples: list[dict[str, Any]],
-    taxonomy: DjTaxonomy,
-    *,
-    feature_mode: str,
-    labels_path: str,
-) -> DjTaxonomyModel:
-    vectorizer = DictVectorizer(sparse=True)
-    x = vectorizer.fit_transform([example["features"] for example in examples])
-    labels = [example["category_id"] for example in examples]
-    return DjTaxonomyModel(
-        vectorizer=vectorizer,
-        classifier=_fit_classifier(x, labels),
-        feature_mode=feature_mode,
-        taxonomy_version=taxonomy.version,
-        taxonomy_hash=taxonomy.hash(),
-        feature_schema_version=DJ_FEATURE_SCHEMA_VERSION,
-        trained_at=now_iso(),
-        labels_hash=_file_hash(Path(labels_path)),
-        examples=len(examples),
-    )
 
 
 def _resolve_cache() -> Any | None:
@@ -750,9 +446,8 @@ def _build_training_examples(
 
     # Spec §9 — drop categories with <N examples. They overfit instead of learn,
     # and they consume train/val budget that the long-tail can't afford.
-    # Skipped when the dataset is below 8 rows total (mirrors the small-dataset
-    # branch in _train_final_model_with_metrics) — smoke-test fixtures must
-    # still train successfully even though every category has 1 example.
+    # Skipped when the dataset is below 8 rows total — smoke-test fixtures
+    # must still train successfully even though every category has 1 example.
     dropped: dict[str, int] = {}
     if min_examples_per_category > 1 and len(examples) >= 8:
         from collections import Counter
@@ -784,54 +479,6 @@ def _track_from_label_row(row: dict[str, str]) -> LogicalTrack:
         tagger_vocal=(row.get("tagger_vocal") or row.get("vocal") or "").strip(),
         tagger_structure=(row.get("tagger_structure") or row.get("structure") or "").strip(),
     )
-
-
-def _fit_classifier(x: Any, labels: list[str], *, tune: bool = False, seed: int = 42) -> Any:
-    """Fit a LogisticRegression classifier. Optionally hyperparameter-tune via
-    RandomizedSearchCV across C / solver / max_iter when `tune=True`.
-
-    max_iter raised from 1000 -> 2000 (the v1 model warned convergence issues
-    on the high-dim sparse feature space).
-    """
-    unique = sorted(set(labels))
-    if len(unique) == 1:
-        return _ConstantClassifier(unique[0])
-    if tune:
-        from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
-        import numpy as np
-        # CV requires at least 2 examples per class; fold count clamped accordingly.
-        from collections import Counter
-        min_per_class = min(Counter(labels).values())
-        cv_folds = min(3, min_per_class) if min_per_class >= 2 else 0
-        if cv_folds >= 2:
-            cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
-            base = LogisticRegression(class_weight="balanced", random_state=seed)
-            search = RandomizedSearchCV(
-                base,
-                param_distributions={
-                    "C": [0.01, 0.1, 1.0, 10.0, 100.0],
-                    "solver": ["lbfgs", "saga"],
-                    "max_iter": [2000, 4000],
-                    "penalty": ["l2"],
-                },
-                n_iter=10,
-                scoring="f1_macro",
-                cv=cv,
-                n_jobs=-1,
-                random_state=seed,
-                refit=True,
-            )
-            search.fit(x, labels)
-            logger.info("LR best params: %s (CV f1_macro=%.3f)", search.best_params_, search.best_score_)
-            return search.best_estimator_
-    classifier = LogisticRegression(max_iter=2000, class_weight="balanced")
-    classifier.fit(x, labels)
-    return classifier
-
-
-def _probability_map(model: Any, x: Any) -> dict[str, float]:
-    probabilities = model.predict_proba(x)[0]
-    return {str(label): float(prob) for label, prob in zip(model.classes_, probabilities)}
 
 
 def _confidence_from_model_score(score: float, margin: float, features: dict[str, float]) -> float:
@@ -916,31 +563,14 @@ def run_library_distribution_check(
     *,
     model_dir: str | Path,
     taxonomy_path: str | None = None,
-    primary_model: str = "external",
     max_bucket_share: float = 0.20,
     show_progress: bool = False,
 ) -> dict[str, Any]:
-    """Predict on every track and report bucket-share distribution.
-
-    Returns a dict matching the spec §9.2 library_distribution_check schema:
-        {
-            "total_tracks": <int>,
-            "predictions": {"<id>": <count>},
-            "largest_bucket_id": "<id>",
-            "largest_bucket_share": <float>,
-            "passes_cap": <bool>,
-            "max_bucket_share": <float>,  # the threshold tested
-        }
-    """
+    """Predict on every track and report bucket-share distribution."""
     taxonomy = load_dj_taxonomy(taxonomy_path)
-    base_dir = Path(model_dir)
-    model = load_dj_taxonomy_model_if_available(base_dir / primary_model, taxonomy_path=taxonomy_path)
+    model = load_dj_taxonomy_model_if_available(model_dir, taxonomy_path=taxonomy_path)
     if model is None:
-        # Fall back to the other mode if requested one is missing
-        other = "internal" if primary_model == "external" else "external"
-        model = load_dj_taxonomy_model_if_available(base_dir / other, taxonomy_path=taxonomy_path)
-    if model is None:
-        raise FileNotFoundError(f"No DJ taxonomy model found under {base_dir}")
+        raise FileNotFoundError(f"No DJ taxonomy model found under {model_dir}")
 
     tracks = store.load_tracks()
     files = store.load_files()
@@ -958,8 +588,6 @@ def run_library_distribution_check(
         track_obs = obs_by_track.get(track.track_id, [])
         file_record = file_by_track.get(track.track_id)
         prediction = model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
-        # Apply the same null-fallback rule the writer uses, so the audit
-        # reflects what would actually end up on tracks_master.csv.
         if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
             cat_id = UNCLASSIFIED_ID
         else:
@@ -997,11 +625,8 @@ def train_with_collapse_guard(
     """Spec §9.3 — train with anti-collapse guard.
 
     Trains normally, then runs run_library_distribution_check. If the largest
-    bucket exceeds the cap, retrains up to max_retrains more times. The retrain
-    penalty (per spec) is a class-weight reduction on the offending category;
-    this implementation logs the offending category and re-shuffles the seed,
-    leaving deeper class-weight surgery as a follow-up if simple re-seeding
-    doesn't break the collapse on its own.
+    bucket exceeds the cap, retrains up to max_retrains more times with a
+    re-seeded RandomizedSearchCV.
     """
     last_check: dict[str, Any] = {}
     offending_history: list[str] = []
@@ -1033,7 +658,6 @@ def train_with_collapse_guard(
             return result
         offending_history.append(last_check["largest_bucket_id"])
         if attempt < max_retrains:
-            # log to make iteration diagnostics surface to the operator
             print(
                 f"[collapse-guard] attempt {attempt + 1}: largest bucket "
                 f"{last_check['largest_bucket_id']!r} at "
@@ -1046,207 +670,12 @@ def train_with_collapse_guard(
     )
 
 
-# ── Unified single-model training (LR vs XGB head-to-head) ──────────────────
-
-
-def train_dj_taxonomy_unified(
-    store: CsvStore,
-    labels_path: str,
-    *,
-    model_type: str = "lr",
-    taxonomy_path: str | None = None,
-    model_dir: str | None = None,
-    validation_split: float = 0.2,
-    seed: int = 42,
-    tune_lr: bool = False,
-    xgb_n_iter: int = 30,
-    show_progress: bool = False,
-) -> dict[str, Any]:
-    """Train ONE model per algorithm on the unified (external) feature set.
-
-    model_type:
-      - "lr"   : LogisticRegression (default)
-      - "xgb"  : XGBoost with RandomizedSearchCV tuning
-      - "both" : train both and write a comparison report
-
-    Output directory layout:
-      <model_dir>/lr/model.pkl + training_report.json
-      <model_dir>/xgb/model.pkl + training_report.json + best_params.json
-      <model_dir>/comparison.json  (only when model_type='both')
-    """
-    if model_type not in {"lr", "xgb", "both"}:
-        raise ValueError(f"model_type must be one of lr|xgb|both, got {model_type!r}")
-
-    taxonomy = load_dj_taxonomy(taxonomy_path)
-    labels = _load_label_rows(labels_path, taxonomy)
-    base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Build feature examples once (unified = external mode = superset of internal)
-    ucache = _resolve_cache()
-    examples, skipped, dropped_categories = _build_training_examples(
-        labels, store, mode="external", show_progress=show_progress, ucache=ucache,
-    )
-    if not examples:
-        raise ValueError("No valid training examples could be built from labels CSV")
-
-    results: dict[str, Any] = {
-        "model_dir": str(base_dir),
-        "examples_total": len(examples),
-        "skipped_rows": skipped,
-        "dropped_categories": dropped_categories,
-    }
-
-    dropped_warning = ""
-    if dropped_categories:
-        dropped_warning = (
-            f"Dropped {sum(dropped_categories.values())} rows in "
-            f"{len(dropped_categories)} under-supported categories "
-            f"(<{MIN_EXAMPLES_PER_CATEGORY} examples): {sorted(dropped_categories.keys())}"
-        )
-
-    if model_type in {"lr", "both"}:
-        lr_result = _train_lr_unified(
-            examples, taxonomy, labels_path=labels_path,
-            model_dir=base_dir / "lr",
-            validation_split=validation_split, seed=seed, tune=tune_lr,
-        )
-        if dropped_warning:
-            lr_result["warnings"] = list(lr_result.get("warnings") or []) + [dropped_warning]
-        results["lr"] = lr_result
-
-    if model_type in {"xgb", "both"}:
-        from .dj_model_xgb import train_xgb_model
-
-        fit_start = time.perf_counter()
-        xgb_model, xgb_metrics, xgb_warnings = train_xgb_model(
-            examples, taxonomy,
-            labels_path=labels_path,
-            validation_split=validation_split,
-            seed=seed,
-            n_iter=xgb_n_iter,
-            show_progress=show_progress,
-        )
-        if dropped_warning:
-            xgb_warnings = list(xgb_warnings) + [dropped_warning]
-        xgb_dir = base_dir / "xgb"
-        xgb_model.save(xgb_dir)
-        xgb_stats = DjTrainingStats(
-            labels_path=labels_path,
-            model_dir=str(xgb_dir),
-            examples=len(examples),
-            classes=len({example["category_id"] for example in examples}),
-            skipped_rows=skipped,
-            mode="external",
-            metrics=xgb_metrics,
-            warnings=xgb_warnings,
-        )
-        _write_xgb_training_report(xgb_dir / REPORT_FILENAME, xgb_stats, xgb_model)
-        results["xgb"] = {
-            "model_dir": str(xgb_dir),
-            "examples": len(examples),
-            "classes": xgb_stats.classes,
-            "metrics": xgb_metrics,
-            "warnings": xgb_warnings,
-            "best_params": xgb_model.best_params,
-            "fit_time_seconds": xgb_metrics.get("fit_time_seconds", round(time.perf_counter() - fit_start, 2)),
-        }
-
-    if model_type == "both":
-        from .dj_model_comparison import write_comparison_json
-
-        write_comparison_json(base_dir / "comparison.json", results.get("lr"), results.get("xgb"))
-        results["comparison_path"] = str(base_dir / "comparison.json")
-
-    return results
-
-
-def _train_lr_unified(
-    examples: list[dict[str, Any]],
-    taxonomy: DjTaxonomy,
-    *,
-    labels_path: str,
-    model_dir: Path,
-    validation_split: float,
-    seed: int,
-    tune: bool,
-) -> dict[str, Any]:
-    """Train a single LR model on the unified feature set + write artifacts."""
-    fit_start = time.perf_counter()
-
-    # Validation split, mirroring _train_final_model_with_metrics
-    if len(examples) < 8 or validation_split <= 0:
-        train_examples = examples
-        validation_examples = examples
-        validation_kind = "in_sample"
-        warnings_list = ["Dataset is small; LR metrics are in-sample."]
-    else:
-        train_examples, validation_examples = _split_examples(
-            examples, validation_split=validation_split, seed=seed
-        )
-        validation_kind = "holdout"
-        if not validation_examples:
-            validation_examples = train_examples
-            validation_kind = "in_sample"
-            warnings_list = ["Validation split produced no holdout rows; metrics are in-sample."]
-        else:
-            warnings_list = []
-
-    # Fit on train split for validation metrics
-    vec_val = DictVectorizer(sparse=True)
-    x_train = vec_val.fit_transform([e["features"] for e in train_examples])
-    y_train = [e["category_id"] for e in train_examples]
-    val_clf = _fit_classifier(x_train, y_train, tune=tune, seed=seed)
-    val_model = DjTaxonomyModel(
-        vectorizer=vec_val,
-        classifier=val_clf,
-        feature_mode="external",
-        taxonomy_version=taxonomy.version,
-        taxonomy_hash=taxonomy.hash(),
-        feature_schema_version=DJ_FEATURE_SCHEMA_VERSION,
-        trained_at=now_iso(),
-        labels_hash=_file_hash(Path(labels_path)),
-        examples=len(train_examples),
-    )
-    metrics = _evaluate_examples(val_model, validation_examples, taxonomy)
-    metrics["validation_kind"] = validation_kind
-    metrics["validation_examples"] = len(validation_examples)
-    metrics["fit_time_seconds"] = round(time.perf_counter() - fit_start, 2)
-    metrics["model_version"] = DJ_MODEL_VERSION
-    metrics["model_type"] = "lr"
-
-    # Refit on all examples for the final shipped model
-    final_model = _fit_model(examples, taxonomy, feature_mode="external", labels_path=labels_path)
-    final_model.save(model_dir)
-    stats = DjTrainingStats(
-        labels_path=labels_path,
-        model_dir=str(model_dir),
-        examples=len(examples),
-        classes=len({e["category_id"] for e in examples}),
-        skipped_rows=0,
-        mode="external",
-        metrics=metrics,
-        warnings=warnings_list,
-    )
-    _write_training_audit(model_dir / AUDIT_FILENAME, examples)
-    _write_training_report(model_dir / REPORT_FILENAME, stats, final_model)
-    return {
-        "model_dir": str(model_dir),
-        "examples": len(examples),
-        "classes": stats.classes,
-        "metrics": metrics,
-        "warnings": warnings_list,
-        "fit_time_seconds": metrics["fit_time_seconds"],
-    }
-
-
-def _write_xgb_training_report(path: Path, stats: DjTrainingStats, model: "Any") -> None:
-    """Write a training report for an XGB model (mirrors LR's _write_training_report)."""
+def _write_xgb_training_report(path: Path, stats: DjTrainingStats, model: Any) -> None:
+    """Write a training report for the XGB model."""
     payload = _stats_to_dict(stats)
     payload.update(
         {
-            "model_version": getattr(model, "best_params", None)
-            and stats.metrics.get("model_version", "dj-taxonomy-xgb-v1"),
+            "model_version": stats.metrics.get("model_version", DJ_MODEL_VERSION),
             "feature_schema_version": DJ_FEATURE_SCHEMA_VERSION,
             "trained_at": model.trained_at,
             "labels_hash": model.labels_hash,
@@ -1260,7 +689,7 @@ def _write_xgb_training_report(path: Path, stats: DjTrainingStats, model: "Any")
 
 
 def _evaluate_examples(
-    model: DjTaxonomyModel,
+    model: Any,
     examples: list[dict[str, Any]],
     taxonomy: DjTaxonomy,
     *,
@@ -1336,12 +765,7 @@ def _metrics_from_rows(rows: list[dict[str, Any]], prefix: str) -> dict[str, Any
 def _per_class_classification_report(
     y_true: list[str], y_pred: list[str]
 ) -> dict[str, dict[str, float]]:
-    """Full precision/recall/F1 per category from sklearn.classification_report.
-
-    Use this in conjunction with ``per_category`` (top-1 accuracy + support) to
-    diagnose which categories are dragging macro-F1 — bottom-quartile recall
-    is what the data-growth phase should target.
-    """
+    """Full precision/recall/F1 per category from sklearn.classification_report."""
     if not y_true:
         return {}
     from sklearn.metrics import classification_report
@@ -1354,8 +778,6 @@ def _per_class_classification_report(
         output_dict=True,
         zero_division=0,
     )
-    # Drop sklearn's aggregate keys; the macro/weighted aggregates are already
-    # represented in the top-level metrics.
     return {
         label: {
             "precision": round(float(stats.get("precision", 0.0)), 3),
@@ -1443,51 +865,6 @@ def _write_training_audit(path: Path, examples: list[dict[str, Any]]) -> None:
             )
 
 
-def _write_training_report(path: Path, stats: DjTrainingStats, model: DjTaxonomyModel) -> None:
-    payload = _stats_to_dict(stats)
-    payload.update(
-        {
-            "model_version": DJ_MODEL_VERSION,
-            "feature_schema_version": DJ_FEATURE_SCHEMA_VERSION,
-            "trained_at": model.trained_at,
-            "labels_hash": model.labels_hash,
-            "taxonomy_hash": model.taxonomy_hash,
-        }
-    )
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-
-
-def _write_comparison_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "track_id",
-        "file_name",
-        "artist",
-        "title",
-        "expected_category_id",
-        "expected_category_label",
-        "internal_category_id",
-        "internal_label",
-        "internal_confidence",
-        "internal_correct",
-        "internal_top3_correct",
-        "external_category_id",
-        "external_label",
-        "external_confidence",
-        "external_correct",
-        "external_top3_correct",
-        "models_agree",
-        "confidence_delta",
-        "external_evidence_available",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
 def _stats_to_dict(stats: DjTrainingStats) -> dict[str, Any]:
     return {
         "labels_path": stats.labels_path,
@@ -1499,17 +876,6 @@ def _stats_to_dict(stats: DjTrainingStats) -> dict[str, Any]:
         "metrics": stats.metrics,
         "warnings": stats.warnings,
     }
-
-
-def _example_key(example: dict[str, Any]) -> str:
-    track = example["track"]
-    return track.track_id or example.get("file_name", "")
-
-
-def _top3_contains(prediction: DjCategoryPrediction, expected: str) -> bool:
-    top_ids = [prediction.category_id]
-    top_ids.extend(str(alt.get("category_id") or "") for alt in prediction.alternatives)
-    return expected in top_ids[:3]
 
 
 def _safe_rate(numerator: int, denominator: int) -> float:

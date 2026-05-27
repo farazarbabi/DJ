@@ -315,22 +315,7 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
         return 1 if stats.errors else 0
 
     if command == "train-models":
-        model_type = getattr(args, "model", "lr")
-        if model_type == "legacy-dual":
-            from .taxonomy.dj_model import train_dj_taxonomy_models
-
-            result = train_dj_taxonomy_models(
-                store,
-                getattr(args, "labels"),
-                taxonomy_path=getattr(args, "taxonomy", None),
-                model_dir=getattr(args, "model_dir", None),
-                validation_split=getattr(args, "validation_split", 0.2),
-                seed=getattr(args, "seed", 42),
-                show_progress=_show_progress(args),
-            )
-            _print_dj_taxonomy_locations(result["model_dir"], include_training=True)
-            return 0
-        return _cmd_train_unified(args, store)
+        return _cmd_train(args, store)
 
     if command == "evaluate":
         from .taxonomy.dj_model import evaluate_dj_taxonomy_models
@@ -342,7 +327,11 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
             taxonomy_path=getattr(args, "taxonomy", None),
             show_progress=_show_progress(args),
         )
-        _print_dj_taxonomy_locations(getattr(args, "model_dir"), include_training=False)
+        print(f"DJ taxonomy evaluation complete -> {getattr(args, 'model_dir')}")
+        print(f"  examples={metrics.get('examples', 0)}  "
+              f"top-1={metrics.get('top1_accuracy', 0.0):.1%}  "
+              f"top-3={metrics.get('top3_accuracy', 0.0):.1%}  "
+              f"macro-F1={metrics.get('macro_f1', 0.0):.3f}")
         return 0
 
     if command == "test-api":
@@ -371,154 +360,99 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
         show_progress=_show_progress(args),
     )
     generate_reports(store, config.reports_dir, show_progress=_show_progress(args))
-    print(f"DJ taxonomy: {count} tracks classified by internal and external models; reports regenerated")
+    print(f"DJ taxonomy: {count} tracks classified; reports regenerated")
     return 0
 
 
-def _print_dj_taxonomy_locations(model_dir: str, *, include_training: bool) -> None:
-    base = Path(model_dir)
-    if include_training:
-        print(f"DJ taxonomy models trained -> {base}")
-        print(f"Internal report -> {base / 'internal' / 'training_report.json'}")
-        print(f"External report -> {base / 'external' / 'training_report.json'}")
-    else:
-        print(f"DJ taxonomy evaluation complete -> {base}")
-    print(f"Comparison metrics -> {base / 'model_comparison.json'}")
-    print(f"Per-track comparison -> {base / 'model_comparison.csv'}")
+def _cmd_train(args: argparse.Namespace, store: CsvStore) -> int:
+    """Train the XGB DJ taxonomy classifier and print a single-model report."""
+    from .taxonomy.dj_model import run_library_distribution_check, train_dj_taxonomy_models
 
-
-def _cmd_train_unified(args: argparse.Namespace, store: CsvStore) -> int:
-    """Train LR / XGB / both via the unified entry point and print a comparison."""
-    from .taxonomy.dj_model import train_dj_taxonomy_unified
-
-    model_type = getattr(args, "model", "lr")
-    result = train_dj_taxonomy_unified(
+    result = train_dj_taxonomy_models(
         store,
         getattr(args, "labels"),
-        model_type=model_type,
         taxonomy_path=getattr(args, "taxonomy", None),
         model_dir=getattr(args, "model_dir", None),
         validation_split=getattr(args, "validation_split", 0.2),
         seed=getattr(args, "seed", 42),
-        tune_lr=getattr(args, "tune_lr", False),
         xgb_n_iter=getattr(args, "xgb_n_iter", 30),
         show_progress=_show_progress(args),
     )
 
     base_dir = Path(result["model_dir"])
-    lr_result = result.get("lr")
-    xgb_result = result.get("xgb")
+    xgb_result = result["xgb"]
+    metrics = xgb_result.get("metrics", {}) or {}
+    best = xgb_result.get("best_params") or {}
 
     print()
     print("Training complete.")
-    if lr_result:
-        print(f"  LR  -> {lr_result['model_dir']}")
-    if xgb_result:
-        print(f"  XGB -> {xgb_result['model_dir']}")
+    print(f"  XGB -> {xgb_result['model_dir']}")
+    print()
+    print("=== DJ Taxonomy Model (XGB) ===")
+    print(
+        f"Train/test split: 80/20, {result.get('examples_total', 0)} examples, "
+        f"{xgb_result.get('classes', 0)} categories"
+    )
+    print("Feature mode: external (internal + provider + audio + priors)")
+    print()
+    print(f"  top-1 accuracy   {metrics.get('top1_accuracy', 0.0):.1%}")
+    print(f"  top-3 accuracy   {metrics.get('top3_accuracy', 0.0):.1%}")
+    print(f"  macro F1         {metrics.get('macro_f1', 0.0):.3f}")
+    print(f"  weighted F1      {metrics.get('weighted_f1', 0.0):.3f}")
+    print(f"  avg confidence   {metrics.get('average_confidence', 0.0):.2f}")
+    print(f"  fit time         {metrics.get('fit_time_seconds', 0.0):.1f}s")
+    print()
+    print("Spec 9.4 gate pass/fail")
+    for label, key, threshold in (
+        ("top-1 >= 50%", "top1_accuracy", 0.50),
+        ("top-3 >= 75%", "top3_accuracy", 0.75),
+        ("macro F1 >= 0.30", "macro_f1", 0.30),
+    ):
+        mark = "PASS" if metrics.get(key, 0.0) >= threshold else "FAIL"
+        print(f"  {label:18s} {mark}")
 
-    # Comparison report when both were trained
-    if model_type == "both":
-        from .taxonomy.dj_model import run_library_distribution_check
-        from .taxonomy.dj_model_comparison import format_full_report
-
-        # Library distribution checks for each model variant
-        lr_check = None
-        xgb_check = None
-        try:
-            lr_check = _distribution_check_with_subdir(store, base_dir / "lr", args)
-        except Exception as exc:
-            print(f"  (LR library distribution check failed: {exc})")
-        try:
-            xgb_check = _distribution_check_with_subdir(store, base_dir / "xgb", args)
-        except Exception as exc:
-            print(f"  (XGB library distribution check failed: {exc})")
-
-        examples_total = result.get("examples_total")
-        classes = lr_result.get("classes") if lr_result else (xgb_result.get("classes") if xgb_result else None)
+    # Library distribution check
+    try:
+        check = run_library_distribution_check(
+            store,
+            model_dir=str(base_dir),
+            taxonomy_path=getattr(args, "taxonomy", None),
+            show_progress=_show_progress(args),
+        )
+        cap = check.get("max_bucket_share", 0.20)
+        mark = "PASS" if check.get("passes_cap") else "FAIL"
         print()
-        print(format_full_report(
-            lr_result, xgb_result,
-            lr_check=lr_check, xgb_check=xgb_check,
-            examples_total=examples_total, classes=classes,
-        ))
-        print()
-        if "comparison_path" in result:
-            print(f"Comparison JSON -> {result['comparison_path']}")
+        print(f"Library bucket distribution (largest of {xgb_result.get('classes', 0)})")
+        print(
+            f"  {check.get('largest_bucket_id', '-')} "
+            f"({check.get('largest_bucket_share', 0.0):.1%})  "
+            f"<= {cap:.0%} cap {mark}"
+        )
+    except Exception as exc:
+        print(f"  (library distribution check failed: {exc})")
 
+    if best:
+        print()
+        print("Best XGB hyperparameters")
+        parts: list[str] = []
+        for k in (
+            "n_estimators", "max_depth", "learning_rate",
+            "subsample", "colsample_bytree", "min_child_weight",
+            "gamma", "reg_alpha", "reg_lambda",
+        ):
+            if k in best:
+                val = best[k]
+                parts.append(f"{k}={val:.3g}" if isinstance(val, float) else f"{k}={val}")
+        for i in range(0, len(parts), 3):
+            print("  " + "  ".join(parts[i:i + 3]))
     return 0
 
 
-def _distribution_check_with_subdir(store: CsvStore, model_dir: Path, args: argparse.Namespace) -> dict:
-    """Helper: run run_library_distribution_check by pretending the per-variant
-    dir (lr/ or xgb/) is a 'mode' subdir under the base model dir.
-
-    run_library_distribution_check expects a base dir containing internal/ or
-    external/ subdirs; for unified models the subdir IS the model dir, so we
-    point it at the parent and let load_dj_taxonomy_model_if_available fall
-    through to the available mode.
-    """
-    from .taxonomy.dj_model import run_library_distribution_check
-    # The unified model lives at model_dir/model.pkl; run_library_distribution_check
-    # expects model_dir/{internal,external}/model.pkl. We restructure by passing
-    # the model_dir's parent and letting it fall through.
-    # Simpler: temporarily load the model directly here for the check.
-    from .taxonomy.dj_model import (
-        load_dj_taxonomy_model_if_available,
-        UNCLASSIFIED_ID,
-        UNCLASSIFIED_THRESHOLD,
-    )
-    from .taxonomy.dj_schema import load_dj_taxonomy
-
-    taxonomy = load_dj_taxonomy(getattr(args, "taxonomy", None))
-    # Try LR loader first; if model is XGB, use the XGB loader.
-    model = load_dj_taxonomy_model_if_available(model_dir, taxonomy_path=getattr(args, "taxonomy", None))
-    if model is None:
-        from .taxonomy.dj_model_xgb import load_xgb_model
-        model = load_xgb_model(model_dir, taxonomy_path=getattr(args, "taxonomy", None))
-    if model is None:
-        raise FileNotFoundError(f"No model found at {model_dir}")
-
-    tracks = store.load_tracks()
-    files = store.load_files()
-    observations = store.load_observations()
-    file_by_track = {f.track_id: f for f in files if f.track_id and f.is_primary_file}
-    obs_by_track: dict[str, list] = {}
-    for obs in observations:
-        if obs.track_id:
-            obs_by_track.setdefault(obs.track_id, []).append(obs)
-
-    from .taxonomy.dj_model import _resolve_cache
-    ucache = _resolve_cache()
-    counts: dict[str, int] = {}
-    for track in tracks:
-        track_obs = obs_by_track.get(track.track_id, [])
-        file_record = file_by_track.get(track.track_id)
-        prediction = model.predict(track, track_obs, file_record, taxonomy, ucache=ucache)
-        if prediction.category_id and prediction.confidence < UNCLASSIFIED_THRESHOLD:
-            cat_id = UNCLASSIFIED_ID
-        else:
-            cat_id = prediction.category_id or UNCLASSIFIED_ID
-        counts[cat_id] = counts.get(cat_id, 0) + 1
-
-    total = max(1, len(tracks))
-    largest_id = max(counts, key=counts.get) if counts else ""
-    largest_count = counts.get(largest_id, 0)
-    largest_share = largest_count / total
-    return {
-        "total_tracks": len(tracks),
-        "predictions": counts,
-        "largest_bucket_id": largest_id,
-        "largest_bucket_share": round(largest_share, 4),
-        "passes_cap": largest_share <= 0.20,
-        "max_bucket_share": 0.20,
-    }
-
-
 def _cmd_dj_taxonomy_report(args: argparse.Namespace, store: CsvStore) -> int:
-    """Pretty-print training metrics, model comparison, and (optionally) library distribution."""
+    """Pretty-print the XGB training report + live library bucket distribution."""
     model_dir = Path(getattr(args, "model_dir", None) or Path(store.output_dir) / "dj_taxonomy_model")
     if not model_dir.exists():
-        print(f"No trained models found at {model_dir}.")
+        print(f"No trained model found at {model_dir}.")
         print("Run `dj-registry dj-taxonomy train-models --labels <ground-truth.csv>` first.")
         return 1
 
@@ -527,62 +461,41 @@ def _cmd_dj_taxonomy_report(args: argparse.Namespace, store: CsvStore) -> int:
     print(f"Model dir: {model_dir}")
     print()
 
-    # 1. Per-mode training metrics
-    print("── Training metrics (per mode, on held-out validation) ─────────")
-    metrics_by_mode: dict[str, dict] = {}
-    for mode in ("internal", "external"):
-        report_path = model_dir / mode / "training_report.json"
-        if not report_path.exists():
-            print(f"  {mode}: report not found ({report_path})")
-            continue
+    report_path = model_dir / "xgb" / "training_report.json"
+    metrics: dict = {}
+    if report_path.exists():
         with report_path.open("r", encoding="utf-8") as f:
             report = json.load(f)
-        metrics = report.get("metrics", {})
-        metrics_by_mode[mode] = metrics
-        validation_kind = metrics.get("validation_kind", "?")
-        validation_n = metrics.get("validation_examples", "?")
-        top1 = metrics.get("top1_accuracy", 0.0)
-        top3 = metrics.get("top3_accuracy", 0.0)
-        mf1 = metrics.get("macro_f1", 0.0)
-        wf1 = metrics.get("weighted_f1", 0.0)
-        conf = metrics.get("average_confidence", 0.0)
+        metrics = report.get("metrics", {}) or {}
         examples = report.get("examples", "?")
         classes = report.get("classes", "?")
-        print(f"  {mode:9s}  examples={examples}  classes={classes}  validation={validation_kind} ({validation_n})")
-        print(f"             top-1={top1:.1%}   top-3={top3:.1%}   macro-F1={mf1:.3f}   weighted-F1={wf1:.3f}   avg-conf={conf:.2f}")
-        warnings = report.get("warnings", [])
-        for warning in warnings:
-            print(f"             ! {warning}")
+        validation_kind = metrics.get("validation_kind", "?")
+        validation_n = metrics.get("validation_examples", "?")
+        print("── Training metrics (held-out validation) ───────────────────────")
+        print(f"  xgb  examples={examples}  classes={classes}  validation={validation_kind} ({validation_n})")
+        print(
+            f"       top-1={metrics.get('top1_accuracy', 0.0):.1%}   "
+            f"top-3={metrics.get('top3_accuracy', 0.0):.1%}   "
+            f"macro-F1={metrics.get('macro_f1', 0.0):.3f}   "
+            f"weighted-F1={metrics.get('weighted_f1', 0.0):.3f}   "
+            f"avg-conf={metrics.get('average_confidence', 0.0):.2f}"
+        )
+        for warning in report.get("warnings", []) or []:
+            print(f"       ! {warning}")
+    else:
+        print(f"  xgb: report not found ({report_path})")
     print()
 
-    # 2. §9.4 gate check
     print("── §9.4 gates ──────────────────────────────────────────────────")
-    gates = (
+    for label, key, threshold, fmt in (
         ("top-1 ≥ 50%", "top1_accuracy", 0.50, lambda v: f"{v:.1%}"),
         ("top-3 ≥ 75%", "top3_accuracy", 0.75, lambda v: f"{v:.1%}"),
         ("macro F1 ≥ 0.30", "macro_f1", 0.30, lambda v: f"{v:.3f}"),
-    )
-    for label, key, threshold, fmt in gates:
-        cells = []
-        for mode in ("internal", "external"):
-            value = metrics_by_mode.get(mode, {}).get(key, 0.0)
-            mark = "✓" if value >= threshold else "✗"
-            cells.append(f"{mode}={mark} {fmt(value)}")
-        print(f"  {label:18s} {' | '.join(cells)}")
+    ):
+        value = metrics.get(key, 0.0)
+        mark = "✓" if value >= threshold else "✗"
+        print(f"  {label:18s} {mark} {fmt(value)}")
     print()
-
-    # 3. Cross-model comparison
-    comparison_path = model_dir / "model_comparison.json"
-    if comparison_path.exists():
-        with comparison_path.open("r", encoding="utf-8") as f:
-            comparison = json.load(f)
-        print("── Cross-model comparison ──────────────────────────────────────")
-        print(f"  Examples evaluated: {comparison.get('examples', 0)}")
-        agreement = comparison.get("agreement_rate", 0.0)
-        print(f"  Agreement rate:     {agreement:.1%}")
-        print(f"  External wins:      {comparison.get('external_improved', 0)} (correct where internal wrong)")
-        print(f"  Internal wins:      {comparison.get('external_worsened', 0)} (correct where external wrong)")
-        print()
 
     # 4. Live library distribution (if a model is present)
     print("── Library bucket distribution (current `dj run` predictions) ──")
@@ -812,16 +725,9 @@ def main(argv: list[str] | None = None) -> int:
     p_dj_tax_gt.add_argument("--output", default="./outputs/registry")
     add_no_progress(p_dj_tax_gt)
 
-    p_dj_tax_train = dj_tax_sub.add_parser("train-models", help="Train DJ taxonomy models (LR and/or XGB)")
+    p_dj_tax_train = dj_tax_sub.add_parser("train-models", help="Train the XGB DJ taxonomy classifier")
     p_dj_tax_train.add_argument("paths", nargs="*", help="Library paths (auto-derives --output)")
     p_dj_tax_train.add_argument("--labels", required=True, help="DJ taxonomy ground-truth labels CSV")
-    p_dj_tax_train.add_argument(
-        "--model",
-        choices=["lr", "xgb", "both", "legacy-dual"],
-        default="lr",
-        help="lr / xgb / both — train one or both. legacy-dual = old internal+external LR pipeline (back-compat).",
-    )
-    p_dj_tax_train.add_argument("--tune-lr", action="store_true", help="Enable RandomizedSearchCV hyperparameter tuning for LR")
     p_dj_tax_train.add_argument("--xgb-n-iter", type=int, default=30, help="RandomizedSearchCV iterations for XGB (default 30)")
     p_dj_tax_train.add_argument("--taxonomy", default=None, help="Optional dj_taxonomy.json path")
     p_dj_tax_train.add_argument("--model-dir", default=None, help="Output model directory (default: <output>/dj_taxonomy_model)")

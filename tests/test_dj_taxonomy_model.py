@@ -13,7 +13,7 @@ from dj_registry.taxonomy.dj_ground_truth import (
 from dj_registry.taxonomy.dj_model import (
     classify_all_dj_taxonomies,
     evaluate_dj_taxonomy_models,
-    load_dj_taxonomy_model,
+    load_dj_taxonomy_model_if_available,
     train_dj_taxonomy_models,
 )
 from dj_registry.taxonomy.dj_schema import compact_category_label, load_dj_taxonomy
@@ -65,11 +65,17 @@ def test_internal_feature_mode_excludes_provider_evidence():
     assert any("songstats:danceability" in key for key in external)
 
 
-def test_train_evaluate_and_classify_both_dj_taxonomy_models(tmp_path):
+def test_train_evaluate_and_classify_xgb_dj_taxonomy_model(tmp_path):
     store = _sample_store(tmp_path)
     labels_path = _write_dj_labels(tmp_path)
 
-    result = train_dj_taxonomy_models(store, str(labels_path), model_dir=str(tmp_path / "dj_model"))
+    result = train_dj_taxonomy_models(
+        store,
+        str(labels_path),
+        model_dir=str(tmp_path / "dj_model"),
+        validation_split=0,  # 4 rows × 4 classes — skip stratified holdout
+        xgb_n_iter=0,
+    )
     metrics = evaluate_dj_taxonomy_models(
         store,
         str(labels_path),
@@ -77,39 +83,33 @@ def test_train_evaluate_and_classify_both_dj_taxonomy_models(tmp_path):
     )
     count = classify_all_dj_taxonomies(store, model_dir=str(tmp_path / "dj_model"))
 
-    internal_model = load_dj_taxonomy_model(tmp_path / "dj_model" / "internal")
-    external_model = load_dj_taxonomy_model(tmp_path / "dj_model" / "external")
+    model = load_dj_taxonomy_model_if_available(tmp_path / "dj_model")
     tracks = {track.track_id: track for track in store.load_tracks()}
 
-    assert result["internal"]["examples"] == 4
-    assert result["external"]["examples"] == 4
+    assert result["xgb"]["examples"] == 4
     assert metrics["examples"] == 4
-    assert internal_model.feature_mode == "internal"
-    assert external_model.feature_mode == "external"
+    assert model is not None
+    assert model.feature_mode == "external"
     assert count == 4
     assert tracks["T1"].dj_taxonomy_internal_id
     assert tracks["T1"].dj_taxonomy_external_id
+    # Both columns are now populated identically by the single XGB prediction.
+    assert tracks["T1"].dj_taxonomy_internal_id == tracks["T1"].dj_taxonomy_external_id
     assert tracks["T1"].dj_taxonomy_confidence > 0
-    assert tracks["T1"].dj_taxonomy_source_model == "external"
+    assert tracks["T1"].dj_taxonomy_source_model == "xgb"
     assert json.loads(tracks["T1"].dj_taxonomy_evidence)["internal"]
 
 
-def test_classify_can_use_internal_model_as_primary(tmp_path):
+def test_dj_taxonomy_overview_exports_dual_columns_from_xgb(tmp_path):
     store = _sample_store(tmp_path)
     labels_path = _write_dj_labels(tmp_path)
-
-    train_dj_taxonomy_models(store, str(labels_path), model_dir=str(tmp_path / "dj_model"))
-    classify_all_dj_taxonomies(store, model_dir=str(tmp_path / "dj_model"), primary_model="internal")
-
-    tracks = {track.track_id: track for track in store.load_tracks()}
-    assert tracks["T1"].dj_taxonomy_source_model == "internal"
-    assert tracks["T1"].dj_taxonomy_id == tracks["T1"].dj_taxonomy_internal_id
-
-
-def test_dj_taxonomy_overview_exports_dual_model_columns(tmp_path):
-    store = _sample_store(tmp_path)
-    labels_path = _write_dj_labels(tmp_path)
-    train_dj_taxonomy_models(store, str(labels_path), model_dir=str(tmp_path / "dj_model"))
+    train_dj_taxonomy_models(
+        store,
+        str(labels_path),
+        model_dir=str(tmp_path / "dj_model"),
+        validation_split=0,
+        xgb_n_iter=0,
+    )
     classify_all_dj_taxonomies(store, model_dir=str(tmp_path / "dj_model"))
 
     overview = generate_overview(store, str(tmp_path / "registry"))
@@ -119,6 +119,8 @@ def test_dj_taxonomy_overview_exports_dual_model_columns(tmp_path):
     assert rows[0]["dj_taxonomy_id"]
     assert rows[0]["dj_taxonomy_internal_confidence"]
     assert rows[0]["dj_taxonomy_external_confidence"]
+    # Both columns are populated from the single XGB prediction.
+    assert rows[0]["dj_taxonomy_internal_id"] == rows[0]["dj_taxonomy_external_id"]
 
 
 def test_generate_dj_ground_truth_csv_with_mocked_client(tmp_path):
@@ -219,7 +221,7 @@ def test_generate_dj_ground_truth_legacy_files_out_redirects_to_registry_output(
     assert (tmp_path / "dj_taxonomy_ground_truth.csv").exists()
 
 
-def test_dj_taxonomy_cli_train_models_prints_locations_only(tmp_path, capsys):
+def test_dj_taxonomy_cli_train_models_runs_xgb(tmp_path, capsys):
     store = _sample_store(tmp_path)
     labels_path = _write_dj_labels(tmp_path)
 
@@ -232,23 +234,21 @@ def test_dj_taxonomy_cli_train_models_prints_locations_only(tmp_path, capsys):
             model_dir=str(tmp_path / "dj_model"),
             validation_split=0,
             seed=42,
+            xgb_n_iter=0,
             quiet=False,
             no_progress=True,
-            model="legacy-dual",
         )
     )
 
     assert rc == 0
-    assert (tmp_path / "dj_model" / "internal" / "model.pkl").exists()
-    assert (tmp_path / "dj_model" / "external" / "model.pkl").exists()
+    assert (tmp_path / "dj_model" / "xgb" / "model.pkl").exists()
+    assert (tmp_path / "dj_model" / "xgb" / "training_report.json").exists()
     output = capsys.readouterr().out
-    assert "DJ taxonomy models trained" in output
-    assert "model_comparison.json" in output
-    assert '"comparison"' not in output
-    assert '"metrics"' not in output
+    assert "DJ Taxonomy Model (XGB)" in output
+    assert "top-1 accuracy" in output
 
 
-def test_dj_taxonomy_cli_evaluate_prints_locations_only(tmp_path, capsys):
+def test_dj_taxonomy_cli_evaluate_prints_summary(tmp_path, capsys):
     store = _sample_store(tmp_path)
     labels_path = _write_dj_labels(tmp_path)
     cmd_dj_taxonomy(
@@ -260,9 +260,9 @@ def test_dj_taxonomy_cli_evaluate_prints_locations_only(tmp_path, capsys):
             model_dir=str(tmp_path / "dj_model"),
             validation_split=0,
             seed=42,
+            xgb_n_iter=0,
             quiet=False,
             no_progress=True,
-            model="legacy-dual",
         )
     )
     capsys.readouterr()
@@ -282,9 +282,7 @@ def test_dj_taxonomy_cli_evaluate_prints_locations_only(tmp_path, capsys):
     output = capsys.readouterr().out
     assert rc == 0
     assert "DJ taxonomy evaluation complete" in output
-    assert "model_comparison.json" in output
-    assert '"internal"' not in output
-    assert '"external"' not in output
+    assert "top-1" in output
 
 
 def test_dj_api_connection_success_with_fake_client():

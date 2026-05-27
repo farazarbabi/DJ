@@ -173,66 +173,20 @@ def test_clap_features_skip_zero_norm_vectors():
 # ── Demucs vocal_stem wiring ───────────────────────────────────────────────
 
 
-def test_vocal_stem_features_emit_four_scalars_when_cached():
+def test_vocal_stem_features_emit_dominance_when_cached():
+    """Phase-2 ablation pruned the stem block to dominance ratios + vocal activity.
+
+    The 40-key per-stem schema dragged macro-F1 by ~0.056 in the 309 ex / 34
+    class regime — too many noisy continuous dims. Only the 5 highest-signal
+    summaries survive.
+    """
     track, fr = _track_and_file()
     cache = _FakeCache({
         ("track.mp3", "vocal_stem"): {
-            "vocal_stem_rms_db": -18.4,
-            "vocal_stem_mix_ratio_db": -4.2,
-            "vocal_stem_activity_frac": 0.62,
-            "vocal_stem_envelope_var": 2.31,
-            "vocal_stem_n_slices": 5,  # not a feature, just metadata
-        },
-    })
-    features = build_track_features(track, [], fr, ucache=cache)
-    assert features.get("num:vocal_stem:rms_db") == pytest.approx(-18.4)
-    assert features.get("num:vocal_stem:mix_ratio_db") == pytest.approx(-4.2)
-    assert features.get("num:vocal_stem:activity_frac") == pytest.approx(0.62)
-    assert features.get("num:vocal_stem:envelope_var") == pytest.approx(2.31)
-
-
-def test_vocal_stem_features_absent_on_cache_miss():
-    track, fr = _track_and_file()
-    empty_cache = _FakeCache({})
-    features = build_track_features(track, [], fr, ucache=empty_cache)
-    assert not any(k.startswith("num:vocal_stem:") for k in features)
-
-
-def test_vocal_stem_features_skipped_in_internal_feature_mode():
-    track, fr = _track_and_file()
-    cache = _FakeCache({
-        ("track.mp3", "vocal_stem"): {"vocal_stem_rms_db": -18.4},
-    })
-    features = build_track_features(track, [], fr, feature_mode="internal", ucache=cache)
-    assert not any(k.startswith("num:vocal_stem:") for k in features)
-
-
-def test_full_stem_features_emitted_for_all_four_stems():
-    """The expanded analyzer caches per-stem metrics for drums/bass/other/vocals
-    plus dominance ratios. All of these should arrive as model features."""
-    track, fr = _track_and_file()
-    cache = _FakeCache({
-        ("track.mp3", "vocal_stem"): {
-            # Legacy keys (still emitted for tagger backward compat).
-            "vocal_stem_rms_db": -18.4,
-            "vocal_stem_mix_ratio_db": -4.2,
-            "vocal_stem_activity_frac": 0.62,
-            "vocal_stem_envelope_var": 2.31,
-            # Per-stem metrics (drums / bass / other / vocals).
-            "stem_drums_rms_db": -10.5,
-            "stem_drums_mix_ratio_db": -2.0,
-            "stem_drums_activity_frac": 0.95,
+            "vocal_stem_rms_db": -18.4,  # legacy keys now ignored
+            "stem_vocals_activity_frac": 0.62,
+            "stem_drums_rms_db": -10.5,  # extra per-stem metrics now ignored
             "stem_drums_centroid_hz": 2400.0,
-            "stem_drums_flatness": 0.18,
-            "stem_drums_onset_rate": 6.4,
-            "stem_drums_zcr": 0.14,
-            "stem_drums_envelope_var": 0.0005,
-            "stem_bass_rms_db": -14.0,
-            "stem_bass_centroid_hz": 110.0,
-            "stem_other_rms_db": -16.0,
-            "stem_other_centroid_hz": 1800.0,
-            "stem_vocals_centroid_hz": 1400.0,
-            # Dominance ratios.
             "dominance_drums": 0.42,
             "dominance_bass": 0.27,
             "dominance_other": 0.21,
@@ -241,29 +195,39 @@ def test_full_stem_features_emitted_for_all_four_stems():
     })
     features = build_track_features(track, [], fr, ucache=cache)
 
-    # Per-stem metrics arrive under num:stem:<name>:<metric>
-    assert features.get("num:stem:drums:rms_db") == pytest.approx(-10.5)
-    assert features.get("num:stem:drums:centroid_hz") == pytest.approx(2400.0)
-    assert features.get("num:stem:drums:onset_rate") == pytest.approx(6.4)
-    assert features.get("num:stem:drums:envelope_var") == pytest.approx(0.0005)
-    assert features.get("num:stem:bass:rms_db") == pytest.approx(-14.0)
-    assert features.get("num:stem:bass:centroid_hz") == pytest.approx(110.0)
-    assert features.get("num:stem:other:rms_db") == pytest.approx(-16.0)
-    assert features.get("num:stem:vocals:centroid_hz") == pytest.approx(1400.0)
-
-    # Dominance ratios arrive under num:dominance:<name>
     assert features.get("num:dominance:drums") == pytest.approx(0.42)
     assert features.get("num:dominance:bass") == pytest.approx(0.27)
     assert features.get("num:dominance:other") == pytest.approx(0.21)
     assert features.get("num:dominance:vocals") == pytest.approx(0.10)
+    assert features.get("num:stem:vocals:activity_frac") == pytest.approx(0.62)
+    # Other per-stem and legacy keys must NOT be emitted any longer.
+    assert "num:stem:drums:rms_db" not in features
+    assert "num:stem:drums:centroid_hz" not in features
+    assert "num:vocal_stem:rms_db" not in features
 
-    # Legacy vocals-only metrics are still emitted (backward compat).
-    assert features.get("num:vocal_stem:rms_db") == pytest.approx(-18.4)
+
+def test_vocal_stem_features_absent_on_cache_miss():
+    track, fr = _track_and_file()
+    empty_cache = _FakeCache({})
+    features = build_track_features(track, [], fr, ucache=empty_cache)
+    assert not any(k.startswith("num:dominance:") for k in features)
+    assert not any(k.startswith("num:stem:") for k in features)
 
 
-def test_legacy_only_vocal_stem_payload_still_works():
-    """A cache entry written by the old analyzer (only vocal_stem_* keys) must
-    not produce errors and must populate the legacy feature names."""
+def test_vocal_stem_features_skipped_in_internal_feature_mode():
+    track, fr = _track_and_file()
+    cache = _FakeCache({
+        ("track.mp3", "vocal_stem"): {"dominance_drums": 0.4, "stem_vocals_activity_frac": 0.5},
+    })
+    features = build_track_features(track, [], fr, feature_mode="internal", ucache=cache)
+    assert not any(k.startswith("num:dominance:") for k in features)
+    assert not any(k.startswith("num:stem:") for k in features)
+
+
+def test_legacy_only_vocal_stem_payload_emits_nothing():
+    """A cache entry with only the old vocals-only schema should produce no
+    stem features (Phase 2 dropped legacy keys to avoid noise; tracks need
+    the full per-stem schema for the 5-feature summary)."""
     track, fr = _track_and_file()
     cache = _FakeCache({
         ("track.mp3", "vocal_stem"): {
@@ -274,6 +238,6 @@ def test_legacy_only_vocal_stem_payload_still_works():
         },
     })
     features = build_track_features(track, [], fr, ucache=cache)
-    assert features.get("num:vocal_stem:rms_db") == pytest.approx(-18.4)
+    assert not any(k.startswith("num:vocal_stem:") for k in features)
     assert not any(k.startswith("num:stem:") for k in features)
     assert not any(k.startswith("num:dominance:") for k in features)

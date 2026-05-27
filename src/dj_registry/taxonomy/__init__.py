@@ -14,7 +14,7 @@ from .dj_ground_truth import generate_dj_ground_truth_csv
 from .dj_model import (
     classify_all_dj_taxonomies,
     evaluate_dj_taxonomy_models,
-    load_dj_taxonomy_model,
+    load_dj_taxonomy_model_if_available,
     train_dj_taxonomy_models,
 )
 from .dj_schema import DjTaxonomy, DjTaxonomyCategory, load_dj_taxonomy
@@ -35,7 +35,7 @@ __all__ = [
     "generate_dj_ground_truth_csv",
     "generate_ground_truth_csv",
     "load_dj_taxonomy",
-    "load_dj_taxonomy_model",
+    "load_dj_taxonomy_model_if_available",
     "load_taxonomy",
     "load_taxonomy_model",
     "train_dj_taxonomy_models",

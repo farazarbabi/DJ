@@ -366,20 +366,18 @@ def _add_vocal_stem_features(
     ucache: Any,
     cache_key: tuple[str, float | None],
 ) -> None:
-    """Emit Demucs per-stem scalars as model features.
+    """Emit a tight 5-key summary from the Demucs per-stem cache.
 
-    Three families of keys (all read from the ``vocal_stem`` cache layer):
-      - ``num:vocal_stem:<field>``  — legacy vocals-only metrics (RMS, mix
-        ratio, activity, envelope_var). Kept so older models keep working.
-      - ``num:stem:<name>:<metric>`` — per-stem metrics for drums / bass /
-        other / vocals (rms_db, mix_ratio_db, activity_frac, centroid_hz,
-        flatness, onset_rate, zcr, envelope_var).
-      - ``num:dominance:<name>``    — fraction of total stem energy by stem.
+    Phase-1 ablation (scripts/ablate_feature_blocks.py) showed that emitting
+    all 40 stem keys was dragging macro-F1 by ~0.056 in the 309 ex / 34 class
+    regime — too many noisy continuous dims, not enough examples per class.
 
-    The non-vocals stems are typically the strongest single signal for
-    subgenre: drum dominance separates tribal/afro from melodic; bass
-    centroid + flatness separates amapiano log drums from straight 4/4;
-    other-stem onset density separates minimal tools from melodic builders.
+    Keep only the highest-signal scalars:
+      - ``num:dominance:{drums, bass, other, vocals}`` — fraction of total
+        energy per stem. Discriminates tribal/afro (drum-heavy) from melodic
+        (other/bass-heavy) and tools (no vocals) from vocal-house.
+      - ``num:stem:vocals:activity_frac`` — single best single-feature proxy
+        for "track has a real vocal" vs sample/chant/instrumental.
     """
     filename, duration = cache_key
     try:
@@ -389,34 +387,15 @@ def _add_vocal_stem_features(
     if not isinstance(data, dict):
         return
 
-    # Legacy vocals metrics (cache schema v1).
-    for name in (
-        "vocal_stem_rms_db",
-        "vocal_stem_mix_ratio_db",
-        "vocal_stem_activity_frac",
-        "vocal_stem_envelope_var",
-    ):
-        value = _num(data.get(name))
-        if value is not None:
-            features[f"num:vocal_stem:{name.removeprefix('vocal_stem_')}"] = value
-
-    # Per-stem metrics (cache schema v2 — additive, optional).
     for key, value in data.items():
-        if key.startswith("stem_"):
-            num = _num(value)
-            if num is None:
-                continue
-            # key is "stem_<name>_<metric...>"; split on first two underscores.
-            remainder = key[len("stem_"):]
-            try:
-                stem_name, metric = remainder.split("_", 1)
-            except ValueError:
-                continue
-            features[f"num:stem:{stem_name}:{metric}"] = num
-        elif key.startswith("dominance_"):
+        if key.startswith("dominance_"):
             num = _num(value)
             if num is not None:
                 features[f"num:dominance:{key.removeprefix('dominance_')}"] = num
+        elif key == "stem_vocals_activity_frac":
+            num = _num(value)
+            if num is not None:
+                features["num:stem:vocals:activity_frac"] = num
 
 
 def _add_mix_name_features(

@@ -1,10 +1,9 @@
 """XGBoost classifier with hyperparameter tuning for DJ taxonomy.
 
-Parallel to dj_model.py's LogisticRegression pipeline. Shares the same
-feature extraction (features.py:build_track_features in external mode),
-the same anti-collapse rule (features.is_eligible_for_afro_tribal), and
-the same DjCategoryPrediction output shape — so downstream consumers
-(tag writing, playlists, reports) work unchanged.
+Holds the only supervised model for the flat DJ taxonomy. Shares feature
+extraction (features.py:build_track_features in external mode), the
+anti-collapse rule (features.is_eligible_for_afro_tribal), and the
+DjCategoryPrediction output shape with the orchestrator in dj_model.py.
 
 Tuning: scikit-learn RandomizedSearchCV with stratified K-fold CV.
 n_iter and random_state are configurable; default n_iter=30, seed=42.
@@ -53,9 +52,77 @@ XGB_MODEL_VERSION = "dj-taxonomy-xgb-v1"
 MODEL_FILENAME = "model.pkl"
 
 
+_CLAP_DIMS = 512
+
+
+def _apply_clap_pca(features: dict[str, float], pca: Any) -> None:
+    """Replace `clap:d0..d511` keys in-place with `clap_pca:d0..d{n-1}`.
+
+    Called at inference time inside ``XGBTaxonomyModel.predict``. No-op if
+    the feature dict has no CLAP keys (e.g., cache miss) or ``pca`` is None.
+    """
+    if pca is None:
+        return
+    import numpy as np
+
+    has_clap = any(k.startswith("clap:d") for k in features)
+    if not has_clap:
+        return
+    vec = np.zeros(_CLAP_DIMS, dtype=np.float32)
+    for i in range(_CLAP_DIMS):
+        key = f"clap:d{i}"
+        if key in features:
+            vec[i] = features.pop(key)
+    transformed = pca.transform(vec.reshape(1, -1))[0]
+    for i, value in enumerate(transformed):
+        features[f"clap_pca:d{i}"] = float(value)
+
+
+def _features_with_pca(features: dict[str, float], pca: Any) -> dict[str, float]:
+    """Return a shallow copy of ``features`` with CLAP dims replaced by their PCA.
+
+    Used at training time to feed the DictVectorizer without mutating the
+    canonical feature dict on the example record.
+    """
+    if pca is None:
+        return features
+    if not any(k.startswith("clap:d") for k in features):
+        return features
+    copy = dict(features)
+    _apply_clap_pca(copy, pca)
+    return copy
+
+
+def _fit_clap_pca(examples: list[dict[str, Any]], *, n_components: int, seed: int) -> Any | None:
+    """Fit PCA on the CLAP block of the given examples.
+
+    Returns the fitted PCA, or None when the examples don't have CLAP data
+    (cache miss) or there are too few samples to fit the requested components.
+    """
+    import numpy as np
+    from sklearn.decomposition import PCA
+
+    rows: list[np.ndarray] = []
+    for example in examples:
+        feats = example.get("features") or {}
+        if not any(k.startswith("clap:d") for k in feats):
+            continue
+        vec = np.zeros(_CLAP_DIMS, dtype=np.float32)
+        for i in range(_CLAP_DIMS):
+            vec[i] = float(feats.get(f"clap:d{i}", 0.0))
+        rows.append(vec)
+    if len(rows) < 2:
+        return None
+    matrix = np.stack(rows, axis=0)
+    safe_components = max(1, min(n_components, matrix.shape[0] - 1, matrix.shape[1]))
+    pca = PCA(n_components=safe_components, random_state=seed)
+    pca.fit(matrix)
+    return pca
+
+
 @dataclass
 class XGBTaxonomyModel:
-    """XGBoost classifier wrapped to match the DjTaxonomyModel.predict() contract."""
+    """XGBoost classifier wrapped to match the DJ taxonomy predict() contract."""
 
     vectorizer: DictVectorizer
     label_encoder: LabelEncoder
@@ -68,6 +135,7 @@ class XGBTaxonomyModel:
     labels_hash: str
     examples: int
     best_params: dict[str, Any] = field(default_factory=dict)
+    clap_pca: Any | None = None
 
     def predict(
         self,
@@ -92,6 +160,7 @@ class XGBTaxonomyModel:
                 warnings=["No usable features for XGB taxonomy model."],
             )
 
+        _apply_clap_pca(features, self.clap_pca)
         x = self.vectorizer.transform([features])
         probabilities = self._probability_map(x)
         ranked = [
@@ -182,17 +251,22 @@ class XGBTaxonomyModel:
 
 
 def _xgb_search_space() -> dict[str, Any]:
-    """RandomizedSearchCV parameter distributions per spec §3 (XGBoost search)."""
+    """RandomizedSearchCV parameter distributions tuned for the small-data regime.
+
+    Tightened in Phase 2 after ablation showed the previous search picked
+    max_depth=6 / learning_rate=0.3 on 309 ex / 34 classes — depths that deep
+    memorize noise. Restrict to depth ≤ 4 and push L2 up.
+    """
     return {
-        "n_estimators": [100, 200, 400, 800],
-        "max_depth": [3, 5, 7, 10],
+        "n_estimators": [100, 200, 400],
+        "max_depth": [2, 3, 4],
         "learning_rate": loguniform(0.01, 0.3),
         "subsample": uniform(0.6, 0.4),  # uniform(loc, scale) → [0.6, 1.0]
         "colsample_bytree": uniform(0.5, 0.5),  # [0.5, 1.0]
-        "min_child_weight": [1, 3, 5, 10],
+        "min_child_weight": [3, 5, 10, 20],
         "gamma": [0.0, 0.1, 0.5, 1.0],
         "reg_alpha": [0.0, 0.01, 0.1, 1.0],
-        "reg_lambda": [0.1, 1.0, 10.0],
+        "reg_lambda": [1.0, 10.0, 100.0],
     }
 
 
@@ -205,12 +279,12 @@ def train_xgb_model(
     seed: int = 42,
     n_iter: int = 30,
     feature_mode: str = "external",
+    class_balancing: str = "balanced",
     show_progress: bool = False,
 ) -> tuple[XGBTaxonomyModel, dict[str, Any], list[str]]:
     """Train an XGBoost classifier with RandomizedSearchCV tuning.
 
-    Returns (model, metrics, warnings). metrics matches the LR pipeline's shape
-    so dj_model_comparison can consume both side-by-side.
+    Returns (model, metrics, warnings).
     """
     from .dj_model import _evaluate_examples, _file_hash, _split_examples
 
@@ -234,14 +308,27 @@ def train_xgb_model(
             warnings.append("Validation split produced no holdout rows; metrics are in-sample.")
 
     fit_start = time.perf_counter()
+    # Fit PCA on the CLAP block of the TRAINING subset only (no val leakage).
+    # Phase-1 ablation showed full 512 CLAP dims hurt by ~7pp top-1; compressing
+    # to 32 dims preserves the semantic signal while killing the noise.
+    clap_pca = _fit_clap_pca(train_examples, n_components=32, seed=seed)
+
     # Build features matrix
     vectorizer = DictVectorizer(sparse=True)
-    x_train = vectorizer.fit_transform([example["features"] for example in train_examples])
+    x_train = vectorizer.fit_transform(
+        [_features_with_pca(ex["features"], clap_pca) for ex in train_examples]
+    )
     label_encoder = LabelEncoder()
     y_train = label_encoder.fit_transform([example["category_id"] for example in train_examples])
 
-    # Compute sample weights (class_weight='balanced' equivalent for XGB)
-    sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+    # Compute sample weights. "balanced" upweights minority classes proportionally;
+    # "none" disables weighting (helpful when long-tail noise amplification hurts).
+    if class_balancing == "balanced":
+        sample_weight = compute_sample_weight(class_weight="balanced", y=y_train)
+    elif class_balancing == "none":
+        sample_weight = None
+    else:
+        raise ValueError(f"class_balancing must be 'balanced' or 'none', got {class_balancing!r}")
 
     n_classes = len(label_encoder.classes_)
     base_clf = XGBClassifier(
@@ -282,14 +369,32 @@ def train_xgb_model(
         }
         logger.info("XGB best params: %s (best CV f1_macro=%.3f)", best_params, search.best_score_)
     else:
-        # Tuning skipped — train a single sensible default
+        # Tuning skipped — train with conservative defaults matching the
+        # tightened search space (shallow trees, more L2). At 9 ex/class
+        # median the previous max_depth=6 default memorized noise; keep it
+        # to depth 3 here too.
         warnings.append(
             f"XGB hyperparameter tuning skipped (n_iter={n_iter}, cv_folds={cv_folds}, "
-            f"min_examples_per_class={min_per_class}); using default params."
+            f"min_examples_per_class={min_per_class}); using small-data defaults."
         )
-        classifier = base_clf
+        best_params = {
+            "n_estimators": 200,
+            "max_depth": 3,
+            "learning_rate": 0.1,
+            "min_child_weight": 5,
+            "reg_lambda": 10.0,
+        }
+        classifier = XGBClassifier(
+            objective="multi:softprob" if n_classes > 2 else "binary:logistic",
+            num_class=n_classes if n_classes > 2 else None,
+            tree_method="hist",
+            eval_metric="mlogloss" if n_classes > 2 else "logloss",
+            n_jobs=-1,
+            random_state=seed,
+            verbosity=0,
+            **best_params,
+        )
         classifier.fit(x_train, y_train, sample_weight=sample_weight)
-        best_params = {"n_estimators": 100, "max_depth": 6, "learning_rate": 0.3}
 
     fit_time = time.perf_counter() - fit_start
 
@@ -305,6 +410,7 @@ def train_xgb_model(
         labels_hash=_file_hash(Path(labels_path)),
         examples=len(examples),
         best_params=best_params,
+        clap_pca=clap_pca,
     )
 
     # Evaluate on the validation set (or in-sample if dataset too small)
@@ -316,11 +422,19 @@ def train_xgb_model(
     metrics["model_version"] = XGB_MODEL_VERSION
     metrics["model_type"] = "xgb"
 
-    # Refit on ALL examples for the final shipped model
-    x_all = vectorizer.fit_transform([example["features"] for example in examples])
+    # Refit on ALL examples for the final shipped model. Re-fit PCA on the
+    # full set too so the shipped model uses the best CLAP basis available.
+    final_clap_pca = _fit_clap_pca(examples, n_components=32, seed=seed)
+    x_all = vectorizer.fit_transform(
+        [_features_with_pca(ex["features"], final_clap_pca) for ex in examples]
+    )
     y_all = label_encoder.fit_transform([example["category_id"] for example in examples])
-    final_sample_weight = compute_sample_weight(class_weight="balanced", y=y_all)
+    final_sample_weight = (
+        compute_sample_weight(class_weight="balanced", y=y_all)
+        if class_balancing == "balanced" else None
+    )
     classifier.fit(x_all, y_all, sample_weight=final_sample_weight)
+    model.clap_pca = final_clap_pca
     model.vectorizer = vectorizer
     model.label_encoder = label_encoder
     model.classifier = classifier
