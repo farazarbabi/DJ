@@ -260,7 +260,7 @@ def test_paax_style_can_still_be_tribal_organic_when_llm_obeys(tmp_path):
     client = _FakeClient(response={
         "category_id": "spiritual_afro_chant",
         "confidence": 0.78,
-        "alternate_category_ids": ["ritual_chant_house", "desert_organic_house"],
+        "alternate_category_ids": ["ritual_chant_house", "burner_desert_house"],
         "rationale": (
             "Arrangement is dominated by organic/ceremonial percussion with Mayan/Tulum "
             "context. Strong tribal-percussion evidence is STRUCTURALLY CENTRAL. "

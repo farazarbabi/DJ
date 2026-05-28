@@ -23,10 +23,12 @@ from dj_registry.taxonomy.features import build_track_features
 def test_dj_taxonomy_schema_loads_flat_categories():
     taxonomy = load_dj_taxonomy()
 
-    assert taxonomy.validate_category_id("dark_tech_house_driver")
-    assert taxonomy.category("dark_tech_house_driver").label == "Dark Tech-House Driver"
-    assert taxonomy.category("dark_tech_house_driver").moods
-    assert taxonomy.category("dark_tech_house_driver").grooves
+    assert taxonomy.validate_category_id("percussive_tech_house")
+    assert taxonomy.category("percussive_tech_house").label == "Percussive Tech-House"
+    assert taxonomy.category("percussive_tech_house").moods
+    assert taxonomy.category("percussive_tech_house").grooves
+    assert not taxonomy.validate_category_id("dark_tech_house_driver")
+    assert taxonomy.resolve_category_id("dark_tech_house_driver") == "percussive_tech_house"
 
 
 def test_compact_category_label_uses_dot_separated_word_codes():
@@ -156,8 +158,8 @@ def test_generate_dj_ground_truth_csv_with_mocked_client(tmp_path):
     with out.open(newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert stats.generated == 1
-    assert rows[0]["category_id"] == "dark_tech_house_driver"
-    assert rows[0]["category_label"] == "Dark Tech-House Driver"
+    assert rows[0]["category_id"] == "percussive_tech_house"
+    assert rows[0]["category_label"] == "Percussive Tech-House"
     assert rows[0]["moods"]
     assert rows[0]["alternate_category_ids"] == "driving_dark_indie_tech"
 
@@ -221,6 +223,47 @@ def test_generate_dj_ground_truth_legacy_files_out_redirects_to_registry_output(
     assert (tmp_path / "dj_taxonomy_ground_truth.csv").exists()
 
 
+def test_generate_dj_ground_truth_reuses_rows_with_canonical_category_metadata(tmp_path):
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    (files_dir / "Dark Driver.mp3").write_bytes(b"")
+    store = CsvStore(str(tmp_path / "registry"))
+    out = tmp_path / "dj_taxonomy_ground_truth.csv"
+    with out.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["file_name", "category_id", "category_label", "alternate_category_ids", "label_source"],
+        )
+        writer.writeheader()
+        writer.writerow({
+            "file_name": "Dark Driver.mp3",
+            "category_id": "dark_tech_house_driver",
+            "category_label": "Dark Tech-House Driver",
+            "alternate_category_ids": "raw_warehouse_techno;vocal_hook_tech_house",
+            "label_source": "gpt5_seed",
+        })
+
+    class FakeClient:
+        model = "gpt-5"
+
+        def label_track(self, context, taxonomy_json, validation_error=None):
+            raise AssertionError("existing non-error row should be reused")
+
+    stats = generate_dj_ground_truth_csv(
+        store,
+        files_dir=str(files_dir),
+        output_path=str(out),
+        client=FakeClient(),
+        collect=False,
+    )
+
+    rows = list(csv.DictReader(out.open(newline="", encoding="utf-8")))
+    assert stats.reused == 1
+    assert rows[0]["category_id"] == "percussive_tech_house"
+    assert rows[0]["category_label"] == "Percussive Tech-House"
+    assert rows[0]["alternate_category_ids"] == "peak_time_techno;vocal_hook_tech_house"
+
+
 def test_dj_taxonomy_cli_train_models_runs_xgb(tmp_path, capsys):
     store = _sample_store(tmp_path)
     labels_path = _write_dj_labels(tmp_path)
@@ -246,6 +289,7 @@ def test_dj_taxonomy_cli_train_models_runs_xgb(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "DJ Taxonomy Model (XGB)" in output
     assert "top-1 accuracy" in output
+    assert "deprecated" not in output.lower()
 
 
 def test_dj_taxonomy_cli_evaluate_prints_summary(tmp_path, capsys):
@@ -416,6 +460,25 @@ def test_split_examples_avoids_same_artist_leakage():
     )
 
 
+def test_split_examples_avoids_singleton_train_classes():
+    """Group-aware splitting should fall back if it would block XGB CV."""
+    from collections import Counter
+
+    from dj_registry.taxonomy.dj_model import _split_examples
+
+    examples = (
+        [_make_example("a", artist="artist-a") for _ in range(3)]
+        + [_make_example("b", artist="artist-b") for _ in range(3)]
+        + [_make_example("c", artist="artist-c") for _ in range(3)]
+    )
+    train, val = _split_examples(examples, validation_split=0.33, seed=42)
+    train_counts = Counter(e["category_id"] for e in train)
+    val_counts = Counter(e["category_id"] for e in val)
+
+    assert min(train_counts.values()) >= 2
+    assert set(val_counts) == {"a", "b", "c"}
+
+
 def test_build_training_examples_drops_under_supported_categories(tmp_path):
     """Categories with fewer than MIN_EXAMPLES_PER_CATEGORY rows are dropped
     when the dataset is large enough; the dropped set is returned."""
@@ -427,9 +490,9 @@ def test_build_training_examples_drops_under_supported_categories(tmp_path):
     tracks = []
     files = []
     label_rows = []
-    cat_popular = "dark_tech_house_driver"
+    cat_popular = "percussive_tech_house"
     cat_under = "vocal_hook_tech_house"
-    cat_tiny = "raw_warehouse_techno"
+    cat_tiny = "peak_time_techno"
     # popular: 5
     for i in range(5):
         tid = f"T{i+1}"
@@ -486,6 +549,60 @@ def test_metrics_include_per_class_precision_recall_f1():
     # Class "b" has 1 true positive and 1 false positive → precision 0.5
     assert metrics["per_class"]["b"]["precision"] == pytest.approx(0.5)
     assert metrics["per_class"]["b"]["recall"] == pytest.approx(1.0)
+
+
+def test_load_label_rows_maps_safe_legacy_category_alias(tmp_path):
+    """Old CSVs should retain the organic chant rows after the v2.2 rename."""
+    from dj_registry.taxonomy.dj_model import _load_label_rows_with_diagnostics
+
+    labels_path = tmp_path / "labels.csv"
+    with labels_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["track_id", "category_id", "label_source"])
+        writer.writeheader()
+        writer.writerow({"track_id": "T1", "category_id": "organic_chant_house", "label_source": "gpt5"})
+        writer.writerow({"track_id": "T2", "category_id": "tribal_afro_driver", "label_source": "gpt5"})
+        writer.writerow({"track_id": "T3", "category_id": "", "label_source": "gpt5_error"})
+
+    rows, diagnostics = _load_label_rows_with_diagnostics(str(labels_path), load_dj_taxonomy())
+
+    assert [row["category_id"] for row in rows] == ["ritual_chant_house"]
+    assert diagnostics.alias_counts == {"organic_chant_house": 1}
+    assert diagnostics.alias_targets == {"organic_chant_house": "ritual_chant_house"}
+    assert diagnostics.invalid_category_counts == {"tribal_afro_driver": 1}
+    assert diagnostics.error_rows == 1
+    assert not any("deprecated" in warning.lower() for warning in diagnostics.warnings())
+
+
+def test_evaluate_examples_top3_is_exactly_three_predictions():
+    """The selected class plus two alternatives count as top-3, not top-4."""
+    from dj_registry.taxonomy.dj_model import DjCategoryPrediction, _evaluate_examples
+
+    taxonomy = load_dj_taxonomy()
+
+    class FakeModel:
+        feature_mode = "external"
+
+        def predict(self, track, observations, file_record, taxonomy, *, ucache=None):
+            return DjCategoryPrediction(
+                category_id="percussive_tech_house",
+                confidence=0.9,
+                alternatives=[
+                    {"category_id": "vocal_hook_tech_house", "label": "", "score": 0.8},
+                    {"category_id": "peak_time_techno", "label": "", "score": 0.7},
+                    {"category_id": "ritual_chant_house", "label": "", "score": 0.6},
+                ],
+                feature_mode="external",
+            )
+
+    metrics = _evaluate_examples(
+        FakeModel(),
+        [{"track": LogicalTrack(track_id="T1"), "category_id": "ritual_chant_house"}],
+        taxonomy,
+        ucache=None,
+    )
+
+    assert metrics["top1_accuracy"] == 0.0
+    assert metrics["top3_accuracy"] == 0.0
 
 
 def test_confidence_formula_uses_feature_group_count():

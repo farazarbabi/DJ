@@ -319,10 +319,12 @@ def generate_dj_ground_truth_csv(
         file_name = audio_path.name
         existing_row = existing.get(file_name)
         if not force and existing_row and not _is_error_row(existing_row):
-            rows.append(existing_row)
-            reused += 1
-            progress.update(index, f"reused {file_name}", new=generated, reused=reused, errors=errors)
-            continue
+            normalized_existing = _normalize_existing_row(existing_row, taxonomy)
+            if normalized_existing is not None:
+                rows.append(normalized_existing)
+                reused += 1
+                progress.update(index, f"reused {file_name}", new=generated, reused=reused, errors=errors)
+                continue
 
         file_record = file_by_name.get(file_name.lower())
         track = track_by_id.get(file_record.track_id) if file_record else None
@@ -428,12 +430,16 @@ def test_dj_api_connection(*, model: str | None = None, client: Any | None = Non
 
 def validate_dj_label(label: dict[str, Any], taxonomy: DjTaxonomy) -> str | None:
     category_id = str(label.get("category_id") or "").strip()
-    if not taxonomy.validate_category_id(category_id):
+    if not taxonomy.validate_resolvable_category_id(category_id):
         return f"Invalid DJ taxonomy category_id: {category_id}"
     alternatives = label.get("alternate_category_ids", [])
     if not isinstance(alternatives, list):
         return "alternate_category_ids must be a list"
-    invalid_alts = [str(item) for item in alternatives if not taxonomy.validate_category_id(str(item))]
+    invalid_alts = [
+        str(item)
+        for item in alternatives
+        if not taxonomy.validate_resolvable_category_id(str(item))
+    ]
     if invalid_alts:
         return f"Invalid alternate_category_ids: {', '.join(invalid_alts)}"
     return None
@@ -471,16 +477,16 @@ Step 5 — Set confidence per the calibration bands below.
 "Tribal" mood + percussion + chant vocal is NOT sufficient for any afro_*
 category. Check regional / scene keywords FIRST, in this order:
 
-  tulum / mayan / jungle / cenote / sunrise          -> tulum_tribal_*
+  tulum / mayan / jungle / cenote / sunrise          -> tulum_tribal_driver
   saz / baglama / altin gun / anatolian / turkish    -> anatolian_psych_house
   oud / qanun / darbuka / arabic / maqam             -> oriental_arabic_house
-  duduk / ney / persian / indian / desert            -> desert_mystic_driver
+  duduk / ney / persian / indian / desert            -> burner_desert_house
   balkan / gypsy / brass / klezmer / romani          -> balkan_gypsy_groove
   bouzouki / greek / italian / mediterranean         -> mediterranean_folk_house
   baile / samba / candombe / brazilian / favela      -> latin_tribal_percussion
   slavic / russian / siberian / post-soviet          -> slavic_folk_chug
   playa / burning man / robot heart / wild west      -> burner_desert_house
-  icaros / didgeridoo / ayahuasca / shamanic         -> ritual_shamanic_house
+  icaros / didgeridoo / ayahuasca / shamanic         -> ritual_chant_house
 
 Only assign an afro_* category when at least ONE of these holds:
   - artist origin South Africa / Angola / Nigeria / Mozambique / Senegal
@@ -574,15 +580,15 @@ Short evidence tags use the form `<source>:<value>`, e.g.: "bpm:122",
 
 Example 1 — Indie tech, dark hypnotic
 Input: "Hate (Original Mix) - Bedouin", BPM 124, mood dark/hypnotic, indie dance + tech house provider hints, instrumental.
-Output: {"category_id":"driving_dark_indie_tech","confidence":0.9,"rationale":"124 BPM dark hypnotic with indie + tech house hints; classic Bedouin driver. Evidence: bpm:124, mood:dark, mood:hypnotic, provider:indie_dance.","alternate_category_ids":["rolling_dark_indie_tech","hypnotic_dark_indie_tech"],"warnings":""}
+Output: {"category_id":"driving_dark_indie_tech","confidence":0.9,"rationale":"124 BPM dark hypnotic with indie + tech house hints; classic Bedouin driver. Evidence: bpm:124, mood:dark, mood:hypnotic, provider:indie_dance.","alternate_category_ids":["dark_progressive_house","percussive_tech_house"],"warnings":""}
 
 Example 2 — World/tribal that is NOT afro (the key case)
 Input: "Üsküdara - Dönüş Edit", BPM 118, organic+tribal mood, female chant vocal, provider tag "world / afro house", saz audible.
-Output: {"category_id":"anatolian_psych_house","confidence":0.88,"rationale":"Saz keyword + Turkish title outranks the generic afro provider tag; clearly Anatolian. Rejected Afro House: no African / Afro-diasporic lineage. Evidence: keyword:saz, title:turkish, bpm:118, mood:tribal.","alternate_category_ids":["oriental_arabic_house","desert_mystic_driver"],"warnings":""}
+Output: {"category_id":"anatolian_psych_house","confidence":0.88,"rationale":"Saz keyword + Turkish title outranks the generic afro provider tag; clearly Anatolian. Rejected Afro House: no African / Afro-diasporic lineage. Evidence: keyword:saz, title:turkish, bpm:118, mood:tribal.","alternate_category_ids":["oriental_arabic_house","burner_desert_house"],"warnings":""}
 
 Example 3 — Tulum vs afro disambiguation
 Input: "Yucatán Sunrise - Bona Fide", BPM 120, tribal/cinematic, chant vocal, provider "afro house, organic house".
-Output: {"category_id":"tulum_tribal_driver","confidence":0.82,"rationale":"Yucatán/sunrise keywords + cinematic-tribal at 120 BPM fit the Tulum scene over generic Afro House Peak. Rejected Afro House: no African / Afro-diasporic context. Evidence: keyword:yucatan, keyword:sunrise, bpm:120, mood:cinematic.","alternate_category_ids":["tulum_tribal_sunrise","cinematic_tribal_builder","afro_house_peak"],"warnings":""}
+Output: {"category_id":"tulum_tribal_driver","confidence":0.82,"rationale":"Yucatán/sunrise keywords + cinematic-tribal at 120 BPM fit the Tulum scene over generic Afro House Peak. Rejected Afro House: no African / Afro-diasporic context. Evidence: keyword:yucatan, keyword:sunrise, bpm:120, mood:cinematic.","alternate_category_ids":["ritual_chant_house","burner_desert_house","afro_house_peak"],"warnings":""}
 
 Example 4 — Genuine afro (so the model knows the floor)
 Input: "Umqombothi - Caiiro Remix", BPM 122, tribal/euphoric, Zulu vocal, label MoBlack.
@@ -618,27 +624,27 @@ Output: {"category_id":"micro_house","confidence":0.92,"rationale":"Villalobos +
 
 Example 12 — Warm deep house (Larry Heard)
 Input: "Can You Feel It - Mr. Fingers", BPM 118, mood warm/deep/soulful, vocal pads, provider "deep house / classic deep house".
-Output: {"category_id":"warm_deep_house","confidence":0.94,"rationale":"Mr. Fingers is canonical warm deep house; 118 BPM + warm/deep/soulful with vocal pads fits cleanly. Evidence: artist:Mr. Fingers, bpm:118, mood:warm, mood:soulful.","alternate_category_ids":["soulful_vocal_house","melodic_house_builder"],"warnings":""}
+Output: {"category_id":"warm_deep_house","confidence":0.94,"rationale":"Mr. Fingers is canonical warm deep house; 118 BPM + warm/deep/soulful with vocal pads fits cleanly. Evidence: artist:Mr. Fingers, bpm:118, mood:warm, mood:soulful.","alternate_category_ids":["classic_house","melodic_house_builder"],"warnings":""}
 
 Example 13 — Lo-fi deep house (dusty)
 Input: "Don't You Want My Love - Moodymann", BPM 116, mood warm/gritty/deep, dusty texture, sampled vocal, provider "deep house / lo-fi house".
 Output: {"category_id":"lo_fi_deep_house","confidence":0.91,"rationale":"Moodymann + dusty texture + sampled vocal at 116 BPM is core lo_fi_deep_house, distinct from cleaner warm_deep_house. Evidence: artist:Moodymann, bpm:116, keyword:dusty, keyword:lofi.","alternate_category_ids":["warm_deep_house","dub_deep_house"],"warnings":""}
 
-Example 14 — Sunset Balearic (sub-110 BPM)
+Example 14 — Balearic organic house (sub-110 BPM)
 Input: "Sirius (Sunset Edit) - DJ Tennis", BPM 102, mood sunlit/warm/atmospheric, vocal, provider "balearic / chillout".
-Output: {"category_id":"sunset_balearic_house","confidence":0.86,"rationale":"102 BPM + sunlit/atmospheric + 'Sunset Edit' mix cue fits sunset_balearic_house; below balearic_deep_house groove range. Evidence: bpm:102, mood:sunlit, mix_name:sunset_edit.","alternate_category_ids":["balearic_deep_house","balearic_organic_house"],"warnings":""}
+Output: {"category_id":"balearic_organic_house","confidence":0.86,"rationale":"102 BPM + sunlit/atmospheric + 'Sunset Edit' mix cue fits balearic_organic_house after the Balearic warmup variants were consolidated. Evidence: bpm:102, mood:sunlit, mix_name:sunset_edit.","alternate_category_ids":["downtempo_opener","low_slung_deep_house"],"warnings":""}
 
 Example 15 — Classic house (Frankie Knuckles piano)
 Input: "Your Love - Frankie Knuckles", BPM 122, mood warm/euphoric/playful, vocal, piano hook, provider "house / classic house".
-Output: {"category_id":"classic_house","confidence":0.96,"rationale":"Frankie Knuckles + piano hook + warm/euphoric vocal at 122 BPM is definitional classic_house. Evidence: artist:Frankie Knuckles, bpm:122, keyword:piano, mood:euphoric.","alternate_category_ids":["soulful_vocal_house","funky_disco_house"],"warnings":""}
+Output: {"category_id":"classic_house","confidence":0.96,"rationale":"Frankie Knuckles + piano hook + warm/euphoric vocal at 122 BPM is definitional classic_house. Evidence: artist:Frankie Knuckles, bpm:122, keyword:piano, mood:euphoric.","alternate_category_ids":["warm_deep_house","vocal_hook_tech_house"],"warnings":""}
 
 Example 16 — Raw acid house (TB-303)
 Input: "Acid Tracks - Phuture", BPM 124, mood acidic/raw/warehouse, instrumental, provider "acid house".
 Output: {"category_id":"raw_acid_house","confidence":0.97,"rationale":"Phuture + 303 acid line + 124 BPM warehouse is foundational raw_acid_house; slower and looser than acid_tech_house_peak. Evidence: artist:Phuture, bpm:124, keyword:303, mood:acidic.","alternate_category_ids":["acid_tech_house_peak","acid_techno"],"warnings":""}
 
-Example 17 — Funky disco house (French touch)
+Example 17 — Classic house with disco/French-touch cues
 Input: "Music Sounds Better With You - Stardust", BPM 124, mood euphoric/playful/warm, vocal disco loop, provider "french house / disco".
-Output: {"category_id":"funky_disco_house","confidence":0.92,"rationale":"Stardust + filtered disco loop + euphoric vocal is funky_disco_house origin material; nu_disco_house refers to the modern revival, not the original wave. Evidence: artist:Stardust, bpm:124, mood:euphoric, provider:french_house.","alternate_category_ids":["nu_disco_house","classic_house"],"warnings":""}
+Output: {"category_id":"classic_house","confidence":0.92,"rationale":"Stardust + filtered disco loop + euphoric vocal now belongs under the consolidated classic_house bucket rather than a separate funky disco label. Evidence: artist:Stardust, bpm:124, mood:euphoric, provider:french_house.","alternate_category_ids":["nu_disco_house","vocal_hook_tech_house"],"warnings":""}
 """
 
 
@@ -862,6 +868,7 @@ def _label_to_row(
     model: str,
     taxonomy: DjTaxonomy,
 ) -> dict[str, Any]:
+    label = _normalize_label_payload(label, taxonomy)
     category = taxonomy.category(str(label.get("category_id") or "").strip())
     row = {column: "" for column in DJ_GROUND_TRUTH_COLUMNS}
     row.update(category.metadata_row())
@@ -898,6 +905,45 @@ def _label_to_row(
         }
     )
     return row
+
+
+def _normalize_label_payload(label: dict[str, Any], taxonomy: DjTaxonomy) -> dict[str, Any]:
+    """Canonicalize deprecated category IDs in an LLM/cache payload."""
+    normalized = dict(label)
+    category_id = taxonomy.resolve_category_id(normalized.get("category_id"))
+    normalized["category_id"] = category_id
+    alternatives: list[str] = []
+    seen: set[str] = {category_id}
+    for item in normalized.get("alternate_category_ids", []) or []:
+        alt_id = taxonomy.resolve_category_id(str(item))
+        if taxonomy.validate_category_id(alt_id) and alt_id not in seen:
+            alternatives.append(alt_id)
+            seen.add(alt_id)
+    normalized["alternate_category_ids"] = alternatives
+    return normalized
+
+
+def _normalize_existing_row(
+    row: dict[str, str],
+    taxonomy: DjTaxonomy,
+) -> dict[str, str] | None:
+    """Return a reused row with deprecated IDs and metadata canonicalized."""
+    category_id = taxonomy.resolve_category_id(row.get("category_id"))
+    if not taxonomy.validate_category_id(category_id):
+        return None
+    out = dict(row)
+    category = taxonomy.category(category_id)
+    out.update(category.metadata_row())
+    alternatives: list[str] = []
+    seen: set[str] = {category_id}
+    for item in (row.get("alternate_category_ids") or "").split(";"):
+        alt_id = taxonomy.resolve_category_id(item.strip())
+        if taxonomy.validate_category_id(alt_id) and alt_id not in seen:
+            alternatives.append(alt_id)
+            seen.add(alt_id)
+    out["alternate_category_ids"] = ";".join(alternatives)
+    out["taxonomy_version"] = taxonomy.version
+    return out
 
 
 def _error_row(

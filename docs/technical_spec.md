@@ -280,7 +280,7 @@ Primary modules:
 - `model.py`: scikit-learn training, evaluation, artifact loading, and prediction
 - `dj_schema.py`: flat `dj_taxonomy.json` category loader and metadata expansion
 - `dj_ground_truth.py`: GPT/Azure OpenAI labels constrained to `dj_taxonomy.json`
-- `dj_model.py`: dual internal/external DJ category models and comparison reports
+- `dj_model.py`: flat DJ category model training, evaluation, artifact loading, and reports
 
 The taxonomy reference is `music_genre_taxonomy_3_level.json`. Every output path
 must validate against this file.
@@ -314,31 +314,29 @@ Ground truth generation runs registry/tagger collection first unless
 then asks GPT/Azure OpenAI for a strict JSON label bounded to the allowed category
 IDs. Provider genres are treated as hints only.
 
-Training writes two artifacts:
+Training writes one XGBoost artifact:
 
-- `outputs/registry/dj_taxonomy_model/internal/model.pkl`
-- `outputs/registry/dj_taxonomy_model/external/model.pkl`
+- `outputs/registry/dj_taxonomy_model/xgb/model.pkl`
 
-The internal model uses only file/embedded tags, local tagger/librosa-derived
-values, and identity text. The external model uses the same internal features plus
-Rekordbox, Songstats, Spotify/source observations, provider genres, labels, and
-provider audio features.
+The model uses file/embedded tags, local tagger/librosa-derived values, identity
+text, Rekordbox, Songstats, Spotify/source observations, provider genres,
+provider labels, and provider audio features. The LLM labeler receives metadata
+only, not raw audio, and must return one allowed active `category_id`; category
+metadata is expanded from `dj_taxonomy.json`.
 
-Both models train on the same GPT/Azure OpenAI seeded labels so their metrics are
-directly comparable. The LLM labeler receives metadata only, not raw audio, and
-must return one allowed `category_id`; category metadata is expanded from
-`dj_taxonomy.json`.
+The current supervised baseline uses `DictVectorizer` plus `XGBClassifier`.
+Reports include held-out top-1/top-3 accuracy, macro and weighted F1, confidence
+buckets, per-category accuracy, label alias counts, and dropped under-supported
+categories.
 
-The current supervised baseline uses `DictVectorizer` plus balanced
-`LogisticRegression`. Reports include top-1/top-3 accuracy, macro and weighted
-F1, confidence buckets, per-category accuracy, model agreement, and external
-improved/worsened counts.
+`dj_taxonomy.json` may define `deprecated_category_aliases` for merged or renamed
+categories. Deprecated IDs are accepted from older labels/caches and normalized
+to active IDs during ground-truth reuse and model training, but they are not
+shown to GPT as allowed prompt categories.
 
-Classification always runs both available models. Standalone
-`dj-registry dj-taxonomy classify` keeps the external model as the default primary
-when available, while the tag-writing workflow uses the internal model as primary.
-Both paths write the primary `dj_taxonomy_*` metadata plus internal/external
-prediction columns so confidence and accuracy can be compared per track.
+Classification writes the primary `dj_taxonomy_*` metadata plus the existing
+internal/external prediction columns. Those compatibility columns now contain the
+same XGB prediction.
 
 ### Ground-Truth Labels
 

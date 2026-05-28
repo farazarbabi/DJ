@@ -51,6 +51,7 @@ def test_loads_via_loader():
     taxonomy = load_dj_taxonomy()
     assert taxonomy.version.startswith("dj-taxonomy-v")
     assert len(taxonomy.categories) >= 90
+    assert len(taxonomy.categories) == 102
 
 
 def test_required_fields_present():
@@ -133,29 +134,20 @@ def test_non_edm_categories_present():
 
 
 def test_named_split_categories_present():
-    """The §3 split categories must exist as IDs in the new taxonomy."""
+    """The surviving split categories must exist as active IDs."""
     raw = _load_raw()
     ids = {entry["id"] for entry in raw["categories"]}
     expected_new_ids = {
-        # Tribal Afro splits (warmup/builder/cinematic_builder were consolidated
-        # away in the v2.2 reshuffle; surviving splits are the chant and 3-step)
         "spiritual_afro_chant",
         "afro_3_step",
-        # Organic House splits
-        "organic_house_warmup",
-        "desert_organic_house",
+        "organic_house_builder",
+        "burner_desert_house",
         "balearic_organic_house",
-        "organic_downtempo_crossover",
-        # Melodic House splits
-        "warm_melodic_house",
-        "cinematic_melodic_house",
-        # Dark Indie Tech-House splits
-        "rolling_dark_indie_tech",
+        "downtempo_opener",
+        "melodic_house_builder",
         "driving_dark_indie_tech",
-        "hypnotic_dark_indie_tech",
-        # Hypnotic Indie Dance splits
-        "warm_hypnotic_indie",
-        "psychedelic_hypnotic_indie",
+        "hypnotic_indie_dance",
+        "psychedelic_indie_driver",
     }
     missing = expected_new_ids - ids
     assert not missing, f"missing split IDs: {missing}"
@@ -169,7 +161,6 @@ def test_modern_additions_present():
         "afro_house_peak",
         "micro_house",
         "minimal_dub_tool",
-        "bass_tech_house",
         "driving_bass_house",
         "hardgroove_techno_driver",
         "cosmic_indie_dance",
@@ -177,12 +168,31 @@ def test_modern_additions_present():
         "darkwave_indie_crossover",
         "lo_fi_deep_tech",
         "dub_deep_tech_house",
-        "sunset_balearic_house",
-        "slow_melodic_house",
         "psy_organic_crossover",
     }
     missing = expected_new_ids - ids
     assert not missing, f"missing modern-addition IDs: {missing}"
+
+
+def test_deprecated_category_aliases_are_valid_and_inactive():
+    raw = _load_raw()
+    ids = {entry["id"] for entry in raw["categories"]}
+    aliases = raw.get("deprecated_category_aliases", {})
+    assert aliases
+    assert aliases["organic_house_warmup"] == "organic_house_builder"
+    assert aliases["dark_tech_house_driver"] == "percussive_tech_house"
+    assert "burner_desert_house" in ids
+    for source, target in aliases.items():
+        assert source not in ids, f"deprecated alias source still active: {source}"
+        assert target in ids, f"deprecated alias target missing: {source}->{target}"
+
+
+def test_loader_resolves_deprecated_category_aliases():
+    taxonomy = load_dj_taxonomy()
+    assert not taxonomy.validate_category_id("organic_house_warmup")
+    assert taxonomy.resolve_category_id("organic_house_warmup") == "organic_house_builder"
+    assert taxonomy.resolve_category_id("dark_tech_house_driver") == "percussive_tech_house"
+    assert taxonomy.validate_resolvable_category_id("organic_house_warmup")
 
 
 def test_provisional_field_optional():

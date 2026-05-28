@@ -18,9 +18,9 @@ from dj_registry.taxonomy.dj_schema import load_dj_taxonomy
 
 
 _CATEGORIES = [
-    "dark_tech_house_driver",
+    "percussive_tech_house",
     "vocal_hook_tech_house",
-    "raw_warehouse_techno",
+    "peak_time_techno",
     "ritual_chant_house",
 ]
 

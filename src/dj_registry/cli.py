@@ -327,11 +327,14 @@ def cmd_dj_taxonomy(args: argparse.Namespace) -> int:
             taxonomy_path=getattr(args, "taxonomy", None),
             show_progress=_show_progress(args),
         )
-        print(f"DJ taxonomy evaluation complete -> {getattr(args, 'model_dir')}")
+        scope = metrics.get("evaluation_kind") or "evaluation"
+        print(f"DJ taxonomy evaluation complete ({scope}) -> {getattr(args, 'model_dir')}")
         print(f"  examples={metrics.get('examples', 0)}  "
               f"top-1={metrics.get('top1_accuracy', 0.0):.1%}  "
               f"top-3={metrics.get('top3_accuracy', 0.0):.1%}  "
               f"macro-F1={metrics.get('macro_f1', 0.0):.3f}")
+        if metrics.get("evaluation_warning"):
+            print(f"  warning: {metrics['evaluation_warning']}")
         return 0
 
     if command == "test-api":
@@ -445,6 +448,12 @@ def _cmd_train(args: argparse.Namespace, store: CsvStore) -> int:
                 parts.append(f"{k}={val:.3g}" if isinstance(val, float) else f"{k}={val}")
         for i in range(0, len(parts), 3):
             print("  " + "  ".join(parts[i:i + 3]))
+    warnings = xgb_result.get("warnings") or []
+    if warnings:
+        print()
+        print("Warnings")
+        for warning in warnings:
+            print(f"  {warning}")
     return 0
 
 

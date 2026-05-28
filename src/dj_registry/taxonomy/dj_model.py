@@ -83,6 +83,43 @@ class DjTrainingStats:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass
+class LabelLoadDiagnostics:
+    total_rows: int = 0
+    valid_rows: int = 0
+    error_rows: int = 0
+    invalid_rows: int = 0
+    alias_counts: dict[str, int] = field(default_factory=dict)
+    alias_targets: dict[str, str] = field(default_factory=dict)
+    invalid_category_counts: dict[str, int] = field(default_factory=dict)
+
+    def metric_fields(self) -> dict[str, Any]:
+        return {
+            "label_rows_total": self.total_rows,
+            "label_rows_loaded": self.valid_rows,
+            "label_rows_error_skipped": self.error_rows,
+            "label_rows_invalid_skipped": self.invalid_rows,
+            "label_alias_counts": dict(sorted(self.alias_counts.items())),
+            "label_alias_targets": dict(sorted(self.alias_targets.items())),
+            "invalid_category_counts": dict(sorted(self.invalid_category_counts.items())),
+        }
+
+    def warnings(self) -> list[str]:
+        out: list[str] = []
+        if self.error_rows:
+            out.append(f"Skipped {self.error_rows} ground-truth error rows with no category_id.")
+        if self.invalid_rows:
+            details = ", ".join(
+                f"{category_id}={count}"
+                for category_id, count in sorted(self.invalid_category_counts.items())
+            )
+            out.append(
+                f"Skipped {self.invalid_rows} rows with category IDs missing from the current "
+                f"dj_taxonomy.json: {details}"
+            )
+        return out
+
+
 def train_dj_taxonomy_models(
     store: CsvStore,
     labels_path: str,
@@ -107,7 +144,7 @@ def train_dj_taxonomy_models(
         raise ValueError(f"feature_mode must be one of {sorted(VALID_FEATURE_MODES)}, got {feature_mode!r}")
 
     taxonomy = load_dj_taxonomy(taxonomy_path)
-    labels = _load_label_rows(labels_path, taxonomy)
+    labels, label_diagnostics = _load_label_rows_with_diagnostics(labels_path, taxonomy)
     base_dir = Path(model_dir or Path(store.output_dir) / "dj_taxonomy_model")
     base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -128,6 +165,8 @@ def train_dj_taxonomy_models(
         feature_mode=feature_mode,
         show_progress=show_progress,
     )
+    metrics.update(label_diagnostics.metric_fields())
+    warnings_list = label_diagnostics.warnings() + list(warnings_list)
     if dropped_categories:
         warnings_list = list(warnings_list) + [
             f"Dropped {sum(dropped_categories.values())} rows in "
@@ -176,7 +215,7 @@ def evaluate_dj_taxonomy_models(
 ) -> dict[str, Any]:
     """Re-evaluate the trained XGB model against the labels CSV."""
     taxonomy = load_dj_taxonomy(taxonomy_path)
-    labels = _load_label_rows(labels_path, taxonomy)
+    labels, label_diagnostics = _load_label_rows_with_diagnostics(labels_path, taxonomy)
     model = load_dj_taxonomy_model_if_available(model_dir, taxonomy_path=taxonomy_path)
     if model is None:
         raise FileNotFoundError(f"No XGB DJ taxonomy model found under {model_dir}")
@@ -188,6 +227,12 @@ def evaluate_dj_taxonomy_models(
     metrics = _evaluate_examples(model, examples, taxonomy, ucache=ucache)
     metrics["examples"] = len(examples)
     metrics["skipped_rows"] = skipped
+    metrics["evaluation_kind"] = "in_sample_refit"
+    metrics["evaluation_warning"] = (
+        "This evaluates the saved model after it was refit on all retained examples; "
+        "use training_report.json for held-out validation metrics."
+    )
+    metrics.update(label_diagnostics.metric_fields())
     return metrics
 
 
@@ -350,8 +395,17 @@ def _resolve_cache() -> Any | None:
 
 
 def _load_label_rows(labels_path: str, taxonomy: DjTaxonomy) -> list[dict[str, str]]:
+    rows, _diagnostics = _load_label_rows_with_diagnostics(labels_path, taxonomy)
+    return rows
+
+
+def _load_label_rows_with_diagnostics(
+    labels_path: str,
+    taxonomy: DjTaxonomy,
+) -> tuple[list[dict[str, str]], LabelLoadDiagnostics]:
     with open(labels_path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
+    diagnostics = LabelLoadDiagnostics(total_rows=len(rows))
     valid_rows: list[dict[str, str]] = []
     invalid: list[str] = []
     for index, row in enumerate(rows, start=2):
@@ -359,15 +413,26 @@ def _load_label_rows(labels_path: str, taxonomy: DjTaxonomy) -> list[dict[str, s
         label_source = (row.get("label_source") or "").strip().lower()
         if label_source.endswith("_error"):
             invalid.append(f"row {index}: error row {category_id or '<blank>'}")
+            diagnostics.error_rows += 1
             continue
+        resolved_category_id = taxonomy.resolve_category_id(category_id)
+        if resolved_category_id != category_id and taxonomy.validate_category_id(resolved_category_id):
+            row = dict(row)
+            diagnostics.alias_counts[category_id] = diagnostics.alias_counts.get(category_id, 0) + 1
+            diagnostics.alias_targets[category_id] = resolved_category_id
+            category_id = resolved_category_id
         if not taxonomy.validate_category_id(category_id):
             invalid.append(f"row {index}: unknown category_id {category_id or '<blank>'}")
+            diagnostics.invalid_rows += 1
+            key = category_id or "<blank>"
+            diagnostics.invalid_category_counts[key] = diagnostics.invalid_category_counts.get(key, 0) + 1
             continue
         row["category_id"] = category_id
         valid_rows.append(row)
+    diagnostics.valid_rows = len(valid_rows)
     if invalid and not valid_rows:
         raise ValueError("No valid DJ taxonomy labels found: " + "; ".join(invalid[:5]))
-    return valid_rows
+    return valid_rows, diagnostics
 
 
 def _build_training_examples(
@@ -536,18 +601,33 @@ def _split_examples(
             splitter = GroupShuffleSplit(n_splits=1, test_size=validation_split, random_state=seed)
             train_idx, val_idx = next(splitter.split(examples, ys, groups=groups))
             # GroupShuffleSplit is not stratified; verify class coverage and
-            # fall through if any class is entirely missing from training.
+            # fall through if any class is entirely missing or represented by
+            # only one row in training. Singleton train classes disable the
+            # stratified CV used by XGB tuning, which is worse than the small
+            # artist-leakage risk on this long-tail dataset.
             train_classes = {ys[i] for i in train_idx}
-            if set(ys).issubset(train_classes) and len(val_idx) > 0:
+            train_counts = Counter(ys[i] for i in train_idx)
+            if (
+                set(ys).issubset(train_classes)
+                and len(val_idx) > 0
+                and min(train_counts.values()) >= 2
+            ):
                 return [examples[i] for i in train_idx], [examples[i] for i in val_idx]
         except ValueError:
             pass
 
     # Stratified split — every class represented proportionally in both.
-    train_examples, val_examples = train_test_split(
-        examples, test_size=validation_split, stratify=ys, random_state=seed
-    )
-    return train_examples, val_examples
+    try:
+        train_examples, val_examples = train_test_split(
+            examples, test_size=validation_split, stratify=ys, random_state=seed
+        )
+        return train_examples, val_examples
+    except ValueError:
+        shuffled = list(examples)
+        random.Random(seed).shuffle(shuffled)
+        n_val = max(1, int(round(len(shuffled) * validation_split)))
+        n_val = min(n_val, len(shuffled) - 1)
+        return shuffled[n_val:], shuffled[:n_val]
 
 
 # ── Spec §9.2 / §9.3 — Library-distribution check + anti-collapse guard ─────
@@ -700,8 +780,9 @@ def _evaluate_examples(
     rows = []
     for example in examples:
         prediction = _predict_for_example(model, example, taxonomy, ucache=ucache)
-        top3 = [alt["category_id"] for alt in prediction.alternatives]
-        top3.insert(0, prediction.category_id)
+        top3 = [prediction.category_id] + [
+            alt["category_id"] for alt in prediction.alternatives[:2]
+        ]
         rows.append(
             {
                 "expected_category_id": example["category_id"],

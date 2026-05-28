@@ -85,7 +85,13 @@ class DjTaxonomyCategory:
 class DjTaxonomy:
     """Validated flat category taxonomy for DJ-functional classification."""
 
-    def __init__(self, version: str, categories: list[DjTaxonomyCategory], path: Path | None = None) -> None:
+    def __init__(
+        self,
+        version: str,
+        categories: list[DjTaxonomyCategory],
+        path: Path | None = None,
+        deprecated_category_aliases: dict[str, str] | None = None,
+    ) -> None:
         if not categories:
             raise ValueError("DJ taxonomy must contain at least one category")
         by_id: dict[str, DjTaxonomyCategory] = {}
@@ -93,13 +99,38 @@ class DjTaxonomy:
             if category.id in by_id:
                 raise ValueError(f"Duplicate DJ taxonomy category id: {category.id}")
             by_id[category.id] = category
+        aliases = {
+            str(source).strip(): str(target).strip()
+            for source, target in (deprecated_category_aliases or {}).items()
+            if str(source).strip() and str(target).strip()
+        }
+        for source, target in aliases.items():
+            if source in by_id:
+                raise ValueError(f"Deprecated DJ taxonomy alias source is still active: {source}")
+            if target not in by_id:
+                raise ValueError(f"Deprecated DJ taxonomy alias target is missing: {source}->{target}")
         self.version = version
         self.categories = categories
         self.by_id = by_id
         self.path = path
+        self.deprecated_category_aliases = aliases
 
     def validate_category_id(self, category_id: str | None) -> bool:
         return bool(category_id and category_id in self.by_id)
+
+    def resolve_category_id(self, category_id: str | None) -> str:
+        """Return the active category ID for active or deprecated IDs."""
+        resolved = str(category_id or "").strip()
+        seen: set[str] = set()
+        while resolved in self.deprecated_category_aliases:
+            if resolved in seen:
+                raise ValueError(f"Cycle in DJ taxonomy deprecated aliases at {resolved}")
+            seen.add(resolved)
+            resolved = self.deprecated_category_aliases[resolved]
+        return resolved
+
+    def validate_resolvable_category_id(self, category_id: str | None) -> bool:
+        return self.validate_category_id(self.resolve_category_id(category_id))
 
     def category(self, category_id: str) -> DjTaxonomyCategory:
         try:
@@ -128,7 +159,10 @@ def load_dj_taxonomy(path: str | Path | None = None) -> DjTaxonomy:
         raise ValueError("Expected dj_taxonomy.json shape with a top-level categories list")
     categories = [DjTaxonomyCategory.from_dict(item) for item in data["categories"]]
     version = str(data.get("version") or taxonomy_path.name)
-    return DjTaxonomy(version, categories, taxonomy_path)
+    aliases = data.get("deprecated_category_aliases") or {}
+    if not isinstance(aliases, dict):
+        raise ValueError("deprecated_category_aliases must be an object when present")
+    return DjTaxonomy(version, categories, taxonomy_path, aliases)
 
 
 def default_dj_taxonomy_path() -> Path:

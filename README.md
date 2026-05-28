@@ -238,16 +238,12 @@ as model features, not as truth. See
 [docs/taxonomy_ground_truth_and_model.md](docs/taxonomy_ground_truth_and_model.md).
 
 The separate `dj-registry dj-taxonomy` workflow trains the flat DJ-functional
-category model from `src/dj_registry/taxonomy/dj_taxonomy.json`. It always trains
-and reports two models against the same GPT-seeded labels:
+category model from `src/dj_registry/taxonomy/dj_taxonomy.json`. It trains one
+XGBoost model using file/tagger/librosa evidence plus Rekordbox, Songstats, and
+Spotify/source observations when available.
 
-- `internal`: file tags, tagger/librosa-derived values, filename/title/mix text
-- `external`: all internal features plus Rekordbox, Songstats, Spotify/source observations
-
-Classification always records both model predictions and confidences in
-`dj_taxonomy_internal_*` and `dj_taxonomy_external_*` columns. Standalone
-classification defaults the primary `dj_taxonomy_*` metadata to the external
-model when available; the tag-writing workflow uses the internal model as primary.
+Classification records the same XGB prediction in both
+`dj_taxonomy_internal_*` and `dj_taxonomy_external_*` compatibility columns.
 The selected category ID expands to bounded moods, grooves, set roles,
 BPM/energy ranges, vocal profiles, source genres, and keywords from
 `dj_taxonomy.json`. COMMENT tags use a compact code derived from the selected
@@ -259,13 +255,12 @@ Methodology summary:
   `category_id` values from `dj_taxonomy.json`.
 - The ground-truth command first runs registry/tagger collection unless
   `--no-collect` is used.
-- The internal model uses local file/tagger/librosa evidence only.
-- The external model uses the same local evidence plus Rekordbox, Songstats,
-  Spotify/source observations, provider genres, provider labels, and provider
-  audio features.
-- Both models use a sparse `DictVectorizer` plus balanced logistic regression,
-  then report top-1 accuracy, top-3 accuracy, F1, confidence buckets, agreement,
-  and external-improved/worsened counts.
+- Deprecated category IDs from older labels or caches are normalized through
+  `deprecated_category_aliases` before reuse or training; new GPT prompts only
+  expose active categories.
+- The model uses a sparse `DictVectorizer` plus XGBoost, then reports held-out
+  top-1 accuracy, top-3 accuracy, F1, confidence buckets, per-category support,
+  alias counts, and dropped under-supported categories.
 
 ### `dj-grouper`
 

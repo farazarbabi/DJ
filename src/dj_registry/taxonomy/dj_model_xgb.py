@@ -53,6 +53,7 @@ MODEL_FILENAME = "model.pkl"
 
 
 _CLAP_DIMS = 512
+_MIN_EXAMPLES_PER_CLASS_FOR_CV = 3
 
 
 def _apply_clap_pca(features: dict[str, float], pca: Any) -> None:
@@ -342,9 +343,15 @@ def train_xgb_model(
     )
 
     best_params: dict[str, Any] = {}
-    # Avoid CV when there are too few examples per class for stratified splitting
+    # Avoid CV when minority classes are too thin. Two examples per class is
+    # technically splittable but leaves one sample per fold, producing unstable
+    # macro-F1 searches that overreact to single validation misses.
     min_per_class = int(min(np.bincount(y_train))) if n_classes > 1 else len(y_train)
-    cv_folds = min(3, min_per_class) if min_per_class >= 2 else 0
+    cv_folds = (
+        min(3, min_per_class)
+        if min_per_class >= _MIN_EXAMPLES_PER_CLASS_FOR_CV
+        else 0
+    )
 
     if cv_folds >= 2 and len(train_examples) >= 8 and n_iter > 0:
         cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
