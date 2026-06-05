@@ -115,15 +115,6 @@ def _run_songstats(config, store, obs_cache, *, show_progress: bool = False) -> 
     except Exception:
         logger.warning("Songstats: metadata fetch failed, continuing", exc_info=True)
 
-    try:
-        from dj_registry.adapters.spotify_popularity import ingest_spotify_popularity
-        pop_stats = ingest_spotify_popularity(store, obs_cache=obs_cache, show_progress=show_progress)
-        summary["spotify_popularity_total"] = pop_stats["total"]
-        summary["spotify_popularity_cached"] = pop_stats["cached"]
-        summary["spotify_popularity_fetched"] = pop_stats["fetched"]
-    except Exception:
-        logger.warning("Spotify popularity: fetch failed, continuing", exc_info=True)
-
     return summary
 
 
