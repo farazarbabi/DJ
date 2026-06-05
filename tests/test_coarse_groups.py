@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from dj_grouper.config import GrouperConfig
@@ -101,6 +103,7 @@ def test_generate_coarse_group_playlists_writes_files(tmp_path):
     assert len(files) == 1
     contents = (coarse_dir / files[0]).read_text(encoding="utf-8")
     assert "#EXTM3U" in contents
-    # All six paths appear in the merged playlist.
+    # All six paths appear in the merged playlist, as absolute on-disk paths
+    # (Rekordbox anchors relative M3U8 entries to the playlist folder).
     for i in range(6):
-        assert f"/music/{i}.aiff" in contents
+        assert os.path.abspath(f"/music/{i}.aiff") in contents
