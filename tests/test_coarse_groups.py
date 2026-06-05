@@ -101,7 +101,9 @@ def test_generate_coarse_group_playlists_writes_files(tmp_path):
     assert coarse_dir.exists()
     files = sorted(p.name for p in coarse_dir.glob("*.m3u8"))
     assert len(files) == 1
-    contents = (coarse_dir / files[0]).read_text(encoding="utf-8")
+    # Rekordbox requires a UTF-8 BOM on .m3u8; read with utf-8-sig to strip it.
+    assert (coarse_dir / files[0]).read_bytes().startswith(b"\xef\xbb\xbf")
+    contents = (coarse_dir / files[0]).read_text(encoding="utf-8-sig")
     assert "#EXTM3U" in contents
     # All six paths appear in the merged playlist, as absolute on-disk paths
     # (Rekordbox anchors relative M3U8 entries to the playlist folder).

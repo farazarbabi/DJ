@@ -25,6 +25,18 @@ def playlist_abs_path(path: str) -> str:
     return os.path.abspath(path)
 
 
+def write_m3u8(playlist_path: Path, lines: list[str]) -> None:
+    """Write an M3U8 in the form Rekordbox expects.
+
+    Rekordbox requires a UTF-8 BOM on ``.m3u8`` files; without it, entries
+    with non-ASCII characters in the path (accents, en-dashes, emoji — common
+    in track titles) fail to match and the playlist imports empty. ``utf-8-sig``
+    prepends the BOM; ``write_text`` translates ``\\n`` to the platform line
+    ending (CRLF on Windows), which Rekordbox also expects.
+    """
+    playlist_path.write_text("\n".join(lines), encoding="utf-8-sig")
+
+
 def generate_group_playlists(
     tracks: list[TrackFeatures],
     assignment: GroupAssignment,
@@ -43,6 +55,6 @@ def generate_group_playlists(
             lines.append(f"#EXTINF:-1,{Path(tf.path).stem}")
             lines.append(playlist_abs_path(tf.path))
 
-        playlist_path.write_text("\n".join(lines), encoding="utf-8")
+        write_m3u8(playlist_path, lines)
 
     logger.info("Generated %d group playlists in %s", len(assignment.groups), out)

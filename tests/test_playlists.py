@@ -34,7 +34,9 @@ def test_group_playlist_created(tmp_path):
     generate_group_playlists(tracks, assignment, str(tmp_path))
     playlist = tmp_path / "groups" / "9A_E3_HYPN_INST.m3u8"
     assert playlist.exists()
-    content = playlist.read_text()
+    # Rekordbox requires a UTF-8 BOM on .m3u8 files or it imports them empty.
+    assert playlist.read_bytes().startswith(b"\xef\xbb\xbf")
+    content = playlist.read_text(encoding="utf-8-sig")
     assert "#EXTM3U" in content
     # Entries must be absolute on-disk paths so Rekordbox can resolve them
     # (it anchors relative M3U8 entries to the playlist file's own folder).
@@ -57,6 +59,6 @@ def test_relative_paths_are_anchored_to_absolute(tmp_path):
         groups=[group], track_to_group={"files/track.mp3": "G001"},
     )
     generate_group_playlists(tracks, assignment, str(tmp_path))
-    content = (tmp_path / "groups" / "9A_E3_HYPN_INST.m3u8").read_text()
+    content = (tmp_path / "groups" / "9A_E3_HYPN_INST.m3u8").read_text(encoding="utf-8-sig")
     assert os.path.abspath("files/track.mp3") in content
     assert os.path.isabs(content.strip().splitlines()[-1])

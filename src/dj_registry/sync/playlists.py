@@ -47,7 +47,10 @@ def _write_m3u8(path: Path, entries: list[tuple[str, str]]) -> None:
     for label, abs_path in entries:
         lines.append(f"#EXTINF:-1,{label}")
         lines.append(abs_path)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    # utf-8-sig: Rekordbox requires a UTF-8 BOM on .m3u8 files, otherwise
+    # entries with non-ASCII path characters fail to match and the playlist
+    # imports empty.
+    path.write_text("\n".join(lines), encoding="utf-8-sig")
 
 
 def _resolve_paths(

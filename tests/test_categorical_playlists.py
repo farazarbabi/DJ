@@ -39,7 +39,8 @@ def _file(file_id: str, path: str) -> FileRecord:
 
 
 def _read(path):
-    return path.read_text(encoding="utf-8").splitlines()
+    # utf-8-sig strips the BOM that Rekordbox requires on .m3u8 files.
+    return path.read_text(encoding="utf-8-sig").splitlines()
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

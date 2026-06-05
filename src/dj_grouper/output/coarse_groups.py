@@ -28,7 +28,7 @@ from ..grouping.assignment import (
     _representative_values,
 )
 from ..grouping.distance import blended_distance
-from .playlists import playlist_abs_path
+from .playlists import playlist_abs_path, write_m3u8
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +190,6 @@ def generate_coarse_group_playlists(
             tf = tracks[idx]
             lines.append(f"#EXTINF:-1,{Path(tf.path).stem}")
             lines.append(playlist_abs_path(tf.path))
-        playlist_path.write_text("\n".join(lines), encoding="utf-8")
+        write_m3u8(playlist_path, lines)
     logger.info("Generated %d coarse group playlists in %s", len(coarse.groups), out)
     return len(coarse.groups)
