@@ -142,12 +142,137 @@ def _write_by_subgenre(
     return written
 
 
+def _coarse_key_bucket(padded: str) -> str | None:
+    """Map padded Camelot `NNL` to a 4-key coarse window: `01A-02B`, ..., `11A-12B`.
+
+    The Camelot wheel pairs by relative maj/min (same number) and by ±1 step
+    (adjacent numbers) — both are standard harmonic-mix moves, so a 4-key
+    neighborhood is musically coherent for browsing during a live set.
+    """
+    try:
+        n = int(padded[:2])
+    except (ValueError, IndexError):
+        return None
+    if not 1 <= n <= 12:
+        return None
+    lo = n if n % 2 == 1 else n - 1  # 1,3,5,7,9,11
+    hi = lo + 1
+    return f"{lo:02d}A-{hi:02d}B"
+
+
+def _write_by_key_coarse(
+    out_dir: Path,
+    tracks: list[LogicalTrack],
+    path_by_id: dict[str, str],
+) -> int:
+    """Bucket tracks into 6 coarse key windows: {1A,1B,2A,2B}, ..., {11A,11B,12A,12B}."""
+    buckets: dict[str, list[LogicalTrack]] = {}
+    for t in tracks:
+        key = t.canonical_key_camelot.strip()
+        if not key or t.track_id not in path_by_id:
+            continue
+        padded = _camelot_padded(key)
+        if padded is None:
+            continue
+        bucket = _coarse_key_bucket(padded)
+        if bucket is None:
+            continue
+        buckets.setdefault(bucket, []).append(t)
+
+    written = 0
+    for bucket, members in buckets.items():
+        entries = _sorted_entries(members, path_by_id)
+        if not entries:
+            continue
+        _write_m3u8(out_dir / f"{bucket}.m3u8", entries)
+        written += 1
+    return written
+
+
+def _coarse_subgenre_bucket(label: str, family_first_words: set[str]) -> str:
+    """Map a `dj_taxonomy_label` to a coarse bucket.
+
+    Two-pass derivation:
+      1. Strip everything after the first '/' so `Indie Dance / Acid` → `Indie Dance`.
+      2. If the first word of the head appears as the first word of ≥2 distinct
+         heads across the input set (`family_first_words`), collapse to that
+         first word — `Acid Breaks` / `Acid House` / `Acid Techno` → `Acid`.
+
+    Returns the original label if neither pass shortens it (no merge available).
+    """
+    head = label.split("/", 1)[0].strip()
+    if not head:
+        return label.strip()
+    tokens = head.split()
+    if not tokens:
+        return head
+    first = tokens[0]
+    if first in family_first_words:
+        return first
+    return head
+
+
+def _compute_family_first_words(labels: list[str]) -> set[str]:
+    """First words that appear as the first token in ≥2 distinct slash-heads.
+
+    Driven by the labels actually present in the input — no curated map.
+    """
+    heads: set[str] = set()
+    for label in labels:
+        head = label.split("/", 1)[0].strip()
+        if head:
+            heads.add(head)
+    from collections import Counter
+
+    first_words = Counter(
+        h.split()[0] for h in heads if h.split() and len(h.split()) > 1
+    )
+    return {w for w, n in first_words.items() if n >= 2}
+
+
+def _write_by_subgenre_coarse(
+    out_dir: Path,
+    tracks: list[LogicalTrack],
+    path_by_id: dict[str, str],
+) -> int:
+    """Bucket subgenres via label-prefix merge: strip after `/`, then collapse
+    heads sharing a first word that appears in ≥2 heads."""
+    labels = [
+        t.dj_taxonomy_label.strip()
+        for t in tracks
+        if t.dj_taxonomy_label.strip() and t.track_id in path_by_id
+    ]
+    family_first_words = _compute_family_first_words(labels)
+
+    buckets: dict[str, list[LogicalTrack]] = {}
+    for t in tracks:
+        label = t.dj_taxonomy_label.strip()
+        if not label or t.track_id not in path_by_id:
+            continue
+        bucket = _coarse_subgenre_bucket(label, family_first_words)
+        buckets.setdefault(bucket, []).append(t)
+
+    written = 0
+    for bucket, members in buckets.items():
+        entries = _sorted_entries(members, path_by_id)
+        if not entries:
+            continue
+        _write_m3u8(out_dir / f"{_safe_filename(bucket)}.m3u8", entries)
+        written += 1
+    return written
+
+
 def generate_categorical_playlists(
     tracks: list[LogicalTrack],
     files: list[FileRecord],
     playlists_root: str,
+    *,
+    coarse: bool = False,
 ) -> dict[str, int]:
     """Write by_key/ and by_subgenre/ M3U8 playlists.
+
+    When ``coarse`` is True, also write by_key_coarse/ and by_subgenre_coarse/
+    alongside (existing fine-grained outputs are kept untouched).
 
     Returns counts of playlists written per category.
     """
@@ -158,9 +283,24 @@ def generate_categorical_playlists(
         "by_key": _write_by_key(root / "by_key", tracks, path_by_id),
         "by_subgenre": _write_by_subgenre(root / "by_subgenre", tracks, path_by_id),
     }
-    logger.info(
-        "Categorical playlists: by_key=%d, by_subgenre=%d",
-        counts["by_key"],
-        counts["by_subgenre"],
-    )
+    if coarse:
+        counts["by_key_coarse"] = _write_by_key_coarse(
+            root / "by_key_coarse", tracks, path_by_id
+        )
+        counts["by_subgenre_coarse"] = _write_by_subgenre_coarse(
+            root / "by_subgenre_coarse", tracks, path_by_id
+        )
+        logger.info(
+            "Categorical playlists: by_key=%d, by_subgenre=%d, by_key_coarse=%d, by_subgenre_coarse=%d",
+            counts["by_key"],
+            counts["by_subgenre"],
+            counts["by_key_coarse"],
+            counts["by_subgenre_coarse"],
+        )
+    else:
+        logger.info(
+            "Categorical playlists: by_key=%d, by_subgenre=%d",
+            counts["by_key"],
+            counts["by_subgenre"],
+        )
     return counts

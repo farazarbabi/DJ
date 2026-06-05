@@ -70,6 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--force-extract", action="store_true", help="Clear cache + outputs, re-extract")
     p_run.add_argument("--force-clap", action="store_true", help="Re-extract CLAP embeddings")
     p_run.add_argument("--rebuild", action="store_true", help="Force full re-clustering (ignore existing groups)")
+    p_run.add_argument("--coarse-playlists", action="store_true", help="Also write half-resolution group playlists to groups_coarse/")
     p_run.add_argument("--clean", action="store_true", help="Delete all outputs and caches, then exit")
 
     # --- extract ---
@@ -776,6 +777,7 @@ def _cmd_run(args) -> int:
         # Only clear group playlists; categorical playlists (by_key, by_subgenre,
         # by_popularity) are owned by the registry pipeline.
         _safe_rmtree(str(Path(args.playlists) / "groups"), _allowed)
+        _safe_rmtree(str(Path(args.playlists) / "groups_coarse"), _allowed)
         for f in [args.csv, args.recommendations_csv]:
             _safe_unlink(f, _allowed)
         # Reset cache singleton so it reloads fresh
@@ -994,6 +996,14 @@ def _cmd_run(args) -> int:
         _safe_rmtree(groups_subdir, _allowed)
         generate_group_playlists(feature_tracks, assignment, args.playlists)
         print(f"  Playlists: {args.playlists}/groups/")
+        if getattr(args, "coarse_playlists", False):
+            from .output.coarse_groups import generate_coarse_group_playlists
+            coarse_subdir = str(Path(args.playlists) / "groups_coarse")
+            _safe_rmtree(coarse_subdir, _allowed)
+            n_coarse = generate_coarse_group_playlists(
+                feature_tracks, assignment, config, args.playlists
+            )
+            print(f"  Playlists: {args.playlists}/groups_coarse/ ({n_coarse} coarse groups)")
 
     print(f"\nDone in {_fmt_elapsed(_time.perf_counter() - t_step)}.")
     return 0
