@@ -283,16 +283,24 @@ def _build_observation(
     source_system: str,
     features: dict,
 ) -> SourceObservation | None:
-    """Build a SourceObservation from extracted features."""
+    """Build a SourceObservation from extracted features.
+
+    Emits a row whenever any tagger field is present, even when key
+    analysis didn't produce a camelot. The librosa observation is the
+    canonical carrier for energy/vibe/vocal/structure — gating it on
+    key extraction drops the whole row when only the key analyzer fails.
+    """
     camelot = features.get("camelot")
-    if not camelot:
+    parsed = parse_any_key(camelot) if camelot else None
+    std, cam = parsed if parsed else ("", "")
+
+    has_any_tagger = any(
+        features.get(k)
+        for k in ("energy", "vibe", "vocal", "structure", "bpm")
+    )
+    if not cam and not has_any_tagger:
         return None
 
-    parsed = parse_any_key(camelot)
-    if not parsed:
-        return None
-
-    std, cam = parsed
     obs = SourceObservation(
         observation_id=f"OBS-{source_system.replace('analysis_', '')}-{file_id}",
         track_id=track_id,
