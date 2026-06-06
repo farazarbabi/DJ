@@ -95,6 +95,16 @@ dj run --force-extract
 dj vibe-audit
 ```
 
+Find and download tracks from Spotify playlist exports that aren't in your
+library yet:
+
+```bash
+dj fetch-missing playlist.csv --library "D:\\Music"
+dj fetch-missing ./playlists --library "D:\\Music"     # a directory of CSVs
+dj fetch-missing playlist.csv --library "D:\\Music" --dry-run
+dj fetch-missing playlist.csv --library "D:\\Music" --format wav
+```
+
 Lower-level commands:
 
 ```bash
@@ -131,6 +141,24 @@ The unified pipeline orchestrates:
 5. internal DJ taxonomy category prediction
 6. tag writing
 7. grouping and recommendation generation
+
+It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
+
+1. parses one or more Exportify-style Spotify playlist CSVs (deduped by track URI)
+2. fuzzy-matches each track against the audio files already in `--library`,
+   requiring artist agreement so unrelated same-title tracks and alternate
+   remixes of a track you only own the original of count as missing
+3. downloads the missing tracks via `yt-dlp` YouTube search (results are
+   duration-bounded to skip hour-long DJ mixes), extracting to WAV and
+   converting losslessly to AIFF by default (`--format wav` to keep WAV)
+4. names files `Artist - Track` in the library convention, skips anything
+   already present, and flags downloads whose length differs sharply from
+   Spotify's as probable wrong-video matches
+
+Reports and a download log are written to `<library>/outputs/fetch/`
+(`matched_report.csv`, `missing_report.csv`, `download_log.csv`,
+`probable_mismatches.csv`). `--dry-run` reports the missing set without
+downloading. Requires `yt-dlp` and `ffmpeg` on `PATH`.
 
 ### `dj-tagger`
 

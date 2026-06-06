@@ -74,6 +74,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
     p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
 
+    p_fetch = sub.add_parser(
+        "fetch-missing",
+        help="Download tracks from Spotify playlist CSVs that aren't in your library yet",
+    )
+    p_fetch.add_argument(
+        "playlists", nargs="+", metavar="CSV",
+        help="Exportify-style Spotify playlist CSV file(s) or a directory of them",
+    )
+    p_fetch.add_argument(
+        "--library", default="./files", metavar="DIR",
+        help="Library dir to check for existing tracks and download into (default: ./files)",
+    )
+    p_fetch.add_argument("--format", dest="audio_format", choices=["aiff", "wav"],
+                         default="aiff", help="Download format (default: aiff)")
+    p_fetch.add_argument("--threshold", type=float, default=0.62,
+                         help="Match score threshold; below this counts as missing (default: 0.62)")
+    p_fetch.add_argument("--max-duration", type=int, default=900,
+                         help="Reject YouTube results longer than this many seconds (default: 900)")
+    p_fetch.add_argument("--min-duration", type=int, default=30,
+                         help="Reject YouTube results shorter than this many seconds (default: 30)")
+    p_fetch.add_argument("--dry-run", action="store_true",
+                         help="Only report matched/missing; do not download")
+
     return parser
 
 
@@ -651,6 +674,119 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_fetch_missing(args: argparse.Namespace) -> int:
+    """Match Spotify playlist CSVs against the library and download what's missing."""
+    import csv
+
+    from .spotify_fetch import (
+        classify_tracks,
+        collect_playlists,
+        download_track,
+        duration_mismatch,
+        load_unique_tracks,
+        probe_duration,
+        scan_library,
+        tools_available,
+        _write_match_report,
+    )
+
+    library = args.library
+    if not os.path.isdir(library):
+        logger.error("fetch-missing: library dir not found: %s", library)
+        return 1
+
+    csv_paths = collect_playlists(args.playlists)
+    if not csv_paths:
+        logger.error("fetch-missing: no playlist CSVs found in %s", args.playlists)
+        return 1
+
+    tracks = load_unique_tracks(csv_paths)
+    index = scan_library(library)
+    present, missing = classify_tracks(tracks, index, threshold=args.threshold)
+
+    out_dir = os.path.join(library, "outputs", "fetch")
+    os.makedirs(out_dir, exist_ok=True)
+    _write_match_report(os.path.join(out_dir, "matched_report.csv"), present)
+    _write_match_report(os.path.join(out_dir, "missing_report.csv"), missing)
+
+    logger.info(
+        "fetch-missing: %d unique tracks across %d playlist(s) — %d present, %d missing",
+        len(tracks), len(csv_paths), len(present), len(missing),
+    )
+    logger.info("fetch-missing: reports written to %s", out_dir)
+
+    if args.dry_run:
+        for r in missing:
+            print(f"[{r.score:.2f}] {r.track.artist_display} - {r.track.name}")
+        logger.info("fetch-missing: dry run — %d track(s) would be downloaded", len(missing))
+        return 0
+
+    if not missing:
+        logger.info("fetch-missing: nothing to download")
+        return 0
+
+    has_ytdlp, has_ffmpeg = tools_available()
+    if not has_ytdlp:
+        logger.error("fetch-missing: yt-dlp not found on PATH (required to download)")
+        return 1
+    if args.audio_format == "aiff" and not has_ffmpeg:
+        logger.error("fetch-missing: ffmpeg not found on PATH (required for AIFF conversion)")
+        return 1
+
+    log_path = os.path.join(out_dir, "download_log.csv")
+    mismatch_path = os.path.join(out_dir, "probable_mismatches.csv")
+    ok = skipped = failed = 0
+    mismatches: list[tuple] = []
+
+    with open(log_path, "w", encoding="utf-8", newline="") as lf:
+        log = csv.writer(lf)
+        log.writerow(["status", "artists", "name", "query", "outfile", "detail"])
+        for i, r in enumerate(missing, 1):
+            t = r.track
+            prefix = f"[{i}/{len(missing)}]"
+            outcome = download_track(
+                t, library,
+                audio_format=args.audio_format,
+                min_duration=args.min_duration,
+                max_duration=args.max_duration,
+            )
+            log.writerow([outcome.status, t.artist_display, t.name,
+                          t.search_query(), outcome.outfile, outcome.detail])
+            lf.flush()
+
+            if outcome.status == "skip":
+                skipped += 1
+                logger.info("%s skip (exists): %s", prefix, t.target_basename())
+                continue
+            if outcome.status == "fail":
+                failed += 1
+                logger.warning("%s FAILED: %s — %s", prefix, t.name, outcome.detail)
+                continue
+
+            ok += 1
+            logger.info("%s ok: %s", prefix, os.path.basename(outcome.outfile))
+            reason = duration_mismatch(t.duration_sec, probe_duration(outcome.outfile))
+            if reason:
+                mismatches.append((t, outcome.outfile, reason))
+
+    if mismatches:
+        with open(mismatch_path, "w", encoding="utf-8", newline="") as mf:
+            w = csv.writer(mf)
+            w.writerow(["artists", "name", "outfile", "detail"])
+            for t, outfile, reason in mismatches:
+                w.writerow([t.artist_display, t.name, outfile, reason])
+
+    logger.info("fetch-missing: done — ok=%d skipped=%d failed=%d", ok, skipped, failed)
+    if mismatches:
+        logger.info(
+            "fetch-missing: %d download(s) are probably NOT an exact match (see %s):",
+            len(mismatches), mismatch_path,
+        )
+        for t, _outfile, reason in mismatches:
+            logger.info("  %s - %s  (%s)", t.artist_display, t.name, reason)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
 
@@ -660,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(raw)
         return 0
     # Default to "run" when no subcommand is given
-    known_commands = {"run", "vibe-audit"}
+    known_commands = {"run", "vibe-audit", "fetch-missing"}
     if not raw or raw[0] not in known_commands:
         raw = ["run"] + list(raw)
 
@@ -684,6 +820,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         try:
             return _run_pipeline(args)
+        except KeyboardInterrupt:
+            return 130
+        except Exception:
+            logger.error("Fatal error", exc_info=True)
+            return 1
+
+    if args.command == "fetch-missing":
+        try:
+            return _run_fetch_missing(args)
         except KeyboardInterrupt:
             return 130
         except Exception:
