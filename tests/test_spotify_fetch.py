@@ -8,8 +8,10 @@ from dj_tools.spotify_fetch import (
     clean_track_name,
     collect_playlists,
     duration_mismatch,
+    fetch_missing,
     load_unique_tracks,
     parse_playlist_csv,
+    resolve_library_dir,
     sanitize_filename,
     scan_library,
     tokens,
@@ -170,3 +172,41 @@ def test_duration_mismatch_flags_large_gap():
     assert duration_mismatch(200, 215) is None
     # Missing data -> no judgement.
     assert duration_mismatch(None, 300) is None
+
+
+# --------------------------------------------------------------------------- #
+# Orchestration
+# --------------------------------------------------------------------------- #
+def test_resolve_library_dir(tmp_path):
+    f = tmp_path / "track.aiff"
+    f.write_bytes(b"\x00")
+    assert resolve_library_dir(str(tmp_path)) == str(tmp_path)
+    assert resolve_library_dir(str(f)) == str(tmp_path)
+
+
+def test_fetch_missing_dry_run_writes_reports(tmp_path):
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Free Babe", "Elodie Gervaise", 200000),
+    ])
+
+    summary = fetch_missing([csv_path], str(library), dry_run=True)
+
+    assert summary["total"] == 2
+    assert summary["present"] == 1
+    assert summary["missing"] == 1
+    assert summary["downloaded"] == 0  # dry run downloads nothing
+    report_dir = tmp_path / "lib" / "outputs" / "fetch"
+    assert (report_dir / "missing_report.csv").exists()
+    assert (report_dir / "matched_report.csv").exists()
+    # No network tools invoked, so no download log on a dry run.
+    assert not (report_dir / "download_log.csv").exists()
+
+
+def test_fetch_missing_bad_library_raises(tmp_path):
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        fetch_missing([], str(tmp_path / "nope"))

@@ -13,7 +13,7 @@ DJ music library toolkit with four CLIs:
 
 The registry is the source of truth for canonical key/BPM and stored `tagger_*` outputs. The unified `dj run` command is the preferred end-to-end entry point.
 
-The `dj` CLI also exposes `dj fetch-missing`, which matches Spotify playlist CSV exports against the library and downloads missing tracks via `yt-dlp` (logic in `src/dj_tools/spotify_fetch.py`).
+The `dj` CLI also exposes `dj fetch-missing`, which matches Spotify playlist CSV exports against the library and downloads missing tracks via `yt-dlp` (logic in `src/dj_tools/spotify_fetch.py`). The same step runs as an opt-in Phase 0 of `dj run` via `--fetch-missing` (both share `spotify_fetch.fetch_missing()`), downloading into the run path before analysis so new tracks are tagged and grouped in the same run.
 
 ## Common Commands
 
@@ -37,6 +37,8 @@ dj vibe-audit
 dj fetch-missing playlist.csv --library "D:\\Music"
 dj fetch-missing ./playlists --library "D:\\Music" --dry-run
 dj fetch-missing playlist.csv --library "D:\\Music" --format wav
+# Or fold it into the pipeline (downloads into the run path before analysis)
+dj run "D:\\Music" --fetch-missing ./playlists
 
 # Lower-level tools
 dj-tagger --write-tags
@@ -235,7 +237,7 @@ Do not add instructions that tell contributors to bump a manual cache version.
 
 ## Testing Notes
 
-- current suite size: `453` tests
+- current suite size: `456` tests
 - tests use synthetic audio fixtures
 - registry, tagger, grouper, and cache behaviors all have direct coverage
 

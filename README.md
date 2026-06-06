@@ -96,13 +96,20 @@ dj vibe-audit
 ```
 
 Find and download tracks from Spotify playlist exports that aren't in your
-library yet:
+library yet. This works as a standalone command, or as an opt-in phase of
+`dj run` that downloads into the library being processed *before* analysis, so
+new tracks are tagged and grouped in the same run:
 
 ```bash
+# Standalone: match against / download into --library
 dj fetch-missing playlist.csv --library "D:\\Music"
 dj fetch-missing ./playlists --library "D:\\Music"     # a directory of CSVs
 dj fetch-missing playlist.csv --library "D:\\Music" --dry-run
 dj fetch-missing playlist.csv --library "D:\\Music" --format wav
+
+# As part of the pipeline: download into the library being run, then analyze
+dj run "D:\\Music" --fetch-missing ./playlists
+dj run "D:\\Music" --fetch-missing playlist.csv --fetch-format wav
 ```
 
 Lower-level commands:
@@ -159,6 +166,11 @@ Reports and a download log are written to `<library>/outputs/fetch/`
 (`matched_report.csv`, `missing_report.csv`, `download_log.csv`,
 `probable_mismatches.csv`). `--dry-run` reports the missing set without
 downloading. Requires `yt-dlp` and `ffmpeg` on `PATH`.
+
+The same logic is available inside the pipeline via `dj run --fetch-missing
+CSV...`, which runs as Phase 0 and downloads into the first `dj run` path
+(`--fetch-format` chooses aiff/wav). If `yt-dlp`/`ffmpeg` are missing the
+pipeline logs the problem and continues without the fetch step.
 
 ### `dj-tagger`
 

@@ -393,3 +393,122 @@ def _write_match_report(path: str, results: list[MatchResult]) -> None:
                 os.path.basename(r.closest) if r.closest else "",
                 r.track.search_query(),
             ])
+
+
+# --------------------------------------------------------------------------- #
+# Orchestration
+# --------------------------------------------------------------------------- #
+def resolve_library_dir(path: str) -> str:
+    """The directory to match against and download into.
+
+    Accepts a directory (used as-is) or a file (its parent is used), so it
+    works whether ``dj run`` is pointed at a library folder or a single track.
+    """
+    return path if os.path.isdir(path) else os.path.dirname(os.path.abspath(path))
+
+
+def fetch_missing(
+    playlists: list[str],
+    library: str,
+    *,
+    audio_format: str = "aiff",
+    threshold: float = 0.62,
+    min_duration: int = 30,
+    max_duration: int = 900,
+    dry_run: bool = False,
+    report_dir: str | None = None,
+) -> dict:
+    """Match playlist CSVs against ``library`` and download what's missing.
+
+    Returns a summary dict with counts, the missing :class:`MatchResult` list,
+    a list of probable-mismatch ``(track, outfile, reason)`` tuples, and the
+    report directory. Raises ``FileNotFoundError`` if the library is missing
+    and ``RuntimeError`` if required external tools are unavailable.
+    """
+    if not os.path.isdir(library):
+        raise FileNotFoundError(f"library dir not found: {library}")
+
+    csv_paths = collect_playlists(playlists)
+    if not csv_paths:
+        logger.warning("fetch-missing: no playlist CSVs found in %s", playlists)
+
+    tracks = load_unique_tracks(csv_paths)
+    index = scan_library(library)
+    present, missing = classify_tracks(tracks, index, threshold=threshold)
+
+    report_dir = report_dir or os.path.join(library, "outputs", "fetch")
+    os.makedirs(report_dir, exist_ok=True)
+    _write_match_report(os.path.join(report_dir, "matched_report.csv"), present)
+    _write_match_report(os.path.join(report_dir, "missing_report.csv"), missing)
+
+    summary = {
+        "total": len(tracks), "playlists": len(csv_paths),
+        "present": len(present), "missing": len(missing),
+        "downloaded": 0, "skipped": 0, "failed": 0,
+        "missing_results": missing, "mismatches": [], "report_dir": report_dir,
+    }
+    logger.info(
+        "fetch-missing: %d unique track(s) across %d playlist(s) — %d present, %d missing",
+        len(tracks), len(csv_paths), len(present), len(missing),
+    )
+    logger.info("fetch-missing: reports written to %s", report_dir)
+
+    if dry_run or not missing:
+        if dry_run:
+            for r in missing:
+                logger.info("  [%.2f] %s - %s", r.score, r.track.artist_display, r.track.name)
+        return summary
+
+    has_ytdlp, has_ffmpeg = tools_available()
+    if not has_ytdlp:
+        raise RuntimeError("yt-dlp not found on PATH (required to download)")
+    if audio_format == "aiff" and not has_ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH (required for AIFF conversion)")
+
+    log_path = os.path.join(report_dir, "download_log.csv")
+    with open(log_path, "w", encoding="utf-8", newline="") as lf:
+        log = csv.writer(lf)
+        log.writerow(["status", "artists", "name", "query", "outfile", "detail"])
+        for i, r in enumerate(missing, 1):
+            t = r.track
+            outcome = download_track(
+                t, library, audio_format=audio_format,
+                min_duration=min_duration, max_duration=max_duration,
+            )
+            log.writerow([outcome.status, t.artist_display, t.name,
+                          t.search_query(), outcome.outfile, outcome.detail])
+            lf.flush()
+            prefix = f"[{i}/{len(missing)}]"
+            if outcome.status == "skip":
+                summary["skipped"] += 1
+                logger.info("%s skip (exists): %s", prefix, t.target_basename())
+            elif outcome.status == "fail":
+                summary["failed"] += 1
+                logger.warning("%s FAILED: %s — %s", prefix, t.name, outcome.detail)
+            else:
+                summary["downloaded"] += 1
+                logger.info("%s ok: %s", prefix, os.path.basename(outcome.outfile))
+                reason = duration_mismatch(t.duration_sec, probe_duration(outcome.outfile))
+                if reason:
+                    summary["mismatches"].append((t, outcome.outfile, reason))
+
+    if summary["mismatches"]:
+        with open(os.path.join(report_dir, "probable_mismatches.csv"),
+                  "w", encoding="utf-8", newline="") as mf:
+            w = csv.writer(mf)
+            w.writerow(["artists", "name", "outfile", "detail"])
+            for t, outfile, reason in summary["mismatches"]:
+                w.writerow([t.artist_display, t.name, outfile, reason])
+
+    logger.info(
+        "fetch-missing: done — downloaded=%d skipped=%d failed=%d",
+        summary["downloaded"], summary["skipped"], summary["failed"],
+    )
+    if summary["mismatches"]:
+        logger.info(
+            "fetch-missing: %d download(s) are probably NOT an exact match (see %s):",
+            len(summary["mismatches"]), os.path.join(report_dir, "probable_mismatches.csv"),
+        )
+        for t, _outfile, reason in summary["mismatches"]:
+            logger.info("  %s - %s  (%s)", t.artist_display, t.name, reason)
+    return summary
