@@ -261,22 +261,84 @@ def classify_tracks(
 # --------------------------------------------------------------------------- #
 # Downloading
 # --------------------------------------------------------------------------- #
-def build_ytdlp_command(
+DEFAULT_TOLERANCE_SEC = 3.0   # accept a video within +-this of the Spotify length
+DEFAULT_MAX_ATTEMPTS = 3      # one try + two retries before giving up
+# Slack on the post-download ffprobe sanity check: selection already enforced
+# the tolerance against YouTube's reported duration, so this only guards
+# against grossly wrong downloads, not container rounding.
+_SANITY_SLACK_SEC = 5.0
+
+
+def build_candidate_command(
     query: str,
-    out_template: str,
     *,
+    count: int = 5,
     min_duration: int = 30,
     max_duration: int = 900,
-    search_count: int = 5,
 ) -> list[str]:
-    """Construct the yt-dlp argv for a duration-bounded YouTube search."""
+    """yt-dlp argv that prints 'id<TAB>duration<TAB>title' for search hits.
+
+    Uses ``--skip-download`` so only metadata is fetched; the match-filter
+    drops obvious non-tracks (hour-long mixes, tiny clips) before printing.
+    """
+    return [
+        "yt-dlp", "--no-warnings", "--skip-download",
+        "--match-filter", f"duration < {max_duration} & duration > {min_duration}",
+        "--print", "%(id)s\t%(duration)s\t%(title)s",
+        f"ytsearch{count}:{query}",
+    ]
+
+
+def build_download_command(video_id: str, out_template: str) -> list[str]:
+    """yt-dlp argv to extract one specific video's audio to WAV."""
     return [
         "yt-dlp", "--no-playlist", "--no-warnings",
         "-x", "--audio-format", "wav",
-        "--match-filter", f"duration < {max_duration} & duration > {min_duration}",
         "-o", out_template,
-        f"ytsearch{search_count}:{query}",
+        f"https://www.youtube.com/watch?v={video_id}",
     ]
+
+
+def parse_candidate_lines(text: str) -> list[tuple[str, float | None, str]]:
+    """Parse 'id<TAB>duration<TAB>title' lines into (id, duration, title)."""
+    out: list[tuple[str, float | None, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        vid = parts[0]
+        dur: float | None = None
+        if len(parts) > 1:
+            try:
+                dur = float(parts[1])
+            except ValueError:
+                dur = None
+        title = parts[2] if len(parts) > 2 else ""
+        out.append((vid, dur, title))
+    return out
+
+
+def select_candidates(
+    candidates: list[tuple[str, float | None, str]],
+    expected: float | None,
+    tolerance: float = DEFAULT_TOLERANCE_SEC,
+) -> list[str]:
+    """Return candidate video ids worth trying, best first.
+
+    When the Spotify duration is known, keep only videos within ``tolerance``
+    seconds of it, ordered by closeness. When it is unknown, keep the original
+    search order (duration cannot be verified).
+    """
+    if expected is None:
+        return [c[0] for c in candidates]
+    scored = [
+        (abs(dur - expected), vid)
+        for vid, dur, _title in candidates
+        if dur is not None and abs(dur - expected) <= tolerance
+    ]
+    scored.sort()
+    return [vid for _diff, vid in scored]
 
 
 def tools_available() -> tuple[bool, bool]:
@@ -331,9 +393,27 @@ def _wav_to_aiff(wav_path: str, aiff_path: str) -> bool:
 
 @dataclass
 class DownloadOutcome:
-    status: str          # "ok" | "ok_wav" | "skip" | "fail"
+    # "ok" | "ok_wav" | "skip" | "no_match" | "fail"
+    status: str
     outfile: str = ""
     detail: str = ""
+
+
+def _remove_quiet(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _finalize_wav(wav_path: str, aiff_path: str, audio_format: str) -> DownloadOutcome:
+    """Convert the downloaded WAV to the requested format and report outcome."""
+    if audio_format == "wav":
+        return DownloadOutcome("ok", wav_path)
+    if _wav_to_aiff(wav_path, aiff_path):
+        os.remove(wav_path)
+        return DownloadOutcome("ok", aiff_path)
+    return DownloadOutcome("ok_wav", wav_path, "aiff conversion failed; kept wav")
 
 
 def download_track(
@@ -341,42 +421,88 @@ def download_track(
     dest_dir: str,
     *,
     audio_format: str = "aiff",
+    tolerance: float = DEFAULT_TOLERANCE_SEC,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     min_duration: int = 30,
     max_duration: int = 900,
 ) -> DownloadOutcome:
-    """Search YouTube for one track and download it into ``dest_dir``.
+    """Search YouTube and download one track, verifying its duration.
 
-    With ``audio_format='aiff'`` the audio is extracted to WAV then converted;
-    if conversion fails the WAV is kept as a fallback.
+    Only YouTube results within ``tolerance`` seconds of the Spotify track
+    length are considered; the closest is tried first and up to
+    ``max_attempts`` candidates are attempted before giving up with
+    ``no_match``. An existing file at the target path is kept if its duration
+    is already within tolerance, otherwise it is re-downloaded. When the
+    Spotify duration is unknown the top search hit is taken unverified.
     """
     base = track.target_basename()
     aiff_path = os.path.join(dest_dir, base + ".aiff")
     wav_path = os.path.join(dest_dir, base + ".wav")
     final_path = aiff_path if audio_format == "aiff" else wav_path
+    expected = track.duration_sec
 
+    # Skip or re-verify an existing (tool-downloaded) file.
     if os.path.exists(final_path):
-        return DownloadOutcome("skip", final_path, "already exists")
+        if expected is None:
+            return DownloadOutcome("skip", final_path,
+                                   "already exists (no Spotify duration to verify)")
+        actual = probe_duration(final_path)
+        if actual is not None and abs(actual - expected) <= tolerance:
+            return DownloadOutcome("skip", final_path,
+                                   f"already exists, duration ok ({actual:.0f}s)")
+        # Out of bounds — drop it and try to fetch a correct version.
+        logger.info("fetch-missing: re-downloading out-of-bounds file %s (%s vs %ss)",
+                    base, f"{actual:.0f}" if actual else "?", f"{expected:.0f}")
+        _remove_quiet(final_path)
 
-    cmd = build_ytdlp_command(
+    # List candidates and keep those within tolerance, closest first.
+    list_cmd = build_candidate_command(
         track.search_query(),
-        os.path.join(dest_dir, base + ".%(ext)s"),
-        min_duration=min_duration,
-        max_duration=max_duration,
+        count=max(max_attempts, 5),
+        min_duration=min_duration, max_duration=max_duration,
     )
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    proc = subprocess.run(list_cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    candidates = parse_candidate_lines(proc.stdout or "")
+    if not candidates:
+        lines = (proc.stderr or "").strip().splitlines()
+        return DownloadOutcome("fail", "", lines[-1] if lines else "no search results")
+
+    order = select_candidates(candidates, expected, tolerance)
+    if expected is not None and not order:
+        return DownloadOutcome(
+            "no_match", "",
+            f"no result within ±{tolerance:.0f}s of {expected:.0f}s "
+            f"among {len(candidates)} candidate(s)",
+        )
+    if expected is None:
+        order = order[:1]  # unverifiable: take the top hit only
+    attempts = order[:max_attempts]
+
+    out_template = os.path.join(dest_dir, base + ".%(ext)s")
+    last_detail = ""
+    for vid in attempts:
+        _remove_quiet(wav_path)
+        dl = subprocess.run(build_download_command(vid, out_template),
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+        if not os.path.exists(wav_path):
+            lines = (dl.stderr or dl.stdout or "").strip().splitlines()
+            last_detail = lines[-1] if lines else "download produced no file"
+            continue
+        if expected is not None:
+            actual = probe_duration(wav_path)
+            if actual is None or abs(actual - expected) > tolerance + _SANITY_SLACK_SEC:
+                last_detail = (f"got {actual:.0f}s vs {expected:.0f}s"
+                               if actual is not None else "could not probe download")
+                _remove_quiet(wav_path)
+                continue
+        return _finalize_wav(wav_path, aiff_path, audio_format)
+
+    return DownloadOutcome(
+        "no_match", "",
+        last_detail or f"no match within ±{tolerance:.0f}s after {len(attempts)} attempt(s)",
     )
-    if not os.path.exists(wav_path):
-        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return DownloadOutcome("fail", "", lines[-1] if lines else "no output file")
-
-    if audio_format == "wav":
-        return DownloadOutcome("ok", wav_path)
-
-    if _wav_to_aiff(wav_path, aiff_path):
-        os.remove(wav_path)
-        return DownloadOutcome("ok", aiff_path)
-    return DownloadOutcome("ok_wav", wav_path, "aiff conversion failed; kept wav")
 
 
 # --------------------------------------------------------------------------- #
@@ -407,12 +533,29 @@ def resolve_library_dir(path: str) -> str:
     return path if os.path.isdir(path) else os.path.dirname(os.path.abspath(path))
 
 
+def tool_file_for(track: PlaylistTrack, library: str) -> str | None:
+    """Return the path of an existing file this tool would have produced.
+
+    Matches the exact ``Artist - Track`` naming (``.aiff`` then ``.wav``) so
+    re-verification only ever touches tool-downloaded files, never the user's
+    differently-named curated library tracks.
+    """
+    base = track.target_basename()
+    for ext in (".aiff", ".wav"):
+        cand = os.path.join(library, base + ext)
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
 def fetch_missing(
     playlists: list[str],
     library: str,
     *,
     audio_format: str = "aiff",
     threshold: float = 0.62,
+    tolerance: float = DEFAULT_TOLERANCE_SEC,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     min_duration: int = 30,
     max_duration: int = 900,
     dry_run: bool = False,
@@ -420,10 +563,15 @@ def fetch_missing(
 ) -> dict:
     """Match playlist CSVs against ``library`` and download what's missing.
 
+    Downloads are duration-verified: only YouTube results within ``tolerance``
+    seconds of the Spotify track are accepted, retrying up to ``max_attempts``
+    times before reporting the track as unmatched. Previously tool-downloaded
+    files whose duration drifts outside tolerance are re-downloaded.
+
     Returns a summary dict with counts, the missing :class:`MatchResult` list,
-    a list of probable-mismatch ``(track, outfile, reason)`` tuples, and the
-    report directory. Raises ``FileNotFoundError`` if the library is missing
-    and ``RuntimeError`` if required external tools are unavailable.
+    a list of unmatched ``(track, detail)`` tuples, and the report directory.
+    Raises ``FileNotFoundError`` if the library is missing and ``RuntimeError``
+    if required external tools are unavailable.
     """
     if not os.path.isdir(library):
         raise FileNotFoundError(f"library dir not found: {library}")
@@ -441,11 +589,17 @@ def fetch_missing(
     _write_match_report(os.path.join(report_dir, "matched_report.csv"), present)
     _write_match_report(os.path.join(report_dir, "missing_report.csv"), missing)
 
+    # Work set: genuinely-missing tracks (download) plus already tool-downloaded
+    # tracks (re-verify duration, re-download if it has drifted out of bounds).
+    work = list(missing)
+    reverify = [r for r in present if tool_file_for(r.track, library)]
+    work.extend(reverify)
+
     summary = {
         "total": len(tracks), "playlists": len(csv_paths),
-        "present": len(present), "missing": len(missing),
-        "downloaded": 0, "skipped": 0, "failed": 0,
-        "missing_results": missing, "mismatches": [], "report_dir": report_dir,
+        "present": len(present), "missing": len(missing), "reverify": len(reverify),
+        "downloaded": 0, "skipped": 0, "failed": 0, "unmatched": 0,
+        "missing_results": missing, "unmatched_results": [], "report_dir": report_dir,
     }
     logger.info(
         "fetch-missing: %d unique track(s) across %d playlist(s) — %d present, %d missing",
@@ -453,7 +607,7 @@ def fetch_missing(
     )
     logger.info("fetch-missing: reports written to %s", report_dir)
 
-    if dry_run or not missing:
+    if dry_run or not work:
         if dry_run:
             for r in missing:
                 logger.info("  [%.2f] %s - %s", r.score, r.track.artist_display, r.track.name)
@@ -469,46 +623,50 @@ def fetch_missing(
     with open(log_path, "w", encoding="utf-8", newline="") as lf:
         log = csv.writer(lf)
         log.writerow(["status", "artists", "name", "query", "outfile", "detail"])
-        for i, r in enumerate(missing, 1):
+        for i, r in enumerate(work, 1):
             t = r.track
             outcome = download_track(
                 t, library, audio_format=audio_format,
+                tolerance=tolerance, max_attempts=max_attempts,
                 min_duration=min_duration, max_duration=max_duration,
             )
             log.writerow([outcome.status, t.artist_display, t.name,
                           t.search_query(), outcome.outfile, outcome.detail])
             lf.flush()
-            prefix = f"[{i}/{len(missing)}]"
+            prefix = f"[{i}/{len(work)}]"
             if outcome.status == "skip":
                 summary["skipped"] += 1
-                logger.info("%s skip (exists): %s", prefix, t.target_basename())
+                logger.info("%s skip (duration ok): %s", prefix, t.target_basename())
+            elif outcome.status == "no_match":
+                summary["unmatched"] += 1
+                summary["unmatched_results"].append((t, outcome.detail))
+                logger.warning("%s NO MATCH within ±%.0fs: %s — %s",
+                               prefix, tolerance, t.name, outcome.detail)
             elif outcome.status == "fail":
                 summary["failed"] += 1
                 logger.warning("%s FAILED: %s — %s", prefix, t.name, outcome.detail)
             else:
                 summary["downloaded"] += 1
                 logger.info("%s ok: %s", prefix, os.path.basename(outcome.outfile))
-                reason = duration_mismatch(t.duration_sec, probe_duration(outcome.outfile))
-                if reason:
-                    summary["mismatches"].append((t, outcome.outfile, reason))
 
-    if summary["mismatches"]:
-        with open(os.path.join(report_dir, "probable_mismatches.csv"),
+    if summary["unmatched_results"]:
+        with open(os.path.join(report_dir, "unmatched_report.csv"),
                   "w", encoding="utf-8", newline="") as mf:
             w = csv.writer(mf)
-            w.writerow(["artists", "name", "outfile", "detail"])
-            for t, outfile, reason in summary["mismatches"]:
-                w.writerow([t.artist_display, t.name, outfile, reason])
+            w.writerow(["artists", "name", "query", "duration_sec", "detail"])
+            for t, detail in summary["unmatched_results"]:
+                w.writerow([t.artist_display, t.name, t.search_query(),
+                            f"{t.duration_sec:.0f}" if t.duration_sec else "", detail])
 
     logger.info(
-        "fetch-missing: done — downloaded=%d skipped=%d failed=%d",
-        summary["downloaded"], summary["skipped"], summary["failed"],
+        "fetch-missing: done — downloaded=%d skipped=%d unmatched=%d failed=%d",
+        summary["downloaded"], summary["skipped"], summary["unmatched"], summary["failed"],
     )
-    if summary["mismatches"]:
+    if summary["unmatched_results"]:
         logger.info(
-            "fetch-missing: %d download(s) are probably NOT an exact match (see %s):",
-            len(summary["mismatches"]), os.path.join(report_dir, "probable_mismatches.csv"),
+            "fetch-missing: %d track(s) had no result within ±%.0fs (see %s):",
+            summary["unmatched"], tolerance, os.path.join(report_dir, "unmatched_report.csv"),
         )
-        for t, _outfile, reason in summary["mismatches"]:
-            logger.info("  %s - %s  (%s)", t.artist_display, t.name, reason)
+        for t, detail in summary["unmatched_results"]:
+            logger.info("  %s - %s  (%s)", t.artist_display, t.name, detail)
     return summary

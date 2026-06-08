@@ -97,6 +97,12 @@ def _build_parser() -> argparse.ArgumentParser:
                          default="aiff", help="Download format (default: aiff)")
     p_fetch.add_argument("--threshold", type=float, default=0.62,
                          help="Match score threshold; below this counts as missing (default: 0.62)")
+    p_fetch.add_argument("--duration-tolerance", dest="tolerance", type=float, default=3.0,
+                         help="Accept a YouTube result only within this many seconds of the "
+                              "Spotify track length (default: 3)")
+    p_fetch.add_argument("--max-attempts", dest="max_attempts", type=int, default=3,
+                         help="Candidate downloads to try per track before reporting it "
+                              "unmatched (default: 3)")
     p_fetch.add_argument("--max-duration", type=int, default=900,
                          help="Reject YouTube results longer than this many seconds (default: 900)")
     p_fetch.add_argument("--min-duration", type=int, default=30,
@@ -711,6 +717,8 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             args.library,
             audio_format=args.audio_format,
             threshold=args.threshold,
+            tolerance=args.tolerance,
+            max_attempts=args.max_attempts,
             min_duration=args.min_duration,
             max_duration=args.max_duration,
             dry_run=args.dry_run,

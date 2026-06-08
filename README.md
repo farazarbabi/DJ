@@ -155,17 +155,22 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
 2. fuzzy-matches each track against the audio files already in `--library`,
    requiring artist agreement so unrelated same-title tracks and alternate
    remixes of a track you only own the original of count as missing
-3. downloads the missing tracks via `yt-dlp` YouTube search (results are
-   duration-bounded to skip hour-long DJ mixes), extracting to WAV and
-   converting losslessly to AIFF by default (`--format wav` to keep WAV)
-4. names files `Artist - Track` in the library convention, skips anything
-   already present, and flags downloads whose length differs sharply from
-   Spotify's as probable wrong-video matches
+3. downloads the missing tracks via `yt-dlp` YouTube search, **verifying
+   duration**: only results within `--duration-tolerance` seconds (default 3)
+   of the Spotify track are accepted, trying the closest candidate first and
+   up to `--max-attempts` (default 3) before reporting the track as unmatched.
+   Audio is extracted to WAV and converted losslessly to AIFF by default
+   (`--format wav` to keep WAV)
+4. names files `Artist - Track` in the library convention. A track already
+   downloaded by this tool is kept if its duration is still within tolerance,
+   otherwise it is re-downloaded; differently-named user library files are
+   never touched
 
 Reports and a download log are written to `<library>/outputs/fetch/`
-(`matched_report.csv`, `missing_report.csv`, `download_log.csv`,
-`probable_mismatches.csv`). `--dry-run` reports the missing set without
-downloading. Requires `yt-dlp` and `ffmpeg` on `PATH`.
+(`matched_report.csv`, `missing_report.csv`, `download_log.csv`, and
+`unmatched_report.csv` for tracks with no in-tolerance result). `--dry-run`
+reports the missing set without downloading. Requires `yt-dlp` and `ffmpeg`
+on `PATH`.
 
 The same logic is available inside the pipeline via `dj run --fetch-missing
 CSV...`, which runs as Phase 0 and downloads into the first `dj run` path

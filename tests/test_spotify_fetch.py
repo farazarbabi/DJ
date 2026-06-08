@@ -3,18 +3,22 @@
 from dj_tools.spotify_fetch import (
     PlaylistTrack,
     best_match,
-    build_ytdlp_command,
+    build_candidate_command,
+    build_download_command,
     classify_tracks,
     clean_track_name,
     collect_playlists,
     duration_mismatch,
     fetch_missing,
     load_unique_tracks,
+    parse_candidate_lines,
     parse_playlist_csv,
     resolve_library_dir,
     sanitize_filename,
     scan_library,
+    select_candidates,
     tokens,
+    tool_file_for,
 )
 
 CSV_HEADER = (
@@ -154,13 +158,48 @@ def test_classify_tracks_splits_present_and_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 # Download helpers
 # --------------------------------------------------------------------------- #
-def test_build_ytdlp_command():
-    cmd = build_ytdlp_command("NTO Starlings", "/out/%(ext)s",
-                              min_duration=30, max_duration=900)
+def test_build_candidate_command():
+    cmd = build_candidate_command("NTO Starlings", count=5,
+                                  min_duration=30, max_duration=900)
     assert cmd[0] == "yt-dlp"
+    assert "--skip-download" in cmd
     assert "ytsearch5:NTO Starlings" in cmd
     assert "duration < 900 & duration > 30" in cmd
+
+
+def test_build_download_command_targets_specific_video():
+    cmd = build_download_command("abc123", "/out/%(ext)s")
+    assert "https://www.youtube.com/watch?v=abc123" in cmd
     assert "wav" in cmd
+    assert "/out/%(ext)s" in cmd
+
+
+def test_parse_candidate_lines_handles_missing_duration():
+    text = "id1\t210.0\tTitle One\nid2\tNA\tTitle Two\nid3\t300\tThree\n"
+    rows = parse_candidate_lines(text)
+    assert rows[0] == ("id1", 210.0, "Title One")
+    assert rows[1] == ("id2", None, "Title Two")
+    assert rows[2] == ("id3", 300.0, "Three")
+
+
+def test_select_candidates_keeps_within_tolerance_closest_first():
+    cands = [
+        ("far", 250.0, "x"),     # 30s off
+        ("close", 222.0, "x"),   # 2s off  -> within 3s
+        ("none", None, "x"),     # unknown duration -> excluded
+        ("edge", 217.0, "x"),    # 3s off  -> within 3s (boundary)
+    ]
+    assert select_candidates(cands, expected=220.0, tolerance=3.0) == ["close", "edge"]
+
+
+def test_select_candidates_unknown_expected_keeps_order():
+    cands = [("a", 100.0, "x"), ("b", None, "x")]
+    assert select_candidates(cands, expected=None) == ["a", "b"]
+
+
+def test_select_candidates_none_within_tolerance():
+    cands = [("a", 300.0, "x"), ("b", 100.0, "x")]
+    assert select_candidates(cands, expected=220.0, tolerance=3.0) == []
 
 
 def test_duration_mismatch_flags_large_gap():
@@ -210,3 +249,14 @@ def test_fetch_missing_bad_library_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         fetch_missing([], str(tmp_path / "nope"))
+
+
+def test_tool_file_for_matches_only_tool_naming(tmp_path):
+    track = PlaylistTrack(name="Starlings - Henry Saiz Remix", artists=["NTO"])
+    # No tool-named file yet -> None (a differently-named user file is ignored).
+    (tmp_path / "NTO - Starlings (Original Mix).aiff").write_bytes(b"\x00")
+    assert tool_file_for(track, str(tmp_path)) is None
+    # Exact tool naming is recognized.
+    tool = tmp_path / "NTO - Starlings (Henry Saiz Remix).aiff"
+    tool.write_bytes(b"\x00")
+    assert tool_file_for(track, str(tmp_path)) == str(tool)
