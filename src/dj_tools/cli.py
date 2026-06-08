@@ -73,6 +73,42 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Also write coarser, half-resolution playlists (by_key_coarse/, by_subgenre_coarse/, groups_coarse/) alongside the fine-grained ones")
     p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
     p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
+    p_run.add_argument(
+        "--fetch-missing", dest="fetch_missing", nargs="+", default=None, metavar="CSV",
+        help="Before analysis, download tracks from these Spotify playlist CSV(s)/dir "
+             "that aren't already in the library being processed",
+    )
+    p_run.add_argument("--fetch-format", dest="fetch_format", choices=["aiff", "wav"],
+                       default="aiff", help="Format for --fetch-missing downloads (default: aiff)")
+
+    p_fetch = sub.add_parser(
+        "fetch-missing",
+        help="Download tracks from Spotify playlist CSVs that aren't in your library yet",
+    )
+    p_fetch.add_argument(
+        "playlists", nargs="+", metavar="CSV",
+        help="Exportify-style Spotify playlist CSV file(s) or a directory of them",
+    )
+    p_fetch.add_argument(
+        "--library", default="./files", metavar="DIR",
+        help="Library dir to check for existing tracks and download into (default: ./files)",
+    )
+    p_fetch.add_argument("--format", dest="audio_format", choices=["aiff", "wav"],
+                         default="aiff", help="Download format (default: aiff)")
+    p_fetch.add_argument("--threshold", type=float, default=0.62,
+                         help="Match score threshold; below this counts as missing (default: 0.62)")
+    p_fetch.add_argument("--duration-tolerance", dest="tolerance", type=float, default=3.0,
+                         help="Accept a YouTube result only within this many seconds of the "
+                              "Spotify track length (default: 3)")
+    p_fetch.add_argument("--max-attempts", dest="max_attempts", type=int, default=3,
+                         help="Candidate downloads to try per track before reporting it "
+                              "unmatched (default: 3)")
+    p_fetch.add_argument("--max-duration", type=int, default=900,
+                         help="Reject YouTube results longer than this many seconds (default: 900)")
+    p_fetch.add_argument("--min-duration", type=int, default=30,
+                         help="Reject YouTube results shorter than this many seconds (default: 30)")
+    p_fetch.add_argument("--dry-run", action="store_true",
+                         help="Only report matched/missing; do not download")
 
     return parser
 
@@ -524,6 +560,26 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # Clear stale observations — rebuilt from cache each run
     store.save_observations([])
 
+    # Phase 0: Fetch missing tracks from Spotify playlists into the library
+    if getattr(args, "fetch_missing", None):
+        from .spotify_fetch import fetch_missing, resolve_library_dir
+
+        t0 = time.perf_counter()
+        library_dir = resolve_library_dir(args.paths[0] if args.paths else "./files")
+        try:
+            summary = fetch_missing(
+                args.fetch_missing,
+                library_dir,
+                audio_format=getattr(args, "fetch_format", "aiff"),
+            )
+            logger.info(
+                "Pipeline: fetch-missing done in %s (downloaded=%d skipped=%d failed=%d)",
+                _fmt_elapsed(time.perf_counter() - t0),
+                summary["downloaded"], summary["skipped"], summary["failed"],
+            )
+        except (FileNotFoundError, RuntimeError) as exc:
+            logger.error("Pipeline: fetch-missing failed (%s); continuing without it", exc)
+
     # Phase 1: Scan + Link
     t0 = time.perf_counter()
     show_progress = not getattr(args, "quiet", False) and not getattr(args, "no_progress", False)
@@ -651,6 +707,28 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_fetch_missing(args: argparse.Namespace) -> int:
+    """Match Spotify playlist CSVs against the library and download what's missing."""
+    from .spotify_fetch import fetch_missing
+
+    try:
+        fetch_missing(
+            args.playlists,
+            args.library,
+            audio_format=args.audio_format,
+            threshold=args.threshold,
+            tolerance=args.tolerance,
+            max_attempts=args.max_attempts,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            dry_run=args.dry_run,
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        logger.error("fetch-missing: %s", exc)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
 
@@ -660,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(raw)
         return 0
     # Default to "run" when no subcommand is given
-    known_commands = {"run", "vibe-audit"}
+    known_commands = {"run", "vibe-audit", "fetch-missing"}
     if not raw or raw[0] not in known_commands:
         raw = ["run"] + list(raw)
 
@@ -684,6 +762,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         try:
             return _run_pipeline(args)
+        except KeyboardInterrupt:
+            return 130
+        except Exception:
+            logger.error("Fatal error", exc_info=True)
+            return 1
+
+    if args.command == "fetch-missing":
+        try:
+            return _run_fetch_missing(args)
         except KeyboardInterrupt:
             return 130
         except Exception:

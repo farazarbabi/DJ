@@ -95,6 +95,23 @@ dj run --force-extract
 dj vibe-audit
 ```
 
+Find and download tracks from Spotify playlist exports that aren't in your
+library yet. This works as a standalone command, or as an opt-in phase of
+`dj run` that downloads into the library being processed *before* analysis, so
+new tracks are tagged and grouped in the same run:
+
+```bash
+# Standalone: match against / download into --library
+dj fetch-missing playlist.csv --library "D:\\Music"
+dj fetch-missing ./playlists --library "D:\\Music"     # a directory of CSVs
+dj fetch-missing playlist.csv --library "D:\\Music" --dry-run
+dj fetch-missing playlist.csv --library "D:\\Music" --format wav
+
+# As part of the pipeline: download into the library being run, then analyze
+dj run "D:\\Music" --fetch-missing ./playlists
+dj run "D:\\Music" --fetch-missing playlist.csv --fetch-format wav
+```
+
 Lower-level commands:
 
 ```bash
@@ -131,6 +148,34 @@ The unified pipeline orchestrates:
 5. internal DJ taxonomy category prediction
 6. tag writing
 7. grouping and recommendation generation
+
+It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
+
+1. parses one or more Exportify-style Spotify playlist CSVs (deduped by track URI)
+2. fuzzy-matches each track against the audio files already in `--library`,
+   requiring artist agreement so unrelated same-title tracks and alternate
+   remixes of a track you only own the original of count as missing
+3. downloads the missing tracks via `yt-dlp` YouTube search, **verifying
+   duration**: only results within `--duration-tolerance` seconds (default 3)
+   of the Spotify track are accepted, trying the closest candidate first and
+   up to `--max-attempts` (default 3) before reporting the track as unmatched.
+   Audio is extracted to WAV and converted losslessly to AIFF by default
+   (`--format wav` to keep WAV)
+4. names files `Artist - Track` in the library convention. A track already
+   downloaded by this tool is kept if its duration is still within tolerance,
+   otherwise it is re-downloaded; differently-named user library files are
+   never touched
+
+Reports and a download log are written to `<library>/outputs/fetch/`
+(`matched_report.csv`, `missing_report.csv`, `download_log.csv`, and
+`unmatched_report.csv` for tracks with no in-tolerance result). `--dry-run`
+reports the missing set without downloading. Requires `yt-dlp` and `ffmpeg`
+on `PATH`.
+
+The same logic is available inside the pipeline via `dj run --fetch-missing
+CSV...`, which runs as Phase 0 and downloads into the first `dj run` path
+(`--fetch-format` chooses aiff/wav). If `yt-dlp`/`ffmpeg` are missing the
+pipeline logs the problem and continues without the fetch step.
 
 ### `dj-tagger`
 
