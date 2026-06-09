@@ -469,22 +469,63 @@ def run_analysis(
             stem = ucache.get_track(fname, duration, "vocal_stem")
             cached_vocal_stems.append(stem if isinstance(stem, dict) and stem else None)
 
+        # Persist each analyzed track to the cache as soon as it finishes, and
+        # flush to disk every CHECKPOINT_EVERY tracks. Audio analysis is slow
+        # per track, so checkpointing bounds how much work an interrupted run
+        # can lose to at most CHECKPOINT_EVERY tracks instead of the whole run.
+        CHECKPOINT_EVERY = 10
+        since_checkpoint = 0
+
+        def _persist_result(misses_idx: int, result: dict | None) -> None:
+            """Store one analysis result in the cache and checkpoint periodically.
+
+            Saves tagger (derived) + dsp/raw_analysis/section_dsp/vocal_stem (raw)
+            so future settings.toml changes can re-derive without re-analyzing
+            audio. Survives across runs — keyed by filename + duration, not mtime.
+            """
+            nonlocal since_checkpoint
+            track_id, file_id, path, mtime, duration = cache_misses[misses_idx]
+            if result and "error" not in result and result.get("tagger_result"):
+                track = track_by_id.get(track_id)
+                audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
+                tagger_result = _hydrate_tagger_result(result["tagger_result"], audio_features)
+                store_dur = quick_duration(path) or duration
+                fname = os.path.basename(path)
+                ucache.put_track(fname, store_dur, "tagger", tagger_result, mtime=mtime)
+                if isinstance(result.get("dsp"), dict):
+                    ucache.put_track(fname, store_dur, "dsp", result["dsp"], mtime=mtime)
+                if isinstance(result.get("raw_analysis"), dict):
+                    ucache.put_track(fname, store_dur, "raw_analysis", result["raw_analysis"], mtime=mtime)
+                if isinstance(result.get("section_dsp"), dict):
+                    ucache.put_track(fname, store_dur, "section_dsp", result["section_dsp"], mtime=mtime)
+                if isinstance(result.get("vocal_stem"), dict) and result["vocal_stem"]:
+                    ucache.put_track(fname, store_dur, "vocal_stem", result["vocal_stem"], mtime=mtime)
+                result["tagger_result"] = tagger_result
+                fresh_results.append((track_id, file_id, path, result))
+            else:
+                err = result.get("error", "unknown") if result else "unknown"
+                logger.warning("Analysis failed for %s: %s", path, err)
+
+            since_checkpoint += 1
+            if since_checkpoint >= CHECKPOINT_EVERY:
+                ucache.save()
+                logger.info("Checkpoint: saved cache after %d analyzed tracks", since_checkpoint)
+                since_checkpoint = 0
+
         if config.analysis_workers <= 1:
-            raw_results = []
             analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
             for i, p in enumerate(paths_to_analyze):
                 track_id = cache_misses[i][0]
                 track = track_by_id.get(track_id)
                 audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
                 result = _analyze_full(p, use_essentia, audio_features, cached_vocal_stems[i])
-                raw_results.append(result)
+                _persist_result(i, result)
                 fname = os.path.basename(p)
                 if not show_progress:
                     logger.info("  [%d/%d] %s", i + 1, n_total, fname)
                 analysis_progress.update(i + 1, fname)
             analysis_progress.finish()
         else:
-            raw_results = [None] * n_total
             done = 0
             analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
             with ProcessPoolExecutor(max_workers=config.analysis_workers) as pool:
@@ -505,47 +546,25 @@ def run_analysis(
                     idx = futures[future]
                     done += 1
                     try:
-                        raw_results[idx] = future.result()
+                        result = future.result()
                         fname = os.path.basename(paths_to_analyze[idx])
                         if not show_progress:
                             logger.info("  [%d/%d] %s", done, n_total, fname)
                         analysis_progress.update(done, fname)
                     except Exception as e:
-                        raw_results[idx] = {"path": paths_to_analyze[idx], "error": str(e)}
+                        result = {"path": paths_to_analyze[idx], "error": str(e)}
                         fname = os.path.basename(paths_to_analyze[idx])
                         if not show_progress:
                             logger.info("  [%d/%d] %s FAILED", done, n_total, fname)
                         analysis_progress.update(done, f"{fname} FAILED")
+                    # Persist as each future completes so an interrupted run
+                    # keeps everything finished up to the last checkpoint.
+                    _persist_result(idx, result)
             analysis_progress.finish()
 
-        # Store results directly in universal cache with duration key.
-        # This ensures results survive across runs — no mtime dependency.
-        # Saves tagger (derived) + dsp/raw_analysis/section_dsp (raw) so that
-        # future settings.toml changes can re-derive without re-analyzing audio.
-        for (track_id, file_id, path, mtime, duration), result in zip(cache_misses, raw_results):
-            if result and "error" not in result and result.get("tagger_result"):
-                track = track_by_id.get(track_id)
-                audio_features = _lookup_audio_features(ucache, track.isrc_canonical if track else "")
-                tagger_result = _hydrate_tagger_result(result["tagger_result"], audio_features)
-                store_dur = quick_duration(path) or duration
-                fname = os.path.basename(path)
-                ucache.put_track(fname, store_dur, "tagger", tagger_result, mtime=mtime)
-                # Save raw layers so derive_all can re-derive on settings changes
-                if isinstance(result.get("dsp"), dict):
-                    ucache.put_track(fname, store_dur, "dsp", result["dsp"], mtime=mtime)
-                if isinstance(result.get("raw_analysis"), dict):
-                    ucache.put_track(fname, store_dur, "raw_analysis", result["raw_analysis"], mtime=mtime)
-                if isinstance(result.get("section_dsp"), dict):
-                    ucache.put_track(fname, store_dur, "section_dsp", result["section_dsp"], mtime=mtime)
-                if isinstance(result.get("vocal_stem"), dict) and result["vocal_stem"]:
-                    ucache.put_track(fname, store_dur, "vocal_stem", result["vocal_stem"], mtime=mtime)
-                result["tagger_result"] = tagger_result
-                fresh_results.append((track_id, file_id, path, result))
-            else:
-                err = result.get("error", "unknown") if result else "unknown"
-                logger.warning("Analysis failed for %s: %s", path, err)
-
-        ucache.save()
+        # Flush any tracks analyzed since the last checkpoint.
+        if since_checkpoint:
+            ucache.save()
 
     if ucache.dirty:
         ucache.save()
