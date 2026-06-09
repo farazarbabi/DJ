@@ -573,9 +573,10 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 audio_format=getattr(args, "fetch_format", "aiff"),
             )
             logger.info(
-                "Pipeline: fetch-missing done in %s (downloaded=%d skipped=%d failed=%d)",
+                "Pipeline: fetch-missing done in %s (downloaded=%d skipped=%d failed=%d pruned=%d)",
                 _fmt_elapsed(time.perf_counter() - t0),
                 summary["downloaded"], summary["skipped"], summary["failed"],
+                summary["pruned"],
             )
         except (FileNotFoundError, RuntimeError) as exc:
             logger.error("Pipeline: fetch-missing failed (%s); continuing without it", exc)

@@ -13,6 +13,7 @@ from dj_tools.spotify_fetch import (
     load_unique_tracks,
     parse_candidate_lines,
     parse_playlist_csv,
+    prune_superseded_downloads,
     resolve_library_dir,
     sanitize_filename,
     scan_library,
@@ -290,6 +291,44 @@ def test_tool_file_for_prefers_marked_name(tmp_path):
     marked = tmp_path / "Adele - Skyfall[U].aiff"
     marked.write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) == str(marked)
+
+
+def test_prune_superseded_downloads_removes_marked_when_original_exists(tmp_path):
+    orig = tmp_path / "Elodie Gervaise - Free Babe.aiff"
+    marked = tmp_path / "Elodie Gervaise - Free Babe[U].aiff"
+    orig.write_bytes(b"\x00")
+    marked.write_bytes(b"\x00")
+    removed = prune_superseded_downloads(str(tmp_path))
+    assert removed == [str(marked)]
+    assert not marked.exists()
+    assert orig.exists()  # the curated original is kept
+
+
+def test_prune_superseded_downloads_matches_across_formats(tmp_path):
+    orig = tmp_path / "Artist - Song.aiff"
+    marked = tmp_path / "Artist - Song[U].wav"  # different ext still superseded
+    orig.write_bytes(b"\x00")
+    marked.write_bytes(b"\x00")
+    removed = prune_superseded_downloads(str(tmp_path))
+    assert removed == [str(marked)]
+    assert not marked.exists()
+
+
+def test_prune_superseded_downloads_keeps_marked_without_original(tmp_path):
+    marked = tmp_path / "Artist - Song[U].aiff"
+    marked.write_bytes(b"\x00")
+    assert prune_superseded_downloads(str(tmp_path)) == []
+    assert marked.exists()
+
+
+def test_prune_superseded_downloads_dry_run_reports_without_deleting(tmp_path):
+    orig = tmp_path / "Artist - Song.aiff"
+    marked = tmp_path / "Artist - Song[U].aiff"
+    orig.write_bytes(b"\x00")
+    marked.write_bytes(b"\x00")
+    removed = prune_superseded_downloads(str(tmp_path), dry_run=True)
+    assert removed == [str(marked)]
+    assert marked.exists()  # dry run leaves files in place
 
 
 def test_embed_metadata_writes_id3_tags(tmp_path):

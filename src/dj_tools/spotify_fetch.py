@@ -11,7 +11,9 @@ Given one or more Exportify-style Spotify playlist CSVs, this:
      playlist row into each download, and marks the filename with ``[U]`` so
      tool-downloaded files can be told apart from originally-AIFF library tracks,
   5. flags downloads whose duration differs sharply from Spotify's — a strong
-     signal that the search returned the wrong video.
+     signal that the search returned the wrong video, and
+  6. prunes any previously-downloaded ``[U]`` file once the user has added a
+     properly-named, unmarked curated original of that track to the library.
 
 The matcher works off files on disk, so it does not require a populated
 registry. ``yt-dlp`` and ``ffmpeg`` must be on PATH for the download step.
@@ -610,6 +612,38 @@ def tool_file_for(track: PlaylistTrack, library: str) -> str | None:
     return None
 
 
+def prune_superseded_downloads(library: str, *, dry_run: bool = False) -> list[str]:
+    """Delete tool-downloaded ``[U]`` files whose curated original now exists.
+
+    Once the user adds a properly-named, unmarked ``Artist - Title`` original
+    for a track previously fetched as ``Artist - Title[U]``, the marked copy is
+    a redundant, lower-quality duplicate. Any *unmarked* audio file sharing the
+    marked file's stem (minus the ``[U]`` marker), in any audio format, counts
+    as the superseding original. Returns the paths removed — or, under
+    ``dry_run``, the paths that would be removed.
+    """
+    unmarked_stems: set[str] = set()
+    marked: list[tuple[str, str]] = []  # (path, stem-without-marker)
+    for entry in os.scandir(library):
+        if not entry.is_file():
+            continue
+        stem, ext = os.path.splitext(entry.name)
+        if ext.lower() not in AUDIO_EXTS:
+            continue
+        if stem.endswith(SOURCE_MARKER):
+            marked.append((entry.path, stem[: -len(SOURCE_MARKER)]))
+        else:
+            unmarked_stems.add(stem)
+
+    removed: list[str] = []
+    for path, base_stem in marked:
+        if base_stem in unmarked_stems:
+            removed.append(path)
+            if not dry_run:
+                _remove_quiet(path)
+    return removed
+
+
 def fetch_missing(
     playlists: list[str],
     library: str,
@@ -638,6 +672,17 @@ def fetch_missing(
     if not os.path.isdir(library):
         raise FileNotFoundError(f"library dir not found: {library}")
 
+    # Drop any [U] download the user has since replaced with a curated original.
+    pruned = prune_superseded_downloads(library, dry_run=dry_run)
+    if pruned:
+        verb = "would remove" if dry_run else "removed"
+        logger.info(
+            "fetch-missing: %s %d superseded [U] download(s) replaced by curated originals",
+            verb, len(pruned),
+        )
+        for p in pruned:
+            logger.info("  %s %s", verb, os.path.basename(p))
+
     csv_paths = collect_playlists(playlists)
     if not csv_paths:
         logger.warning("fetch-missing: no playlist CSVs found in %s", playlists)
@@ -660,6 +705,7 @@ def fetch_missing(
     summary = {
         "total": len(tracks), "playlists": len(csv_paths),
         "present": len(present), "missing": len(missing), "reverify": len(reverify),
+        "pruned": len(pruned),
         "downloaded": 0, "skipped": 0, "failed": 0, "unmatched": 0,
         "missing_results": missing, "unmatched_results": [], "report_dir": report_dir,
     }
