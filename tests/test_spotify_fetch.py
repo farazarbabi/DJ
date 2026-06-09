@@ -20,6 +20,7 @@ from dj_tools.spotify_fetch import (
     select_candidates,
     tokens,
     tool_file_for,
+    version_key,
 )
 
 CSV_HEADER = (
@@ -264,6 +265,22 @@ def test_fetch_missing_dry_run_writes_reports(tmp_path):
     assert not (report_dir / "download_log.csv").exists()
 
 
+def test_fetch_missing_treats_extended_variant_as_present(tmp_path):
+    # Spotify lists the untagged title; library only has the Extended Mix.
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Iorie - Matter of Fact (Extended Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Matter of Fact", "Iorie", 357000),
+    ])
+
+    summary = fetch_missing([csv_path], str(library), dry_run=True)
+
+    assert summary["present"] == 1
+    assert summary["missing"] == 0
+    assert summary["downloaded"] == 0
+
+
 def test_fetch_missing_bad_library_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
@@ -312,6 +329,40 @@ def test_prune_superseded_downloads_matches_across_formats(tmp_path):
     removed = prune_superseded_downloads(str(tmp_path))
     assert removed == [str(marked)]
     assert not marked.exists()
+
+
+def test_version_key_ignores_original_extended_suffixes():
+    base = version_key("Elodie Gervaise - Free Babe")
+    assert version_key("Elodie Gervaise - Free Babe (Original Mix)") == base
+    assert version_key("Elodie Gervaise - Free Babe (Original Version)") == base
+    assert version_key("Elodie Gervaise - Free Babe (Extended Mix)") == base
+    assert version_key("Elodie Gervaise - Free Babe (Extended Version)") == base
+    assert version_key("Elodie Gervaise - Free Babe [Extended]") == base
+    # A true remix is a distinct track and keeps its own identity.
+    assert version_key("Elodie Gervaise - Free Babe (Henry Saiz Remix)") != base
+    # The artist/title separator dash is never stripped.
+    assert version_key("Artist - Some Title") == "artist - some title"
+
+
+def test_prune_superseded_downloads_removes_when_variant_original_added(tmp_path):
+    # User fetched a [U] copy, later added a curated "(Extended Mix)" original.
+    marked = tmp_path / "Iorie - Matter of Fact[U].aiff"
+    variant = tmp_path / "Iorie - Matter of Fact (Extended Mix).aiff"
+    marked.write_bytes(b"\x00")
+    variant.write_bytes(b"\x00")
+    assert prune_superseded_downloads(str(tmp_path)) == [str(marked)]
+    assert not marked.exists()
+    assert variant.exists()
+
+
+def test_prune_superseded_downloads_ignores_unrelated_remix(tmp_path):
+    marked = tmp_path / "Iorie - Matter of Fact[U].aiff"
+    remix = tmp_path / "Iorie - Matter of Fact (Some Remix).aiff"
+    marked.write_bytes(b"\x00")
+    remix.write_bytes(b"\x00")
+    # A remix is a different track, so the [U] copy is NOT superseded.
+    assert prune_superseded_downloads(str(tmp_path)) == []
+    assert marked.exists()
 
 
 def test_prune_superseded_downloads_keeps_marked_without_original(tmp_path):

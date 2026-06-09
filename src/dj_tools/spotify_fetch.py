@@ -51,6 +51,33 @@ _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # affect missing-track detection.
 SOURCE_MARKER = "[U]"
 
+# Trailing version descriptors that denote the *same* track as an untagged
+# Spotify title and should be ignored when matching. Spotify usually omits
+# "Original ...", while a lossless/AIFF source typically tags it; and an
+# "Extended ..." cut, though a longer edit, is the preferred DJ version of the
+# same song. A true remix (e.g. "(Henry Saiz Remix)") is a distinct track and
+# is deliberately NOT covered here. Only the parenthesized/bracketed form is
+# stripped, so the "Artist - Title" separator dash is never touched.
+_EQUIV_VERSION_RE = re.compile(
+    r"\s*[\(\[]\s*(?:original|extended)"
+    r"(?:\s+(?:mix|version|edit|re-?edit|cut|remix))?\s*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+
+
+def version_key(stem: str) -> str:
+    """Normalize a filename stem so Original/Extended variants share a key.
+
+    Lowercases, drops a trailing equivalent-version descriptor (see
+    ``_EQUIV_VERSION_RE``), and collapses whitespace, so ``"Artist - Title"``,
+    ``"Artist - Title (Original Mix)"``, and ``"Artist - Title (Extended
+    Version)"`` all map to the same key while a remix keeps its own identity.
+    The artist prefix is preserved, so same-title different-artist tracks do
+    not collide.
+    """
+    key = _EQUIV_VERSION_RE.sub("", stem.strip())
+    return re.sub(r"\s+", " ", key).strip().lower()
+
 
 # --------------------------------------------------------------------------- #
 # Text normalization
@@ -612,18 +639,38 @@ def tool_file_for(track: PlaylistTrack, library: str) -> str | None:
     return None
 
 
+def unmarked_version_keys(library: str) -> set[str]:
+    """Version keys (see :func:`version_key`) of every *unmarked* audio file.
+
+    These represent the user's curated originals — including Original/Extended
+    variants of an untagged Spotify title — and are what both the download-skip
+    and the prune use to decide a track is already present.
+    """
+    keys: set[str] = set()
+    for entry in os.scandir(library):
+        if not entry.is_file():
+            continue
+        stem, ext = os.path.splitext(entry.name)
+        if ext.lower() not in AUDIO_EXTS:
+            continue
+        if not stem.endswith(SOURCE_MARKER):
+            keys.add(version_key(stem))
+    return keys
+
+
 def prune_superseded_downloads(library: str, *, dry_run: bool = False) -> list[str]:
     """Delete tool-downloaded ``[U]`` files whose curated original now exists.
 
-    Once the user adds a properly-named, unmarked ``Artist - Title`` original
-    for a track previously fetched as ``Artist - Title[U]``, the marked copy is
-    a redundant, lower-quality duplicate. Any *unmarked* audio file sharing the
-    marked file's stem (minus the ``[U]`` marker), in any audio format, counts
-    as the superseding original. Returns the paths removed — or, under
-    ``dry_run``, the paths that would be removed.
+    Once the user adds a properly-named, unmarked original for a track
+    previously fetched as ``Artist - Title[U]``, the marked copy is a
+    redundant, lower-quality duplicate. The original counts whether it is named
+    exactly ``Artist - Title`` or carries an equivalent-version suffix the AIFF
+    source adds (``(Original Mix)``, ``(Extended Mix)``, …) — matched via
+    :func:`version_key`, in any audio format. Returns the paths removed — or,
+    under ``dry_run``, the paths that would be removed.
     """
-    unmarked_stems: set[str] = set()
-    marked: list[tuple[str, str]] = []  # (path, stem-without-marker)
+    unmarked_keys: set[str] = set()
+    marked: list[tuple[str, str]] = []  # (path, version-key of stem sans marker)
     for entry in os.scandir(library):
         if not entry.is_file():
             continue
@@ -631,13 +678,13 @@ def prune_superseded_downloads(library: str, *, dry_run: bool = False) -> list[s
         if ext.lower() not in AUDIO_EXTS:
             continue
         if stem.endswith(SOURCE_MARKER):
-            marked.append((entry.path, stem[: -len(SOURCE_MARKER)]))
+            marked.append((entry.path, version_key(stem[: -len(SOURCE_MARKER)])))
         else:
-            unmarked_stems.add(stem)
+            unmarked_keys.add(version_key(stem))
 
     removed: list[str] = []
-    for path, base_stem in marked:
-        if base_stem in unmarked_stems:
+    for path, key in marked:
+        if key in unmarked_keys:
             removed.append(path)
             if not dry_run:
                 _remove_quiet(path)
@@ -690,6 +737,21 @@ def fetch_missing(
     tracks = load_unique_tracks(csv_paths)
     index = scan_library(library)
     present, missing = classify_tracks(tracks, index, threshold=threshold)
+
+    # An untagged Spotify title is satisfied by a curated Original/Extended
+    # variant on disk (the AIFF source tags "Original", and an "Extended" cut is
+    # the preferred DJ version). Treat any such variant as present so we never
+    # download a [U] copy of a track the user already owns in a preferred form.
+    lib_keys = unmarked_version_keys(library)
+    variant_present = [r for r in missing if version_key(r.track.target_basename()) in lib_keys]
+    if variant_present:
+        seen = {id(r) for r in variant_present}
+        missing = [r for r in missing if id(r) not in seen]
+        present.extend(variant_present)
+        logger.info(
+            "fetch-missing: %d track(s) present via Original/Extended variant — not downloading",
+            len(variant_present),
+        )
 
     report_dir = report_dir or os.path.join(library, "outputs", "fetch")
     os.makedirs(report_dir, exist_ok=True)
