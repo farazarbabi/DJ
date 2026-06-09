@@ -228,3 +228,108 @@ def _write_m4a(path: str, tag_string: str) -> None:
     audio = MP4(path)
     audio["\xa9cmt"] = [tag_string]
     audio.save()
+
+
+# ---------------------------------------------------------------------------
+# Descriptive metadata (Title / Artist / Album / Genre / Year / Label)
+# ---------------------------------------------------------------------------
+
+def write_track_metadata(
+    path: str,
+    *,
+    title: str = "",
+    artist: str = "",
+    album: str = "",
+    album_artist: str = "",
+    genre: str = "",
+    year: str = "",
+    label: str = "",
+) -> None:
+    """Write standard descriptive tags so DJ software shows real metadata.
+
+    Only non-empty fields are written, so this never blanks out an existing
+    value. Intended for freshly downloaded files whose only "metadata" is the
+    filename. Key/BPM are deliberately not written here — those are owned by the
+    registry's canonical resolution.
+
+    Supports ID3-backed formats (.aiff/.aif, .wav, .mp3), plus .flac and .m4a.
+    """
+    ext = Path(path).suffix.lower()
+    fields = {
+        "title": title, "artist": artist, "album": album,
+        "album_artist": album_artist, "genre": genre, "year": year, "label": label,
+    }
+    if not any(v for v in fields.values()):
+        return
+
+    try:
+        if ext in (".aiff", ".aif", ".wav", ".mp3"):
+            _write_meta_id3(path, ext, fields)
+        elif ext == ".flac":
+            _write_meta_flac(path, fields)
+        elif ext == ".m4a":
+            _write_meta_m4a(path, fields)
+        else:
+            raise ValueError(f"Unsupported format for metadata: {ext}")
+    except MutagenError:
+        logger.error("Failed to write metadata to %s", path, exc_info=True)
+        raise
+
+
+def _write_meta_id3(path: str, ext: str, fields: dict[str, str]) -> None:
+    from mutagen.id3 import TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPUB
+
+    if ext == ".mp3":
+        from mutagen.mp3 import MP3
+        audio = MP3(path)
+    elif ext in (".aiff", ".aif"):
+        from mutagen.aiff import AIFF
+        audio = AIFF(path)
+    else:  # .wav
+        from mutagen.wave import WAVE
+        audio = WAVE(path)
+
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+
+    frame_for = {
+        "title": (TIT2, fields["title"]),
+        "artist": (TPE1, fields["artist"]),
+        "album_artist": (TPE2, fields["album_artist"]),
+        "album": (TALB, fields["album"]),
+        "genre": (TCON, fields["genre"]),
+        "year": (TDRC, fields["year"]),
+        "label": (TPUB, fields["label"]),
+    }
+    for frame_cls, value in frame_for.values():
+        if value:
+            tags.setall(frame_cls.__name__, [frame_cls(encoding=3, text=[value])])
+    audio.save()
+
+
+def _write_meta_flac(path: str, fields: dict[str, str]) -> None:
+    from mutagen.flac import FLAC
+    audio = FLAC(path)
+    vorbis = {
+        "title": "title", "artist": "artist", "album": "album",
+        "album_artist": "albumartist", "genre": "genre", "year": "date",
+        "label": "label",
+    }
+    for key, value in fields.items():
+        if value:
+            audio[vorbis[key]] = [value]
+    audio.save()
+
+
+def _write_meta_m4a(path: str, fields: dict[str, str]) -> None:
+    from mutagen.mp4 import MP4
+    audio = MP4(path)
+    atom = {
+        "title": "\xa9nam", "artist": "\xa9ART", "album": "\xa9alb",
+        "album_artist": "aART", "genre": "\xa9gen", "year": "\xa9day",
+    }
+    for key, value in fields.items():
+        if value and key in atom:
+            audio[atom[key]] = [value]
+    audio.save()

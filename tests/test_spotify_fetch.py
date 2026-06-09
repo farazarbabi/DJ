@@ -77,7 +77,25 @@ def test_parse_playlist_csv(tmp_path):
 def test_target_basename_and_query():
     t = PlaylistTrack(name="Starlings - Henry Saiz Remix", artists=["NTO"])
     assert t.target_basename() == "NTO - Starlings (Henry Saiz Remix)"
+    # The [U] source marker is appended verbatim after the clean stem.
+    assert t.target_basename("[U]") == "NTO - Starlings (Henry Saiz Remix)[U]"
     assert t.search_query() == "NTO Starlings - Henry Saiz Remix"
+
+
+def test_parse_playlist_csv_captures_metadata(tmp_path):
+    row = (
+        'spotify:track:m,"Enigma","Pure Bliss EP","Leo Janeiro;Hauy",'
+        '2018-06-01,422000,40,false,u,2020-01-01T00:00:00Z,'
+        '"jazz house,deep house","Get Physical Music"\n'
+    )
+    tracks = parse_playlist_csv(_write_csv(tmp_path / "p.csv", [row]))
+    t = tracks[0]
+    assert t.album == "Pure Bliss EP"
+    assert t.year == "2018"
+    assert t.genres == ["jazz house", "deep house"]
+    assert t.primary_genre == "jazz house"
+    assert t.label == "Get Physical Music"
+    assert t.title_tag() == "Enigma"
 
 
 def test_load_unique_tracks_dedupes_by_uri(tmp_path):
@@ -256,7 +274,42 @@ def test_tool_file_for_matches_only_tool_naming(tmp_path):
     # No tool-named file yet -> None (a differently-named user file is ignored).
     (tmp_path / "NTO - Starlings (Original Mix).aiff").write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) is None
-    # Exact tool naming is recognized.
+    # Legacy (unmarked) tool naming is still recognized.
     tool = tmp_path / "NTO - Starlings (Henry Saiz Remix).aiff"
     tool.write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) == str(tool)
+
+
+def test_tool_file_for_prefers_marked_name(tmp_path):
+    track = PlaylistTrack(name="Skyfall", artists=["Adele"])
+    marked = tmp_path / "Adele - Skyfall[U].aiff"
+    marked.write_bytes(b"\x00")
+    assert tool_file_for(track, str(tmp_path)) == str(marked)
+
+
+def test_embed_metadata_writes_id3_tags(tmp_path):
+    import numpy as np
+    import soundfile as sf
+    from mutagen.aiff import AIFF
+
+    from dj_tools.spotify_fetch import _embed_metadata
+
+    aiff = tmp_path / "track.aiff"
+    sf.write(str(aiff), np.zeros(22050, dtype="float32"), 22050)
+
+    track = PlaylistTrack(
+        name="Every You - Erly Tepshi Remix",
+        artists=["Rafael Cerato", "Jager"],
+        album="Every You (Remixes)", year="2023",
+        genres=["melodic techno"], label="Get Physical Music",
+    )
+    _embed_metadata(str(aiff), track)
+
+    tags = AIFF(str(aiff)).tags
+    assert str(tags.get("TIT2")) == "Every You (Erly Tepshi Remix)"
+    assert str(tags.get("TPE1")) == "Rafael Cerato, Jager"
+    assert str(tags.get("TPE2")) == "Rafael Cerato"
+    assert str(tags.get("TALB")) == "Every You (Remixes)"
+    assert str(tags.get("TCON")) == "melodic techno"
+    assert str(tags.get("TDRC")) == "2023"
+    assert str(tags.get("TPUB")) == "Get Physical Music"

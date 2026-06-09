@@ -7,7 +7,10 @@ Given one or more Exportify-style Spotify playlist CSVs, this:
      directory, requiring artist agreement to avoid same-title collisions,
   3. downloads anything missing via ``yt-dlp`` YouTube search, extracting to
      WAV and converting losslessly to AIFF (configurable),
-  4. flags downloads whose duration differs sharply from Spotify's — a strong
+  4. embeds descriptive metadata (Title/Artist/Album/Genre/Year/Label) from the
+     playlist row into each download, and marks the filename with ``[U]`` so
+     tool-downloaded files can be told apart from originally-AIFF library tracks,
+  5. flags downloads whose duration differs sharply from Spotify's — a strong
      signal that the search returned the wrong video.
 
 The matcher works off files on disk, so it does not require a populated
@@ -38,6 +41,13 @@ STOPWORDS = {
 }
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Filename marker for tool-downloaded (YouTube-sourced, converted) files, so they
+# can be told apart from higher-quality, originally-AIFF library tracks
+# (e.g. "Artist - Title[U].aiff"). It is filename-only — embedded Title/Artist
+# tags stay clean — and the matcher's tokenizer ignores brackets, so it does not
+# affect missing-track detection.
+SOURCE_MARKER = "[U]"
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +98,10 @@ class PlaylistTrack:
     duration_sec: float | None = None
     uri: str = ""
     playlist: str = ""
+    album: str = ""
+    year: str = ""
+    genres: list[str] = field(default_factory=list)
+    label: str = ""
 
     @property
     def primary_artist(self) -> str:
@@ -97,11 +111,24 @@ class PlaylistTrack:
     def artist_display(self) -> str:
         return ", ".join(self.artists)
 
-    def target_basename(self) -> str:
-        """Library-style 'Artist - Title' base filename (no extension)."""
+    @property
+    def primary_genre(self) -> str:
+        return self.genres[0] if self.genres else ""
+
+    def title_tag(self) -> str:
+        """Display title for the Title tag (library-style, parenthesized remix)."""
+        return clean_track_name(self.name)
+
+    def target_basename(self, marker: str = "") -> str:
+        """Library-style 'Artist - Title' base filename (no extension).
+
+        ``marker`` is appended verbatim after the sanitized stem (e.g. ``[U]``)
+        to flag tool-downloaded files; it is filename-safe and ignored by the
+        matcher's tokenizer, so it does not affect matching.
+        """
         title = clean_track_name(self.name)
         base = f"{self.artist_display} - {title}" if self.artists else title
-        return sanitize_filename(base)
+        return sanitize_filename(base) + marker
 
     def search_query(self) -> str:
         """YouTube search string: primary artist + raw track name."""
@@ -125,6 +152,8 @@ def parse_playlist_csv(path: str | os.PathLike) -> list[PlaylistTrack]:
                 ms = int(row.get("Duration (ms)") or 0)
             except (TypeError, ValueError):
                 ms = 0
+            release = (row.get("Release Date") or row.get("Album Release Date") or "").strip()
+            genres = [g.strip() for g in (row.get("Genres") or "").split(",") if g.strip()]
             tracks.append(
                 PlaylistTrack(
                     name=track_name,
@@ -132,6 +161,10 @@ def parse_playlist_csv(path: str | os.PathLike) -> list[PlaylistTrack]:
                     duration_sec=(ms / 1000.0) if ms else None,
                     uri=(row.get("Track URI") or "").strip(),
                     playlist=name,
+                    album=(row.get("Album Name") or "").strip(),
+                    year=release[:4],
+                    genres=genres,
+                    label=(row.get("Record Label") or "").strip(),
                 )
             )
     return tracks
@@ -416,6 +449,29 @@ def _finalize_wav(wav_path: str, aiff_path: str, audio_format: str) -> DownloadO
     return DownloadOutcome("ok_wav", wav_path, "aiff conversion failed; kept wav")
 
 
+def _embed_metadata(path: str, track: PlaylistTrack) -> None:
+    """Embed descriptive tags from the playlist row so Rekordbox shows real
+    metadata instead of the filename. Failures are logged, never fatal — a
+    tagging hiccup must not discard a good download.
+    """
+    try:
+        from dj_tagger.metadata import write_track_metadata
+
+        write_track_metadata(
+            path,
+            title=track.title_tag(),
+            artist=track.artist_display,
+            album=track.album,
+            album_artist=track.primary_artist,
+            genre=track.primary_genre,
+            year=track.year,
+            label=track.label,
+        )
+    except Exception:
+        logger.warning("fetch-missing: could not embed metadata into %s",
+                       os.path.basename(path), exc_info=True)
+
+
 def download_track(
     track: PlaylistTrack,
     dest_dir: str,
@@ -435,7 +491,7 @@ def download_track(
     is already within tolerance, otherwise it is re-downloaded. When the
     Spotify duration is unknown the top search hit is taken unverified.
     """
-    base = track.target_basename()
+    base = track.target_basename(SOURCE_MARKER)
     aiff_path = os.path.join(dest_dir, base + ".aiff")
     wav_path = os.path.join(dest_dir, base + ".wav")
     final_path = aiff_path if audio_format == "aiff" else wav_path
@@ -497,7 +553,10 @@ def download_track(
                                if actual is not None else "could not probe download")
                 _remove_quiet(wav_path)
                 continue
-        return _finalize_wav(wav_path, aiff_path, audio_format)
+        outcome = _finalize_wav(wav_path, aiff_path, audio_format)
+        if outcome.status in ("ok", "ok_wav") and outcome.outfile:
+            _embed_metadata(outcome.outfile, track)
+        return outcome
 
     return DownloadOutcome(
         "no_match", "",
@@ -536,15 +595,16 @@ def resolve_library_dir(path: str) -> str:
 def tool_file_for(track: PlaylistTrack, library: str) -> str | None:
     """Return the path of an existing file this tool would have produced.
 
-    Matches the exact ``Artist - Track`` naming (``.aiff`` then ``.wav``) so
-    re-verification only ever touches tool-downloaded files, never the user's
-    differently-named curated library tracks.
+    Checks the marked ``Artist - Title[U]`` naming first, then the legacy
+    unmarked naming, for ``.aiff`` then ``.wav``. This only ever matches
+    tool-downloaded files, never the user's differently-named curated tracks.
     """
-    base = track.target_basename()
-    for ext in (".aiff", ".wav"):
-        cand = os.path.join(library, base + ext)
-        if os.path.exists(cand):
-            return cand
+    for marker in (SOURCE_MARKER, ""):
+        base = track.target_basename(marker)
+        for ext in (".aiff", ".wav"):
+            cand = os.path.join(library, base + ext)
+            if os.path.exists(cand):
+                return cand
     return None
 
 
