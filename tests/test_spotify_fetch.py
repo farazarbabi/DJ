@@ -269,13 +269,18 @@ def test_fetch_missing_bad_library_raises(tmp_path):
         fetch_missing([], str(tmp_path / "nope"))
 
 
-def test_tool_file_for_matches_only_tool_naming(tmp_path):
+def test_tool_file_for_matches_only_marked_naming(tmp_path):
     track = PlaylistTrack(name="Starlings - Henry Saiz Remix", artists=["NTO"])
-    # No tool-named file yet -> None (a differently-named user file is ignored).
+    # A differently-named user file is ignored.
     (tmp_path / "NTO - Starlings (Original Mix).aiff").write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) is None
-    # Legacy (unmarked) tool naming is still recognized.
-    tool = tmp_path / "NTO - Starlings (Henry Saiz Remix).aiff"
+    # An unmarked file at the exact target name is the user's curated original
+    # (standard library naming), NOT a tool download -> must be ignored, or
+    # re-verify would re-download it to the [U] path and leave a duplicate.
+    (tmp_path / "NTO - Starlings (Henry Saiz Remix).aiff").write_bytes(b"\x00")
+    assert tool_file_for(track, str(tmp_path)) is None
+    # Only the [U]-marked name counts as a tool download.
+    tool = tmp_path / "NTO - Starlings (Henry Saiz Remix)[U].aiff"
     tool.write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) == str(tool)
 

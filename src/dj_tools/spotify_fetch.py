@@ -593,18 +593,20 @@ def resolve_library_dir(path: str) -> str:
 
 
 def tool_file_for(track: PlaylistTrack, library: str) -> str | None:
-    """Return the path of an existing file this tool would have produced.
+    """Return the path of an existing ``[U]``-marked file this tool produced.
 
-    Checks the marked ``Artist - Title[U]`` naming first, then the legacy
-    unmarked naming, for ``.aiff`` then ``.wav``. This only ever matches
-    tool-downloaded files, never the user's differently-named curated tracks.
+    Only the marked ``Artist - Title[U]`` naming counts as a tool download.
+    The unmarked ``Artist - Title`` form is *not* recognized: it is the
+    standard library naming for the user's curated originals, so matching it
+    would sweep a genuinely-present original into the re-verify set — and since
+    a re-download always targets the ``[U]`` path, that just leaves a duplicate
+    ``[U]`` copy alongside the original. Checks ``.aiff`` then ``.wav``.
     """
-    for marker in (SOURCE_MARKER, ""):
-        base = track.target_basename(marker)
-        for ext in (".aiff", ".wav"):
-            cand = os.path.join(library, base + ext)
-            if os.path.exists(cand):
-                return cand
+    base = track.target_basename(SOURCE_MARKER)
+    for ext in (".aiff", ".wav"):
+        cand = os.path.join(library, base + ext)
+        if os.path.exists(cand):
+            return cand
     return None
 
 
