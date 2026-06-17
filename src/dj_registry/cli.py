@@ -558,6 +558,10 @@ def cmd_cues(args: argparse.Namespace) -> int:
             store,
             limit=getattr(args, "limit", None),
             force=getattr(args, "force", False),
+            profile=getattr(args, "profile", "v1"),
+            include_memory=getattr(args, "include_memory", False),
+            include_loops=getattr(args, "include_loops", False),
+            loop_bars=getattr(args, "loop_bars", 16),
             show_progress=_show_progress(args),
         )
         print(
@@ -816,10 +820,14 @@ def main(argv: list[str] | None = None) -> int:
     add_no_progress(p_cues)
     cues_sub = p_cues.add_subparsers(dest="cues_command")
 
-    p_cues_analyze = cues_sub.add_parser("analyze", help="Generate v1 hot cues for tracks in a Rekordbox XML export")
+    p_cues_analyze = cues_sub.add_parser("analyze", help="Generate cue points for tracks in a Rekordbox XML export")
     p_cues_analyze.add_argument("--rekordbox-xml", "--xml", dest="rekordbox_xml", required=True)
     p_cues_analyze.add_argument("--limit", type=int)
-    p_cues_analyze.add_argument("--force", action="store_true", help="Regenerate existing auto_v1 cue rows for matched files")
+    p_cues_analyze.add_argument("--force", action="store_true", help="Regenerate existing auto_* cue rows for matched files")
+    p_cues_analyze.add_argument("--profile", choices=("v1", "v2"), default="v1", help="Cue generation profile")
+    p_cues_analyze.add_argument("--include-memory", action="store_true", help="Add structural memory cues")
+    p_cues_analyze.add_argument("--include-loops", action="store_true", help="Add structural loop cues")
+    p_cues_analyze.add_argument("--loop-bars", type=int, default=16, help="Loop length in bars for generated loop cues")
     p_cues_analyze.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
     add_no_progress(p_cues_analyze)
 

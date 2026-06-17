@@ -19,6 +19,7 @@ from .rekordbox import match_rekordbox_tracks, parse_rekordbox_tracks
 logger = logging.getLogger(__name__)
 
 REVIEW_PLAYLIST_NAME = "AI Generated Cues - Review"
+TIME_TOLERANCE_SEC = 0.001
 
 
 @dataclass
@@ -113,11 +114,6 @@ def _export_one_cue(
     file_to_rb_id: dict[str, str],
     rb_track_elements: dict[str, etree._Element],
 ) -> tuple[str, str, str]:
-    if cue.cue_kind != "hot" or cue.rekordbox_type != "0":
-        return "invalid", "v1 only exports hot cues with rekordbox_type=0", ""
-    if cue.rekordbox_num < 0 or cue.rekordbox_num > 7:
-        return "invalid", f"unsupported hot cue Num={cue.rekordbox_num}", ""
-
     rb_id = file_to_rb_id.get(cue.file_id)
     if not rb_id:
         return "unmatched", "cue file was not present in input XML", ""
@@ -125,25 +121,99 @@ def _export_one_cue(
     if track_el is None:
         return "unmatched", "matched XML track element was not found", rb_id
 
+    cue_kind = (cue.cue_kind or "").strip().lower()
+    if cue_kind == "hot":
+        return _export_hot_cue(cue, track_el, rb_id)
+    if cue_kind == "memory":
+        return _export_memory_cue(cue, track_el, rb_id)
+    if cue_kind == "loop":
+        return _export_loop_cue(cue, track_el, rb_id)
+    return "invalid", f"unsupported cue_kind={cue.cue_kind!r}", rb_id
+
+
+def _export_hot_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tuple[str, str, str]:
+    if cue.rekordbox_type != "0":
+        return "invalid", f"hot cue requires rekordbox_type=0, got {cue.rekordbox_type!r}", rb_id
+    if cue.rekordbox_num < 0 or cue.rekordbox_num > 7:
+        return "invalid", f"unsupported hot cue Num={cue.rekordbox_num}", rb_id
+
     existing_nums = {
         mark.get("Num", "")
         for mark in track_el.findall("POSITION_MARK")
-        if mark.get("Type", "0") == "0"
+        if mark.get("Type", "0") == "0" and mark.get("Num", "") not in {"", "-1"}
     }
     num = str(cue.rekordbox_num)
     if num in existing_nums:
         return "skipped_conflict", f"existing hot cue Num={num} preserved", rb_id
 
+    _append_position_mark(track_el, cue, num=num)
+    return "inserted", "inserted", rb_id
+
+
+def _export_memory_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tuple[str, str, str]:
+    if cue.rekordbox_type != "0":
+        return "invalid", f"memory cue requires rekordbox_type=0, got {cue.rekordbox_type!r}", rb_id
+    if cue.rekordbox_num != -1:
+        return "invalid", f"memory cue requires Num=-1, got {cue.rekordbox_num}", rb_id
+
+    for mark in track_el.findall("POSITION_MARK"):
+        if mark.get("Type", "0") != "0":
+            continue
+        if mark.get("Num", "") not in {"", "-1"}:
+            continue
+        if _same_time(_float_attr(mark, "Start"), cue.cue_time_sec):
+            return "skipped_conflict", "existing memory cue at same Start preserved", rb_id
+
+    _append_position_mark(track_el, cue, num="-1")
+    return "inserted", "inserted", rb_id
+
+
+def _export_loop_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tuple[str, str, str]:
+    if cue.rekordbox_type != "4":
+        return "invalid", f"loop cue requires rekordbox_type=4, got {cue.rekordbox_type!r}", rb_id
+    if cue.rekordbox_num != -1:
+        return "invalid", f"loop cue requires Num=-1, got {cue.rekordbox_num}", rb_id
+    if cue.cue_end_sec <= cue.cue_time_sec:
+        return "invalid", "loop cue requires cue_end_sec > cue_time_sec", rb_id
+
+    for mark in track_el.findall("POSITION_MARK"):
+        if mark.get("Type", "0") != "4":
+            continue
+        if mark.get("Num", "") not in {"", "-1"}:
+            continue
+        if (
+            _same_time(_float_attr(mark, "Start"), cue.cue_time_sec)
+            and _same_time(_float_attr(mark, "End"), cue.cue_end_sec)
+        ):
+            return "skipped_conflict", "existing loop cue at same Start/End preserved", rb_id
+
+    _append_position_mark(track_el, cue, num="-1")
+    return "inserted", "inserted", rb_id
+
+
+def _append_position_mark(track_el: etree._Element, cue: CuePoint, *, num: str) -> None:
     mark = etree.Element("POSITION_MARK")
     mark.set("Name", cue.cue_name)
     mark.set("Type", cue.rekordbox_type)
     mark.set("Start", f"{cue.cue_time_sec:.3f}")
     mark.set("Num", num)
+    if (cue.cue_kind or "").strip().lower() == "loop":
+        mark.set("End", f"{cue.cue_end_sec:.3f}")
     mark.set("Red", str(cue.red))
     mark.set("Green", str(cue.green))
     mark.set("Blue", str(cue.blue))
     track_el.append(mark)
-    return "inserted", "inserted", rb_id
+
+
+def _float_attr(mark: etree._Element, name: str) -> float:
+    try:
+        return float(mark.get(name, ""))
+    except (TypeError, ValueError):
+        return -1.0
+
+
+def _same_time(left: float, right: float) -> bool:
+    return abs(float(left) - float(right)) <= TIME_TOLERANCE_SEC
 
 
 def _replace_review_playlist(root: etree._Element, review_priority: dict[str, int]) -> None:
@@ -185,10 +255,12 @@ def _write_report(path: str, rows: list[dict[str, str]]) -> None:
         "track_id",
         "file_id",
         "rekordbox_track_id",
+        "cue_kind",
         "cue_slot",
         "rekordbox_num",
         "cue_name",
         "cue_time_sec",
+        "cue_end_sec",
         "confidence",
         "manual_review_required",
         "export_status",
@@ -206,10 +278,12 @@ def _report_row(cue: CuePoint, rb_id: str, status: str, message: str) -> dict[st
         "track_id": cue.track_id,
         "file_id": cue.file_id,
         "rekordbox_track_id": rb_id,
+        "cue_kind": cue.cue_kind,
         "cue_slot": cue.cue_slot,
         "rekordbox_num": str(cue.rekordbox_num),
         "cue_name": cue.cue_name,
         "cue_time_sec": f"{cue.cue_time_sec:.3f}",
+        "cue_end_sec": f"{cue.cue_end_sec:.3f}",
         "confidence": f"{cue.confidence:.3f}",
         "manual_review_required": str(cue.manual_review_required).lower(),
         "export_status": status,

@@ -1,4 +1,4 @@
-"""Deterministic v1 cue selection heuristics."""
+"""Deterministic cue selection heuristics."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class CueSection:
 
 @dataclass
 class CueGrid:
-    """Beat, bar, energy, and section data used by the v1 selector."""
+    """Beat, bar, energy, and section data used by cue selectors."""
 
     duration_sec: float
     beat_times: list[float] = field(default_factory=list)
@@ -51,12 +51,37 @@ class CueGrid:
             return max(0.0, float(self.duration_sec * clamped / self.n_bars))
         return 0.0
 
+    def time_for_bar_boundary(self, bar_index: int) -> float:
+        if self.n_bars <= 0:
+            return 0.0
+        bar = max(0, int(bar_index))
+        if bar < len(self.bar_times):
+            return max(0.0, float(self.bar_times[bar]))
+        if len(self.bar_times) >= 2:
+            interval = self.bar_times[-1] - self.bar_times[-2]
+            return max(0.0, float(self.bar_times[-1] + interval * (bar - len(self.bar_times) + 1)))
+        if self.duration_sec > 0:
+            return max(0.0, float(self.duration_sec * bar / self.n_bars))
+        return 0.0
+
 
 ROLE_PROFILES = (
     ("mix_in", "A", "MIX IN", (255, 55, 111)),
     ("drop_1", "B", "DROP 1", (69, 172, 255)),
     ("mix_out", "C", "MIX OUT", (125, 193, 75)),
 )
+
+MEMORY_PROFILES = {
+    "intro_start": ("INTRO START", (255, 255, 255)),
+    "breakdown": ("BREAKDOWN", (255, 202, 88)),
+    "peak": ("PEAK", (255, 84, 84)),
+    "outro_start": ("OUTRO START", (100, 220, 180)),
+}
+
+LOOP_PROFILES = {
+    "intro_loop": ("INTRO LOOP", (170, 114, 255)),
+    "outro_loop": ("OUTRO LOOP", (75, 211, 220)),
+}
 
 
 def cue_grid_from_audio(track_audio: Any, section_map: Any | None = None, raw_analysis: dict | None = None) -> CueGrid:
@@ -96,10 +121,17 @@ def select_default_hot_cues(
     grid: CueGrid,
     *,
     analysis_payload_ref: str = "",
+    source_system: str = "auto_v1",
 ) -> list[CuePoint]:
     """Generate the v1 default A-C hot cues for one track."""
     if grid.n_bars <= 0:
-        return _fallback_duration_cues(track_id, file_id, grid.duration_sec, analysis_payload_ref)
+        return _fallback_duration_cues(
+            track_id,
+            file_id,
+            grid.duration_sec,
+            analysis_payload_ref,
+            source_system,
+        )
 
     mix_bar, mix_conf, mix_reason = _choose_mix_in(grid)
     drop_bar, drop_conf, drop_reason = _choose_drop_1(grid, mix_bar)
@@ -133,7 +165,7 @@ def select_default_hot_cues(
             cue_id=f"CUE-{file_id}-{slot}",
             track_id=track_id,
             file_id=file_id,
-            source_system="auto_v1",
+            source_system=source_system,
             cue_kind="hot",
             cue_role=role,
             cue_slot=slot,
@@ -155,6 +187,299 @@ def select_default_hot_cues(
             updated_at=now,
         ))
     return cues
+
+
+def select_profile_cues(
+    track_id: str,
+    file_id: str,
+    grid: CueGrid,
+    *,
+    profile: str = "v1",
+    include_memory: bool = False,
+    include_loops: bool = False,
+    loop_bars: int = 16,
+    analysis_payload_ref: str = "",
+) -> list[CuePoint]:
+    """Generate cue rows for the requested cue profile."""
+    profile = (profile or "v1").strip().lower()
+    if profile not in {"v1", "v2"}:
+        raise ValueError(f"Unsupported cue profile: {profile!r}")
+    if loop_bars <= 0:
+        raise ValueError("loop_bars must be greater than zero")
+
+    v2_enabled = profile == "v2" or include_memory or include_loops
+    source_system = "auto_v2" if v2_enabled else "auto_v1"
+    hot_cues = select_default_hot_cues(
+        track_id,
+        file_id,
+        grid,
+        analysis_payload_ref=analysis_payload_ref,
+        source_system=source_system,
+    )
+    if not v2_enabled:
+        return hot_cues
+
+    cues = list(hot_cues)
+    if profile == "v2" or include_memory:
+        cues.extend(_select_memory_cues(
+            track_id,
+            file_id,
+            grid,
+            hot_cues,
+            source_system,
+            analysis_payload_ref,
+        ))
+    if profile == "v2" or include_loops:
+        cues.extend(_select_loop_cues(
+            track_id,
+            file_id,
+            grid,
+            hot_cues,
+            source_system,
+            analysis_payload_ref,
+            loop_bars=loop_bars,
+        ))
+    return cues
+
+
+def _select_memory_cues(
+    track_id: str,
+    file_id: str,
+    grid: CueGrid,
+    hot_cues: list[CuePoint],
+    source_system: str,
+    analysis_payload_ref: str,
+) -> list[CuePoint]:
+    now = now_iso()
+    cues: list[CuePoint] = []
+
+    choices: list[tuple[str, int, float, str, bool]] = [
+        ("intro_start", 0, 0.86 if grid.n_bars > 0 else 0.35, "track_start", grid.n_bars <= 0),
+    ]
+
+    breakdown = _first_section(grid, "breakdown")
+    if breakdown is not None:
+        choices.append((
+            "breakdown",
+            _clamp_bar(breakdown.start_bar, grid.n_bars),
+            0.78,
+            "section_breakdown_start",
+            False,
+        ))
+
+    peak = _first_section(grid, "peak")
+    if peak is not None:
+        choices.append((
+            "peak",
+            _clamp_bar(peak.start_bar, grid.n_bars),
+            0.8,
+            "section_peak_start",
+            False,
+        ))
+    else:
+        drop = _cue_by_role(hot_cues, "drop_1")
+        choices.append((
+            "peak",
+            _clamp_bar(drop.cue_bar_index if drop else 0, grid.n_bars),
+            min(float(drop.confidence if drop else 0.35), 0.55),
+            "drop_1_fallback",
+            True,
+        ))
+
+    outro = _first_section(grid, "outro")
+    if outro is not None:
+        choices.append((
+            "outro_start",
+            _clamp_bar(outro.start_bar, grid.n_bars),
+            0.78,
+            "section_outro_start",
+            False,
+        ))
+    else:
+        mix_out = _cue_by_role(hot_cues, "mix_out")
+        choices.append((
+            "outro_start",
+            _clamp_bar(mix_out.cue_bar_index if mix_out else 0, grid.n_bars),
+            min(float(mix_out.confidence if mix_out else 0.35), 0.55),
+            "mix_out_fallback",
+            True,
+        ))
+
+    for role, bar, confidence, reason, manual_review in choices:
+        name, color = MEMORY_PROFILES[role]
+        cue_time = _time_for_choice(grid, hot_cues, role, bar)
+        confidence = round(float(max(0.0, min(confidence, 1.0))), 3)
+        cues.append(CuePoint(
+            cue_id=f"CUE-{file_id}-MEM-{role}",
+            track_id=track_id,
+            file_id=file_id,
+            source_system=source_system,
+            cue_kind="memory",
+            cue_role=role,
+            cue_name=name,
+            cue_time_sec=round(cue_time, 3),
+            cue_bar_index=int(bar),
+            cue_beat_index=int(bar * BEATS_PER_BAR),
+            rekordbox_num=-1,
+            rekordbox_type="0",
+            red=color[0],
+            green=color[1],
+            blue=color[2],
+            score=confidence,
+            confidence=confidence,
+            selection_reason=reason,
+            analysis_payload_ref=analysis_payload_ref,
+            manual_review_required=manual_review or confidence < LOW_CONFIDENCE_THRESHOLD,
+            created_at=now,
+            updated_at=now,
+        ))
+    return cues
+
+
+def _select_loop_cues(
+    track_id: str,
+    file_id: str,
+    grid: CueGrid,
+    hot_cues: list[CuePoint],
+    source_system: str,
+    analysis_payload_ref: str,
+    *,
+    loop_bars: int,
+) -> list[CuePoint]:
+    if grid.n_bars <= 0:
+        return []
+
+    now = now_iso()
+    cues: list[CuePoint] = []
+    mix_in = _cue_by_role(hot_cues, "mix_in")
+    mix_out = _cue_by_role(hot_cues, "mix_out")
+    outro = _first_section(grid, "outro")
+
+    intro_start_bar = 0
+    mix_in_bar = _clamp_bar(mix_in.cue_bar_index if mix_in else 0, grid.n_bars)
+    intro_loop_bar = max(intro_start_bar, mix_in_bar)
+    if _has_loop_runway(grid, intro_loop_bar, loop_bars):
+        cues.append(_loop_cue(
+            track_id,
+            file_id,
+            "intro_loop",
+            intro_loop_bar,
+            grid,
+            source_system,
+            analysis_payload_ref,
+            loop_bars=loop_bars,
+            confidence=min(float(mix_in.confidence if mix_in else 0.6), 0.86),
+            reason="mix_in_loop_start",
+            manual_review=bool(mix_in.manual_review_required if mix_in else False),
+            now=now,
+        ))
+
+    outro_candidates: list[int] = []
+    if outro is not None:
+        outro_candidates.append(_clamp_bar(outro.start_bar, grid.n_bars))
+    if mix_out is not None:
+        outro_candidates.append(_clamp_bar(mix_out.cue_bar_index, grid.n_bars))
+    valid_outro_candidates = [
+        bar for bar in outro_candidates
+        if _has_loop_runway(grid, bar, loop_bars)
+    ]
+    if valid_outro_candidates:
+        outro_loop_bar = max(valid_outro_candidates)
+        cues.append(_loop_cue(
+            track_id,
+            file_id,
+            "outro_loop",
+            outro_loop_bar,
+            grid,
+            source_system,
+            analysis_payload_ref,
+            loop_bars=loop_bars,
+            confidence=min(float(mix_out.confidence if mix_out else 0.58), 0.82),
+            reason="outro_or_mix_out_loop_start",
+            manual_review=bool(mix_out.manual_review_required if mix_out else False),
+            now=now,
+        ))
+
+    return cues
+
+
+def _loop_cue(
+    track_id: str,
+    file_id: str,
+    role: str,
+    start_bar: int,
+    grid: CueGrid,
+    source_system: str,
+    analysis_payload_ref: str,
+    *,
+    loop_bars: int,
+    confidence: float,
+    reason: str,
+    manual_review: bool,
+    now: str,
+) -> CuePoint:
+    name, color = LOOP_PROFILES[role]
+    end_bar = start_bar + loop_bars
+    cue_time = round(grid.time_for_bar(start_bar), 3)
+    cue_end = round(grid.time_for_bar_boundary(end_bar), 3)
+    confidence = round(float(max(0.0, min(confidence, 1.0))), 3)
+    return CuePoint(
+        cue_id=f"CUE-{file_id}-LOOP-{role}",
+        track_id=track_id,
+        file_id=file_id,
+        source_system=source_system,
+        cue_kind="loop",
+        cue_role=role,
+        cue_name=name,
+        cue_time_sec=cue_time,
+        cue_end_sec=cue_end,
+        cue_bar_index=int(start_bar),
+        cue_beat_index=int(start_bar * BEATS_PER_BAR),
+        rekordbox_num=-1,
+        rekordbox_type="4",
+        red=color[0],
+        green=color[1],
+        blue=color[2],
+        score=confidence,
+        confidence=confidence,
+        selection_reason=reason,
+        analysis_payload_ref=analysis_payload_ref,
+        manual_review_required=manual_review or loop_bars != 16 or confidence < LOW_CONFIDENCE_THRESHOLD,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _has_loop_runway(grid: CueGrid, start_bar: int, loop_bars: int) -> bool:
+    if grid.n_bars <= 0:
+        return False
+    if start_bar < 0 or start_bar >= grid.n_bars:
+        return False
+    if start_bar + loop_bars > grid.n_bars:
+        return False
+    return grid.time_for_bar_boundary(start_bar + loop_bars) > grid.time_for_bar(start_bar)
+
+
+def _clamp_bar(bar_index: int, n_bars: int) -> int:
+    if n_bars <= 0:
+        return 0
+    return max(0, min(int(bar_index), n_bars - 1))
+
+
+def _cue_by_role(cues: list[CuePoint], role: str) -> CuePoint | None:
+    return next((cue for cue in cues if cue.cue_role == role), None)
+
+
+def _time_for_choice(grid: CueGrid, hot_cues: list[CuePoint], role: str, bar: int) -> float:
+    if grid.n_bars > 0:
+        return grid.time_for_bar(bar)
+    if role == "peak":
+        cue = _cue_by_role(hot_cues, "drop_1")
+        return float(cue.cue_time_sec if cue else 0.0)
+    if role == "outro_start":
+        cue = _cue_by_role(hot_cues, "mix_out")
+        return float(cue.cue_time_sec if cue else 0.0)
+    return 0.0
 
 
 def _synthetic_beat_times(duration_sec: float, tempo: float) -> list[float]:
@@ -244,7 +569,7 @@ def _choose_mix_out(grid: CueGrid, drop_bar: int) -> tuple[int, float, str]:
 
 
 def _first_section(grid: CueGrid, label: str) -> CueSection | None:
-    return next((s for s in grid.sections if s.label == label), None)
+    return next((s for s in grid.sections if s.label.strip().lower() == label), None)
 
 
 def _snap_phrase(bar_index: int, n_bars: int, *, mode: str) -> int:
@@ -280,6 +605,7 @@ def _fallback_duration_cues(
     file_id: str,
     duration_sec: float,
     analysis_payload_ref: str,
+    source_system: str = "auto_v1",
 ) -> list[CuePoint]:
     now = now_iso()
     duration = max(0.0, float(duration_sec or 0.0))
@@ -290,7 +616,7 @@ def _fallback_duration_cues(
             cue_id=f"CUE-{file_id}-{slot}",
             track_id=track_id,
             file_id=file_id,
-            source_system="auto_v1",
+            source_system=source_system,
             cue_kind="hot",
             cue_role=role,
             cue_slot=slot,

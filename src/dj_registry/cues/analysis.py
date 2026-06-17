@@ -16,7 +16,7 @@ from ..models import CuePoint
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from .rekordbox import match_rekordbox_tracks, parse_rekordbox_tracks
-from .selection import cue_grid_from_audio, select_default_hot_cues
+from .selection import cue_grid_from_audio, select_profile_cues
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,15 @@ def analyze_rekordbox_cues(
     *,
     limit: int | None = None,
     force: bool = False,
+    profile: str = "v1",
+    include_memory: bool = False,
+    include_loops: bool = False,
+    loop_bars: int = 16,
     show_progress: bool = False,
 ) -> CueAnalysisStats:
-    """Generate v1 cue points for registry tracks present in a Rekordbox XML export."""
+    """Generate cue points for registry tracks present in a Rekordbox XML export."""
+    if loop_bars <= 0:
+        raise ValueError("loop_bars must be greater than zero")
     xml_path = config.rekordbox_xml_path
     if not xml_path or not os.path.exists(xml_path):
         raise FileNotFoundError(f"Rekordbox XML not found: {xml_path}")
@@ -55,12 +61,12 @@ def analyze_rekordbox_cues(
     selected_file_ids = {match.file_id for match in matches}
     existing_cues = store.load_cue_points()
     existing_auto_file_ids = {
-        cue.file_id for cue in existing_cues if cue.source_system == "auto_v1"
+        cue.file_id for cue in existing_cues if _is_auto_cue(cue)
     }
     if force:
         cue_points = [
             cue for cue in existing_cues
-            if not (cue.source_system == "auto_v1" and cue.file_id in selected_file_ids)
+            if not (_is_auto_cue(cue) and cue.file_id in selected_file_ids)
         ]
     else:
         cue_points = list(existing_cues)
@@ -96,10 +102,14 @@ def analyze_rekordbox_cues(
             raw_analysis = extract_raw_analysis(track_audio)
             grid = cue_grid_from_audio(track_audio, section_map, raw_analysis)
             payload_ref = _write_analysis_payload(config, raw_dir, match, grid, raw_analysis)
-            generated = select_default_hot_cues(
+            generated = select_profile_cues(
                 frec.track_id,
                 frec.file_id,
                 grid,
+                profile=profile,
+                include_memory=include_memory,
+                include_loops=include_loops,
+                loop_bars=loop_bars,
                 analysis_payload_ref=payload_ref,
             )
         except Exception as exc:
@@ -127,6 +137,10 @@ def analyze_rekordbox_cues(
         stats.failed,
     )
     return stats
+
+
+def _is_auto_cue(cue: CuePoint) -> bool:
+    return str(cue.source_system or "").startswith("auto_")
 
 
 def _write_analysis_payload(config: RegistryConfig, raw_dir: str, match, grid, raw_analysis: dict) -> str:
