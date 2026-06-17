@@ -228,6 +228,41 @@ class SourceObservation:
 
 
 @dataclass
+class CuePoint:
+    """One row in cue_points_master.csv."""
+
+    cue_id: str = ""
+    track_id: str = ""
+    file_id: str = ""
+    source_system: str = "auto_v1"
+
+    cue_kind: str = "hot"  # hot | memory | loop
+    cue_role: str = ""  # mix_in | drop_1 | mix_out
+    cue_slot: str = ""  # A-H for hot cues
+    cue_name: str = ""
+    cue_time_sec: float = 0.0
+    cue_end_sec: float = 0.0
+    cue_bar_index: int = 0
+    cue_beat_index: int = 0
+
+    rekordbox_num: int = 0
+    rekordbox_type: str = "0"
+    red: int = 0
+    green: int = 0
+    blue: int = 0
+
+    score: float = 0.0
+    confidence: float = 0.0
+    selection_reason: str = ""
+    analysis_payload_ref: str = ""
+    export_status: str = ""
+    export_message: str = ""
+    manual_review_required: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
 class ReviewItem:
     """One row in review_queue.csv."""
 

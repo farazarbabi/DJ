@@ -10,6 +10,7 @@ from dataclasses import asdict, fields
 from typing import TypeVar, Type
 
 from ..models import (
+    CuePoint,
     FileRecord,
     LogicalTrack,
     PayloadIndexEntry,
@@ -19,7 +20,7 @@ from ..models import (
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T", LogicalTrack, FileRecord, SourceObservation, ReviewItem, PayloadIndexEntry)
+T = TypeVar("T", LogicalTrack, FileRecord, SourceObservation, CuePoint, ReviewItem, PayloadIndexEntry)
 
 
 def _field_names(cls: Type[T]) -> list[str]:
@@ -125,8 +126,8 @@ class CsvStore:
         snap_dir = os.path.join(self.output_dir, "snapshots", run_id)
         os.makedirs(snap_dir, exist_ok=True)
         for name in ("tracks_master.csv", "files_master.csv",
-                      "source_observations.csv", "review_queue.csv",
-                      "source_payload_index.csv"):
+                      "source_observations.csv", "cue_points_master.csv",
+                      "review_queue.csv", "source_payload_index.csv"):
             src = self._path(name)
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(snap_dir, name))
@@ -243,6 +244,20 @@ class CsvStore:
         if deleted:
             self.save_observations(keep)
         return deleted
+
+    # -- Cue Points ----------------------------------------------------------
+
+    def load_cue_points(self) -> list[CuePoint]:
+        return self._load("cue_points_master.csv", CuePoint)
+
+    def save_cue_points(self, cue_points: list[CuePoint]) -> None:
+        self._save("cue_points_master.csv", cue_points, CuePoint)
+
+    def get_cue_points_for_track(self, track_id: str) -> list[CuePoint]:
+        return [c for c in self.load_cue_points() if c.track_id == track_id]
+
+    def get_cue_points_for_file(self, file_id: str) -> list[CuePoint]:
+        return [c for c in self.load_cue_points() if c.file_id == file_id]
 
     # -- Review Queue --------------------------------------------------------
 

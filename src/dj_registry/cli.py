@@ -545,6 +545,49 @@ def _cmd_dj_taxonomy_report(args: argparse.Namespace, store: CsvStore) -> int:
     return 0
 
 
+def cmd_cues(args: argparse.Namespace) -> int:
+    config = _build_config(args)
+    store = CsvStore(config.output_dir)
+
+    command = getattr(args, "cues_command", None)
+    if command == "analyze":
+        from .cues.analysis import analyze_rekordbox_cues
+
+        stats = analyze_rekordbox_cues(
+            config,
+            store,
+            limit=getattr(args, "limit", None),
+            force=getattr(args, "force", False),
+            show_progress=_show_progress(args),
+        )
+        print(
+            "Cue analysis: "
+            f"{stats.analyzed} analyzed, {stats.cues_written} cues written, "
+            f"{stats.skipped_existing} skipped, {stats.failed} failed -> {stats.cue_points_path}"
+        )
+        return 0 if stats.failed == 0 else 1
+
+    if command == "export-rekordbox":
+        from .cues.export_rekordbox import export_rekordbox_cues
+
+        stats = export_rekordbox_cues(
+            config,
+            store,
+            input_xml=getattr(args, "input_xml"),
+            output_xml=getattr(args, "output_xml"),
+        )
+        print(
+            "Cue export: "
+            f"{stats.inserted} inserted, {stats.skipped_conflict} conflicts, "
+            f"{stats.unmatched} unmatched -> {stats.output_xml}"
+        )
+        print(f"Report: {stats.report_path}")
+        return 0 if stats.invalid == 0 else 1
+
+    print("Error: cues subcommand required")
+    return 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from .pipelines.orchestrator import run_full_pipeline
     config = _build_config(args)
@@ -767,6 +810,25 @@ def main(argv: list[str] | None = None) -> int:
     p_dj_tax_report.add_argument("--output", default=None, help="Registry output dir (default: <paths>/outputs/registry or ./outputs/registry)")
     add_no_progress(p_dj_tax_report)
 
+    # cues
+    p_cues = sub.add_parser("cues", help="Analyze and export Rekordbox cue points")
+    p_cues.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
+    add_no_progress(p_cues)
+    cues_sub = p_cues.add_subparsers(dest="cues_command")
+
+    p_cues_analyze = cues_sub.add_parser("analyze", help="Generate v1 hot cues for tracks in a Rekordbox XML export")
+    p_cues_analyze.add_argument("--rekordbox-xml", "--xml", dest="rekordbox_xml", required=True)
+    p_cues_analyze.add_argument("--limit", type=int)
+    p_cues_analyze.add_argument("--force", action="store_true", help="Regenerate existing auto_v1 cue rows for matched files")
+    p_cues_analyze.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
+    add_no_progress(p_cues_analyze)
+
+    p_cues_export = cues_sub.add_parser("export-rekordbox", help="Write generated cues into a copied Rekordbox XML export")
+    p_cues_export.add_argument("--input-xml", required=True)
+    p_cues_export.add_argument("--output-xml", required=True)
+    p_cues_export.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
+    add_no_progress(p_cues_export)
+
     # run (full pipeline)
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument("paths", nargs="*", default=["./files"])
@@ -810,6 +872,7 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "taxonomy": cmd_taxonomy,
         "dj-taxonomy": cmd_dj_taxonomy,
+        "cues": cmd_cues,
         "run": cmd_run,
     }
 
