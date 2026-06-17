@@ -15,6 +15,7 @@ from ..config import RegistryConfig
 from ..models import CuePoint
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
+from .profiles import load_cue_profile
 from .rekordbox import match_rekordbox_tracks, parse_rekordbox_tracks
 from .selection import cue_grid_from_audio, select_profile_cues
 
@@ -40,14 +41,20 @@ def analyze_rekordbox_cues(
     limit: int | None = None,
     force: bool = False,
     profile: str = "v1",
+    profile_file: str | None = None,
     include_memory: bool = False,
     include_loops: bool = False,
-    loop_bars: int = 16,
+    loop_bars: int | None = 16,
     show_progress: bool = False,
 ) -> CueAnalysisStats:
     """Generate cue points for registry tracks present in a Rekordbox XML export."""
-    if loop_bars <= 0:
-        raise ValueError("loop_bars must be greater than zero")
+    cue_profile = load_cue_profile(
+        profile,
+        profile_file=profile_file,
+        include_memory=include_memory,
+        include_loops=include_loops,
+        loop_bars=loop_bars,
+    )
     xml_path = config.rekordbox_xml_path
     if not xml_path or not os.path.exists(xml_path):
         raise FileNotFoundError(f"Rekordbox XML not found: {xml_path}")
@@ -106,10 +113,9 @@ def analyze_rekordbox_cues(
                 frec.track_id,
                 frec.file_id,
                 grid,
-                profile=profile,
-                include_memory=include_memory,
-                include_loops=include_loops,
-                loop_bars=loop_bars,
+                profile=cue_profile.name,
+                loop_bars=cue_profile.loop_bars,
+                profile_config=cue_profile,
                 analysis_payload_ref=payload_ref,
             )
         except Exception as exc:

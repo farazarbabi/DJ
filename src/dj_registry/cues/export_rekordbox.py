@@ -20,18 +20,25 @@ logger = logging.getLogger(__name__)
 
 REVIEW_PLAYLIST_NAME = "AI Generated Cues - Review"
 TIME_TOLERANCE_SEC = 0.001
+EXPORT_POLICIES = {"preserve", "replace-generated", "replace-empty-slot", "review-only"}
 
 
 @dataclass
 class CueExportStats:
     cues_total: int = 0
     inserted: int = 0
+    replaced: int = 0
+    would_insert: int = 0
+    would_replace: int = 0
+    review_only: int = 0
     skipped_conflict: int = 0
     unmatched: int = 0
     invalid: int = 0
     review_tracks: int = 0
     output_xml: str = ""
     report_path: str = ""
+    policy: str = "preserve"
+    dry_run: bool = False
 
 
 def export_rekordbox_cues(
@@ -40,10 +47,15 @@ def export_rekordbox_cues(
     *,
     input_xml: str | Path,
     output_xml: str | Path,
+    policy: str = "preserve",
+    dry_run: bool = False,
 ) -> CueExportStats:
     """Write selected cue points into a copied Rekordbox XML export."""
     input_xml = str(input_xml)
     output_xml = str(output_xml)
+    policy = (policy or "preserve").strip().lower()
+    if policy not in EXPORT_POLICIES:
+        raise ValueError(f"Unsupported cue export policy: {policy!r}")
     if not os.path.exists(input_xml):
         raise FileNotFoundError(f"Rekordbox XML not found: {input_xml}")
 
@@ -67,18 +79,35 @@ def export_rekordbox_cues(
         cues_total=len(cue_points),
         output_xml=output_xml,
         report_path=os.path.join(config.reports_dir, "cue_rekordbox_export_report.csv"),
+        policy=policy,
+        dry_run=dry_run,
     )
     report_rows: list[dict[str, str]] = []
     review_priority: dict[str, int] = {}
 
     for cue in cue_points:
-        status, message, rb_id = _export_one_cue(cue, file_to_rb_id, rb_track_elements)
-        cue.export_status = status
-        cue.export_message = message
-        cue.updated_at = now_iso()
+        status, message, rb_id = _export_one_cue(
+            cue,
+            file_to_rb_id,
+            rb_track_elements,
+            policy=policy,
+            dry_run=dry_run,
+        )
+        if not dry_run:
+            cue.export_status = status
+            cue.export_message = message
+            cue.updated_at = now_iso()
 
         if status == "inserted":
             stats.inserted += 1
+        elif status == "replaced":
+            stats.replaced += 1
+        elif status == "would_insert":
+            stats.would_insert += 1
+        elif status == "would_replace":
+            stats.would_replace += 1
+        elif status == "review_only":
+            stats.review_only += 1
         elif status == "skipped_conflict":
             stats.skipped_conflict += 1
         elif status == "unmatched":
@@ -86,15 +115,17 @@ def export_rekordbox_cues(
         else:
             stats.invalid += 1
 
-        if rb_id and status in ("inserted", "skipped_conflict"):
+        if rb_id and status in ("inserted", "replaced", "would_insert", "would_replace", "skipped_conflict"):
             priority = 0 if cue.manual_review_required or status == "skipped_conflict" else 1
             review_priority[rb_id] = min(priority, review_priority.get(rb_id, 1))
 
         report_rows.append(_report_row(cue, rb_id, status, message))
 
     stats.review_tracks = len(review_priority)
-    _replace_review_playlist(root, review_priority)
-    store.save_cue_points(cue_points)
+    if not dry_run and policy != "review-only":
+        _replace_review_playlist(root, review_priority)
+    if not dry_run:
+        store.save_cue_points(cue_points)
     _write_report(stats.report_path, report_rows)
 
     os.makedirs(os.path.dirname(output_xml) or ".", exist_ok=True)
@@ -113,6 +144,9 @@ def _export_one_cue(
     cue: CuePoint,
     file_to_rb_id: dict[str, str],
     rb_track_elements: dict[str, etree._Element],
+    *,
+    policy: str,
+    dry_run: bool,
 ) -> tuple[str, str, str]:
     rb_id = file_to_rb_id.get(cue.file_id)
     if not rb_id:
@@ -120,37 +154,50 @@ def _export_one_cue(
     track_el = rb_track_elements.get(rb_id)
     if track_el is None:
         return "unmatched", "matched XML track element was not found", rb_id
+    if policy == "review-only":
+        return "review_only", "review-only policy did not export cue", rb_id
 
     cue_kind = (cue.cue_kind or "").strip().lower()
     if cue_kind == "hot":
-        return _export_hot_cue(cue, track_el, rb_id)
+        return _export_hot_cue(cue, track_el, rb_id, policy=policy, dry_run=dry_run)
     if cue_kind == "memory":
-        return _export_memory_cue(cue, track_el, rb_id)
+        return _export_memory_cue(cue, track_el, rb_id, policy=policy, dry_run=dry_run)
     if cue_kind == "loop":
-        return _export_loop_cue(cue, track_el, rb_id)
+        return _export_loop_cue(cue, track_el, rb_id, policy=policy, dry_run=dry_run)
     return "invalid", f"unsupported cue_kind={cue.cue_kind!r}", rb_id
 
 
-def _export_hot_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tuple[str, str, str]:
+def _export_hot_cue(
+    cue: CuePoint,
+    track_el: etree._Element,
+    rb_id: str,
+    *,
+    policy: str,
+    dry_run: bool,
+) -> tuple[str, str, str]:
     if cue.rekordbox_type != "0":
         return "invalid", f"hot cue requires rekordbox_type=0, got {cue.rekordbox_type!r}", rb_id
     if cue.rekordbox_num < 0 or cue.rekordbox_num > 7:
         return "invalid", f"unsupported hot cue Num={cue.rekordbox_num}", rb_id
 
-    existing_nums = {
-        mark.get("Num", "")
-        for mark in track_el.findall("POSITION_MARK")
-        if mark.get("Type", "0") == "0" and mark.get("Num", "") not in {"", "-1"}
-    }
     num = str(cue.rekordbox_num)
-    if num in existing_nums:
-        return "skipped_conflict", f"existing hot cue Num={num} preserved", rb_id
+    for mark in track_el.findall("POSITION_MARK"):
+        if mark.get("Type", "0") == "0" and mark.get("Num", "") == num:
+            if policy == "replace-generated" and _looks_generated_by_tool(mark, cue, num=num):
+                return _replace_or_preview(track_el, mark, cue, rb_id, num=num, dry_run=dry_run)
+            return "skipped_conflict", f"existing hot cue Num={num} preserved", rb_id
 
-    _append_position_mark(track_el, cue, num=num)
-    return "inserted", "inserted", rb_id
+    return _insert_or_preview(track_el, cue, rb_id, num=num, dry_run=dry_run)
 
 
-def _export_memory_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tuple[str, str, str]:
+def _export_memory_cue(
+    cue: CuePoint,
+    track_el: etree._Element,
+    rb_id: str,
+    *,
+    policy: str,
+    dry_run: bool,
+) -> tuple[str, str, str]:
     if cue.rekordbox_type != "0":
         return "invalid", f"memory cue requires rekordbox_type=0, got {cue.rekordbox_type!r}", rb_id
     if cue.rekordbox_num != -1:
@@ -162,13 +209,21 @@ def _export_memory_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> t
         if mark.get("Num", "") not in {"", "-1"}:
             continue
         if _same_time(_float_attr(mark, "Start"), cue.cue_time_sec):
+            if policy == "replace-generated" and _looks_generated_by_tool(mark, cue, num="-1"):
+                return _replace_or_preview(track_el, mark, cue, rb_id, num="-1", dry_run=dry_run)
             return "skipped_conflict", "existing memory cue at same Start preserved", rb_id
 
-    _append_position_mark(track_el, cue, num="-1")
-    return "inserted", "inserted", rb_id
+    return _insert_or_preview(track_el, cue, rb_id, num="-1", dry_run=dry_run)
 
 
-def _export_loop_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tuple[str, str, str]:
+def _export_loop_cue(
+    cue: CuePoint,
+    track_el: etree._Element,
+    rb_id: str,
+    *,
+    policy: str,
+    dry_run: bool,
+) -> tuple[str, str, str]:
     if cue.rekordbox_type != "4":
         return "invalid", f"loop cue requires rekordbox_type=4, got {cue.rekordbox_type!r}", rb_id
     if cue.rekordbox_num != -1:
@@ -185,10 +240,41 @@ def _export_loop_cue(cue: CuePoint, track_el: etree._Element, rb_id: str) -> tup
             _same_time(_float_attr(mark, "Start"), cue.cue_time_sec)
             and _same_time(_float_attr(mark, "End"), cue.cue_end_sec)
         ):
+            if policy == "replace-generated" and _looks_generated_by_tool(mark, cue, num="-1"):
+                return _replace_or_preview(track_el, mark, cue, rb_id, num="-1", dry_run=dry_run)
             return "skipped_conflict", "existing loop cue at same Start/End preserved", rb_id
 
-    _append_position_mark(track_el, cue, num="-1")
+    return _insert_or_preview(track_el, cue, rb_id, num="-1", dry_run=dry_run)
+
+
+def _insert_or_preview(
+    track_el: etree._Element,
+    cue: CuePoint,
+    rb_id: str,
+    *,
+    num: str,
+    dry_run: bool,
+) -> tuple[str, str, str]:
+    if dry_run:
+        return "would_insert", "dry-run would insert", rb_id
+    _append_position_mark(track_el, cue, num=num)
     return "inserted", "inserted", rb_id
+
+
+def _replace_or_preview(
+    track_el: etree._Element,
+    existing_mark: etree._Element,
+    cue: CuePoint,
+    rb_id: str,
+    *,
+    num: str,
+    dry_run: bool,
+) -> tuple[str, str, str]:
+    if dry_run:
+        return "would_replace", "dry-run would replace generated marker", rb_id
+    track_el.remove(existing_mark)
+    _append_position_mark(track_el, cue, num=num)
+    return "replaced", "replaced generated marker", rb_id
 
 
 def _append_position_mark(track_el: etree._Element, cue: CuePoint, *, num: str) -> None:
@@ -214,6 +300,20 @@ def _float_attr(mark: etree._Element, name: str) -> float:
 
 def _same_time(left: float, right: float) -> bool:
     return abs(float(left) - float(right)) <= TIME_TOLERANCE_SEC
+
+
+def _looks_generated_by_tool(mark: etree._Element, cue: CuePoint, *, num: str) -> bool:
+    if mark.get("Name", "") != cue.cue_name:
+        return False
+    if mark.get("Type", "0") != cue.rekordbox_type:
+        return False
+    if mark.get("Num", "") != num:
+        return False
+    return (
+        mark.get("Red", "") == str(cue.red)
+        and mark.get("Green", "") == str(cue.green)
+        and mark.get("Blue", "") == str(cue.blue)
+    )
 
 
 def _replace_review_playlist(root: etree._Element, review_priority: dict[str, int]) -> None:

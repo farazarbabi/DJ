@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
+import pytest
 from lxml import etree
 
 from dj_registry.cli import main as registry_main
 from dj_registry.config import RegistryConfig
 from dj_registry.cues.export_rekordbox import REVIEW_PLAYLIST_NAME, export_rekordbox_cues
+from dj_registry.cues.profiles import load_cue_profile
+from dj_registry.cues.quality import write_cue_quality_report
 from dj_registry.cues.selection import CueGrid, CueSection, select_default_hot_cues, select_profile_cues
 from dj_registry.cues.slots import hot_cue_num, hot_cue_slot
+from dj_registry.cues.validate_rekordbox import validate_rekordbox_xml
 from dj_registry.models import CuePoint, FileRecord, LogicalTrack
 from dj_registry.store.csv_store import CsvStore
 
@@ -128,6 +133,65 @@ def test_loop_bars_override_generates_short_review_loops():
     assert all(cue.manual_review_required for cue in loops)
 
 
+def test_profile_v3_default_phrase_aligns_sections_and_flags_grid_offset():
+    grid = CueGrid(
+        duration_sec=160.0,
+        bar_times=[float(1 + i * 2) for i in range(80)],
+        bar_energies=[0.2] * 8 + [0.45] * 24 + [0.35] * 8 + [0.9] * 8 + [0.5] * 8 + [0.2] * 24,
+        sections=[
+            CueSection(label="intro", start_bar=0, end_bar=8, energy=0.2),
+            CueSection(label="groove", start_bar=8, end_bar=33, energy=0.45),
+            CueSection(label="breakdown", start_bar=33, end_bar=41, energy=0.35),
+            CueSection(label="peak", start_bar=41, end_bar=49, energy=0.9),
+            CueSection(label="outro", start_bar=57, end_bar=80, energy=0.2),
+        ],
+    )
+
+    cues = select_profile_cues("T1", "F1", grid, profile="v3-default")
+    by_role = {cue.cue_role: cue for cue in cues}
+
+    assert {cue.source_system for cue in cues} == {"auto_v3"}
+    assert by_role["breakdown"].cue_bar_index == 32
+    assert by_role["peak"].cue_bar_index == 40
+    assert by_role["outro_start"].cue_bar_index == 56
+    assert "possible_grid_offset" in by_role["breakdown"].selection_reason
+    assert by_role["breakdown"].manual_review_required is True
+
+
+def test_profile_file_filters_roles_and_loop_length(tmp_path):
+    profile_path = tmp_path / "minimal-cues.json"
+    profile_path.write_text(json.dumps({
+        "name": "minimal",
+        "enabled_roles": ["mix_in", "intro_loop"],
+        "loop_bars": 8,
+        "min_confidence": 0.5,
+        "source_system": "auto_custom",
+        "phrase_align_sections": False,
+    }), encoding="utf-8")
+    profile = load_cue_profile(profile_file=str(profile_path))
+
+    cues = select_profile_cues("T1", "F1", _v2_grid(), profile_config=profile)
+
+    assert [(cue.cue_role, cue.source_system) for cue in cues] == [
+        ("mix_in", "auto_custom"),
+        ("intro_loop", "auto_custom"),
+    ]
+    loop = cues[1]
+    assert loop.cue_end_sec - loop.cue_time_sec == 16.0
+    assert "short_loop" in loop.selection_reason
+
+
+def test_profile_file_rejects_unsupported_roles(tmp_path):
+    profile_path = tmp_path / "bad-cues.json"
+    profile_path.write_text(json.dumps({
+        "name": "bad",
+        "enabled_roles": ["mix_in", "not_a_role"],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported cue role"):
+        load_cue_profile(profile_file=str(profile_path))
+
+
 def test_cue_points_round_trip_through_csv_store(tmp_path):
     store = CsvStore(str(tmp_path))
     cue = CuePoint(
@@ -222,6 +286,122 @@ def test_rekordbox_export_inserts_and_preserves_v2_memory_and_loop_cues(tmp_path
     assert any(row["cue_kind"] == "loop" and row["cue_end_sec"] == "48.000" for row in rows)
 
 
+def test_rekordbox_export_dry_run_does_not_insert_or_update_store(tmp_path):
+    store, xml_path, _audio_path = _store_with_xml_fixture(tmp_path)
+    config = RegistryConfig(output_dir=str(tmp_path / "registry"))
+    output_xml = tmp_path / "dry-run.xml"
+
+    stats = export_rekordbox_cues(
+        config,
+        store,
+        input_xml=xml_path,
+        output_xml=output_xml,
+        dry_run=True,
+    )
+
+    assert stats.would_insert == 1
+    assert stats.inserted == 0
+    assert stats.skipped_conflict == 2
+    assert stats.unmatched == 1
+    tree = etree.parse(str(output_xml))
+    track = tree.getroot().find("COLLECTION").find("TRACK")
+    assert "1" not in {mark.get("Num") for mark in track.findall("POSITION_MARK")}
+    assert {cue.cue_id: cue.export_status for cue in store.load_cue_points()}["CUE-F1-B"] == ""
+
+
+def test_rekordbox_export_review_only_policy_writes_report_without_markers(tmp_path):
+    store, xml_path, _audio_path = _store_with_xml_fixture(tmp_path)
+    config = RegistryConfig(output_dir=str(tmp_path / "registry"))
+    output_xml = tmp_path / "review-only.xml"
+
+    stats = export_rekordbox_cues(
+        config,
+        store,
+        input_xml=xml_path,
+        output_xml=output_xml,
+        policy="review-only",
+    )
+
+    assert stats.review_only == 3
+    assert stats.inserted == 0
+    assert stats.unmatched == 1
+    tree = etree.parse(str(output_xml))
+    track = tree.getroot().find("COLLECTION").find("TRACK")
+    assert "1" not in {mark.get("Num") for mark in track.findall("POSITION_MARK")}
+    statuses = {cue.cue_id: cue.export_status for cue in store.load_cue_points()}
+    assert statuses["CUE-F1-B"] == "review_only"
+
+
+def test_rekordbox_export_replace_generated_policy_only_replaces_matching_markers(tmp_path):
+    store, xml_path, _audio_path = _store_with_xml_fixture(tmp_path, generated_b=True)
+    config = RegistryConfig(output_dir=str(tmp_path / "registry"))
+    output_xml = tmp_path / "replace-generated.xml"
+
+    stats = export_rekordbox_cues(
+        config,
+        store,
+        input_xml=xml_path,
+        output_xml=output_xml,
+        policy="replace-generated",
+    )
+
+    assert stats.replaced == 1
+    assert stats.skipped_conflict == 2
+    tree = etree.parse(str(output_xml))
+    track = tree.getroot().find("COLLECTION").find("TRACK")
+    marks_by_num = {mark.get("Num"): mark for mark in track.findall("POSITION_MARK")}
+    assert marks_by_num["1"].get("Start") == "32.000"
+
+
+def test_cue_quality_report_writes_flags_without_rekordbox_xml(tmp_path):
+    store, _xml_path, _audio_path = _store_with_xml_fixture(tmp_path, include_v2=True)
+    config = RegistryConfig(output_dir=str(tmp_path / "registry"))
+
+    stats = write_cue_quality_report(config, store)
+
+    assert stats.cues_total == len(store.load_cue_points())
+    assert stats.manual_review >= 1
+    with open(stats.report_path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {"track_id", "quality_flags", "selection_reason"}.issubset(rows[0])
+    assert any("low_confidence" in row["quality_flags"] for row in rows)
+
+
+def test_rekordbox_xml_validation_counts_v2_marker_shapes(tmp_path):
+    _store, xml_path, _audio_path = _store_with_xml_fixture(tmp_path, include_v2=True)
+
+    result = validate_rekordbox_xml(xml_path)
+
+    assert result.ok
+    assert result.hot_cues == 2
+    assert result.memory_cues == 1
+    assert result.loops == 1
+    assert result.unknown_markers == 0
+
+
+def test_cues_v3_cli_quality_and_validate_smoke(tmp_path):
+    store, xml_path, _audio_path = _store_with_xml_fixture(tmp_path, include_v2=True)
+
+    rc_quality = registry_main([
+        "cues",
+        "report-quality",
+        "--registry",
+        store.output_dir,
+    ])
+    rc_validate = registry_main([
+        "cues",
+        "validate-rekordbox-xml",
+        "--input-xml",
+        str(xml_path),
+        "--registry",
+        store.output_dir,
+    ])
+
+    assert rc_quality == 0
+    assert rc_validate == 0
+    assert (Path(store.output_dir) / "reports" / "cue_quality_report.csv").exists()
+
+
 def test_cues_export_cli_smoke(tmp_path):
     store, xml_path, _audio_path = _store_with_xml_fixture(tmp_path)
     output_xml = tmp_path / "cli-exported.xml"
@@ -241,7 +421,7 @@ def test_cues_export_cli_smoke(tmp_path):
     assert output_xml.exists()
 
 
-def _store_with_xml_fixture(tmp_path, *, include_v2: bool = False):
+def _store_with_xml_fixture(tmp_path, *, include_v2: bool = False, generated_b: bool = False):
     registry_dir = tmp_path / "registry"
     store = CsvStore(str(registry_dir))
     audio_path = tmp_path / "Artist - One.mp3"
@@ -293,6 +473,11 @@ def _store_with_xml_fixture(tmp_path, *, include_v2: bool = False):
       <POSITION_MARK Name="Existing Memory" Type="0" Start="64.000" Num="-1" Red="255" Green="202" Blue="88"/>
       <POSITION_MARK Name="Existing Loop" Type="4" Start="112.000" End="144.000" Num="-1" Red="75" Green="211" Blue="220"/>
 """
+    generated_b_mark = ""
+    if generated_b:
+        generated_b_mark = """
+      <POSITION_MARK Name="DROP 1" Type="0" Start="20.000" Num="1" Red="1" Green="2" Blue="3"/>
+"""
     xml_path.write_text(
         f"""<?xml version="1.0" encoding="UTF-8"?>
 <DJ_PLAYLISTS Version="1.0.0">
@@ -300,6 +485,7 @@ def _store_with_xml_fixture(tmp_path, *, include_v2: bool = False):
     <TRACK TrackID="101" Name="One" Artist="Artist" Location="{audio_path.resolve().as_uri()}" Size="{audio_path.stat().st_size}" TotalTime="300">
       <POSITION_MARK Name="Existing A" Type="0" Start="0.000" Num="0" Red="255" Green="55" Blue="111"/>
       <POSITION_MARK Name="Existing F" Type="0" Start="72.237" Num="5" Red="224" Green="100" Blue="27"/>
+{generated_b_mark.rstrip()}
 {v2_marks.rstrip()}
     </TRACK>
   </COLLECTION>

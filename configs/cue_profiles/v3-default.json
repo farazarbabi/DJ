@@ -1,0 +1,19 @@
+{
+  "name": "v3-default",
+  "version": "3",
+  "enabled_roles": [
+    "mix_in",
+    "drop_1",
+    "mix_out",
+    "intro_start",
+    "breakdown",
+    "peak",
+    "outro_start",
+    "intro_loop",
+    "outro_loop"
+  ],
+  "loop_bars": 16,
+  "min_confidence": 0.7,
+  "source_system": "auto_v3",
+  "phrase_align_sections": true
+}

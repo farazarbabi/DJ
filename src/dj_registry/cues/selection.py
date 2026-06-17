@@ -7,6 +7,7 @@ from statistics import median
 from typing import Any
 
 from ..models import CuePoint, now_iso
+from .profiles import CueProfile, LOOP_ROLES, MEMORY_ROLES, load_cue_profile
 from .slots import hot_cue_num
 
 BEATS_PER_BAR = 4
@@ -198,17 +199,21 @@ def select_profile_cues(
     include_memory: bool = False,
     include_loops: bool = False,
     loop_bars: int = 16,
+    profile_config: CueProfile | None = None,
     analysis_payload_ref: str = "",
 ) -> list[CuePoint]:
     """Generate cue rows for the requested cue profile."""
-    profile = (profile or "v1").strip().lower()
-    if profile not in {"v1", "v2"}:
-        raise ValueError(f"Unsupported cue profile: {profile!r}")
     if loop_bars <= 0:
         raise ValueError("loop_bars must be greater than zero")
 
-    v2_enabled = profile == "v2" or include_memory or include_loops
-    source_system = "auto_v2" if v2_enabled else "auto_v1"
+    cue_profile = profile_config or load_cue_profile(
+        profile,
+        include_memory=include_memory,
+        include_loops=include_loops,
+        loop_bars=loop_bars,
+    )
+    enabled_roles = set(cue_profile.enabled_roles)
+    source_system = cue_profile.source_system
     hot_cues = select_default_hot_cues(
         track_id,
         file_id,
@@ -216,11 +221,9 @@ def select_profile_cues(
         analysis_payload_ref=analysis_payload_ref,
         source_system=source_system,
     )
-    if not v2_enabled:
-        return hot_cues
 
-    cues = list(hot_cues)
-    if profile == "v2" or include_memory:
+    cues = [cue for cue in hot_cues if cue.cue_role in enabled_roles]
+    if enabled_roles.intersection(MEMORY_ROLES):
         cues.extend(_select_memory_cues(
             track_id,
             file_id,
@@ -228,8 +231,9 @@ def select_profile_cues(
             hot_cues,
             source_system,
             analysis_payload_ref,
+            phrase_align_sections=cue_profile.phrase_align_sections,
         ))
-    if profile == "v2" or include_loops:
+    if enabled_roles.intersection(LOOP_ROLES):
         cues.extend(_select_loop_cues(
             track_id,
             file_id,
@@ -237,8 +241,10 @@ def select_profile_cues(
             hot_cues,
             source_system,
             analysis_payload_ref,
-            loop_bars=loop_bars,
+            loop_bars=cue_profile.loop_bars,
         ))
+    cues = [cue for cue in cues if cue.cue_role in enabled_roles]
+    _apply_profile_review_policy(cues, cue_profile, grid)
     return cues
 
 
@@ -249,6 +255,8 @@ def _select_memory_cues(
     hot_cues: list[CuePoint],
     source_system: str,
     analysis_payload_ref: str,
+    *,
+    phrase_align_sections: bool,
 ) -> list[CuePoint]:
     now = now_iso()
     cues: list[CuePoint] = []
@@ -261,9 +269,9 @@ def _select_memory_cues(
     if breakdown is not None:
         choices.append((
             "breakdown",
-            _clamp_bar(breakdown.start_bar, grid.n_bars),
+            _section_start_bar(breakdown, grid, phrase_align_sections=phrase_align_sections),
             0.78,
-            "section_breakdown_start",
+            "section_breakdown_start" + (";phrase_aligned_section" if phrase_align_sections else ""),
             False,
         ))
 
@@ -271,9 +279,9 @@ def _select_memory_cues(
     if peak is not None:
         choices.append((
             "peak",
-            _clamp_bar(peak.start_bar, grid.n_bars),
+            _section_start_bar(peak, grid, phrase_align_sections=phrase_align_sections),
             0.8,
-            "section_peak_start",
+            "section_peak_start" + (";phrase_aligned_section" if phrase_align_sections else ""),
             False,
         ))
     else:
@@ -290,9 +298,9 @@ def _select_memory_cues(
     if outro is not None:
         choices.append((
             "outro_start",
-            _clamp_bar(outro.start_bar, grid.n_bars),
+            _section_start_bar(outro, grid, phrase_align_sections=phrase_align_sections),
             0.78,
-            "section_outro_start",
+            "section_outro_start" + (";phrase_aligned_section" if phrase_align_sections else ""),
             False,
         ))
     else:
@@ -403,6 +411,22 @@ def _select_loop_cues(
     return cues
 
 
+def _apply_profile_review_policy(cues: list[CuePoint], profile: CueProfile, grid: CueGrid) -> None:
+    possible_grid_offset = bool(grid.bar_times and grid.bar_times[0] > 0.35)
+    for cue in cues:
+        reasons = [part for part in cue.selection_reason.split(";") if part]
+        if profile.name not in {"v1", "v2"}:
+            reasons.append(f"profile_{profile.name}")
+        if possible_grid_offset:
+            reasons.append("possible_grid_offset")
+            cue.confidence = round(max(0.0, cue.confidence - 0.1), 3)
+            cue.score = cue.confidence
+        if cue.confidence < profile.min_confidence:
+            cue.manual_review_required = True
+            reasons.append("below_profile_confidence")
+        cue.selection_reason = ";".join(dict.fromkeys(reasons))
+
+
 def _loop_cue(
     track_id: str,
     file_id: str,
@@ -423,6 +447,8 @@ def _loop_cue(
     cue_time = round(grid.time_for_bar(start_bar), 3)
     cue_end = round(grid.time_for_bar_boundary(end_bar), 3)
     confidence = round(float(max(0.0, min(confidence, 1.0))), 3)
+    if loop_bars != 16:
+        reason = f"{reason};short_loop"
     return CuePoint(
         cue_id=f"CUE-{file_id}-LOOP-{role}",
         track_id=track_id,
@@ -464,6 +490,13 @@ def _clamp_bar(bar_index: int, n_bars: int) -> int:
     if n_bars <= 0:
         return 0
     return max(0, min(int(bar_index), n_bars - 1))
+
+
+def _section_start_bar(section: CueSection, grid: CueGrid, *, phrase_align_sections: bool) -> int:
+    bar = _clamp_bar(section.start_bar, grid.n_bars)
+    if not phrase_align_sections:
+        return bar
+    return _snap_phrase(bar, grid.n_bars, mode="nearest")
 
 
 def _cue_by_role(cues: list[CuePoint], role: str) -> CuePoint | None:

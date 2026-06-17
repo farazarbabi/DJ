@@ -559,6 +559,7 @@ def cmd_cues(args: argparse.Namespace) -> int:
             limit=getattr(args, "limit", None),
             force=getattr(args, "force", False),
             profile=getattr(args, "profile", "v1"),
+            profile_file=getattr(args, "profile_file", None),
             include_memory=getattr(args, "include_memory", False),
             include_loops=getattr(args, "include_loops", False),
             loop_bars=getattr(args, "loop_bars", 16),
@@ -579,14 +580,43 @@ def cmd_cues(args: argparse.Namespace) -> int:
             store,
             input_xml=getattr(args, "input_xml"),
             output_xml=getattr(args, "output_xml"),
+            policy=getattr(args, "policy", "preserve"),
+            dry_run=getattr(args, "dry_run", False),
         )
         print(
             "Cue export: "
-            f"{stats.inserted} inserted, {stats.skipped_conflict} conflicts, "
+            f"{stats.inserted} inserted, {stats.replaced} replaced, "
+            f"{stats.would_insert} would insert, {stats.would_replace} would replace, "
+            f"{stats.review_only} review-only, {stats.skipped_conflict} conflicts, "
             f"{stats.unmatched} unmatched -> {stats.output_xml}"
         )
         print(f"Report: {stats.report_path}")
         return 0 if stats.invalid == 0 else 1
+
+    if command == "report-quality":
+        from .cues.quality import write_cue_quality_report
+
+        stats = write_cue_quality_report(config, store)
+        print(
+            "Cue quality report: "
+            f"{stats.cues_total} cues, {stats.manual_review} review, "
+            f"{stats.low_confidence} low confidence -> {stats.report_path}"
+        )
+        return 0
+
+    if command == "validate-rekordbox-xml":
+        from .cues.validate_rekordbox import validate_rekordbox_xml
+
+        result = validate_rekordbox_xml(getattr(args, "input_xml"))
+        print(
+            "Rekordbox XML validation: "
+            f"{result.tracks} tracks, {result.markers} markers, "
+            f"{result.hot_cues} hot, {result.memory_cues} memory, "
+            f"{result.loops} loops, {result.unknown_markers} unknown"
+        )
+        for error in result.errors:
+            print(f"  ERROR: {error}")
+        return 0 if result.ok else 1
 
     print("Error: cues subcommand required")
     return 1
@@ -824,18 +854,30 @@ def main(argv: list[str] | None = None) -> int:
     p_cues_analyze.add_argument("--rekordbox-xml", "--xml", dest="rekordbox_xml", required=True)
     p_cues_analyze.add_argument("--limit", type=int)
     p_cues_analyze.add_argument("--force", action="store_true", help="Regenerate existing auto_* cue rows for matched files")
-    p_cues_analyze.add_argument("--profile", choices=("v1", "v2"), default="v1", help="Cue generation profile")
+    p_cues_analyze.add_argument("--profile", choices=("v1", "v2", "v3-default"), default="v1", help="Cue generation profile")
+    p_cues_analyze.add_argument("--profile-file", help="JSON or YAML cue profile file")
     p_cues_analyze.add_argument("--include-memory", action="store_true", help="Add structural memory cues")
     p_cues_analyze.add_argument("--include-loops", action="store_true", help="Add structural loop cues")
-    p_cues_analyze.add_argument("--loop-bars", type=int, default=16, help="Loop length in bars for generated loop cues")
+    p_cues_analyze.add_argument("--loop-bars", type=int, default=None, help="Loop length in bars for generated loop cues")
     p_cues_analyze.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
     add_no_progress(p_cues_analyze)
 
     p_cues_export = cues_sub.add_parser("export-rekordbox", help="Write generated cues into a copied Rekordbox XML export")
     p_cues_export.add_argument("--input-xml", required=True)
     p_cues_export.add_argument("--output-xml", required=True)
+    p_cues_export.add_argument("--policy", choices=("preserve", "replace-generated", "replace-empty-slot", "review-only"), default="preserve")
+    p_cues_export.add_argument("--dry-run", action="store_true", help="Write report and preview statuses without mutating cues or XML markers")
     p_cues_export.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
     add_no_progress(p_cues_export)
+
+    p_cues_quality = cues_sub.add_parser("report-quality", help="Write cue quality report CSV")
+    p_cues_quality.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
+    add_no_progress(p_cues_quality)
+
+    p_cues_validate = cues_sub.add_parser("validate-rekordbox-xml", help="Validate cue marker shapes in a Rekordbox XML export")
+    p_cues_validate.add_argument("--input-xml", required=True)
+    p_cues_validate.add_argument("--output", "--registry", dest="output", default="./outputs/registry")
+    add_no_progress(p_cues_validate)
 
     # run (full pipeline)
     p_run = sub.add_parser("run", help="Run full pipeline")
