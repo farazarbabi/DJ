@@ -17,14 +17,19 @@ All four entry points are installed from one `pyproject.toml`.
 
 ```text
 audio files
+  -> optional Spotify playlist gap fill (`dj fetch-missing` / `dj run --fetch-missing`)
   -> dj_registry scan/link/ingest
-  -> dj_tagger canonical analysis
-  -> registry resolution and export
+  -> dj_tagger canonical analysis and shared cache refresh
+  -> registry key/BPM resolution, taxonomy classification, and exports
+  -> categorical playlist generation
+  -> optional Rekordbox cue generation / copied XML export / cue reports
   -> dj_grouper feature build / grouping / recommendation
+  -> final COMMENT tag sync with group IDs when grouping ran
 ```
 
 The registry is the source of truth for canonical key/BPM and for the stored `tagger_*` values used in reporting.
-It also stores the current 3-level genre taxonomy assignment.
+It also stores the current 3-level genre taxonomy assignment and the flat DJ
+taxonomy category used for COMMENT category codes.
 
 ## Canonical Tagger Pipeline
 
@@ -116,6 +121,7 @@ Contains raw or external layers:
 - `songstats`
 - `songstats_lookup`
 - `spotify`
+- `cue_analysis`
 - `analysis_librosa`
 - `analysis_essentia`
 
@@ -124,7 +130,8 @@ full filename + rounded duration + layer. API entries use ISRC + layer. Once an
 entry exists for that identity, downstream changes do not recollect it. This
 includes DSP, section DSP, raw analysis, embedded tags, Spotify lookups,
 Songstats observations and not-found lookups, Rekordbox imports, and registry
-librosa/Essentia observations.
+librosa/Essentia observations. Cue analysis grids use the same identity-keyed
+raw-cache rule.
 
 Raw signatures remain provenance metadata on hydrated tagger records. They are
 not cache-hit gates for raw/data-collection layers.
@@ -397,6 +404,7 @@ Covered workflows:
 - taxonomy classification
 - taxonomy ground-truth generation
 - taxonomy model training and evaluation
+- cue analysis, cue XML export, cue quality reporting, and cue XML validation
 
 Disable progress bars with `--no-progress`.
 
@@ -404,22 +412,138 @@ Disable progress bars with `--no-progress`.
 
 `dj run` orchestrates:
 
-1. scan files
-2. link files to logical tracks
-3. ingest Rekordbox
-4. enrich ISRCs and ingest Songstats
-5. run local analysis
-6. resolve canonical key and BPM
-7. classify the flat DJ taxonomy with the internal model as the primary category
-8. sync tags
-9. export registry reports
-10. run grouping unless skipped
+1. optionally fetch missing Spotify playlist tracks into the target library
+2. scan files and link them to logical tracks
+3. ingest Rekordbox when an XML is configured or auto-detected
+4. enrich ISRCs and ingest Songstats unless skipped or unavailable
+5. run local tagger analysis through the shared cache
+6. resolve canonical key and BPM, then build the review queue
+7. classify the flat DJ taxonomy with the available XGB model for COMMENT category labels
+8. classify the 3-level genre taxonomy and export registry reports
+9. write categorical playlists under `outputs/playlists/by_key/` and `outputs/playlists/by_subgenre/`
+10. optionally generate Rekordbox cue rows, copied XML exports, cue reports, and XML validation
+11. run grouping and recommendations unless skipped
+12. sync COMMENT tags immediately when grouping is skipped, or after grouping when `G###` group IDs can be added
 
 The unified CLI passes progress settings into registry batch steps. `dj-grouper`
 and `dj-tagger` also have their own existing progress output for analysis and
 grouping-specific work.
 
 `dj vibe-audit` compares registry-stored mood/vibe labels against fresh `derive_vibe()` output from current DSP plus current Songstats audio features.
+
+## Cue Point Workflow
+
+Cue generation is part of the registry layer and is exposed through both:
+
+- `dj run ... --cues`
+- `dj-registry cues ...`
+
+The unified `dj run` integration is the preferred path for normal use because
+it runs cue generation from the same registry state produced by scan, Rekordbox
+ingest, local analysis, and taxonomy/report phases.
+
+### Safety Model
+
+The cue system is XML-first and preserve-first:
+
+- it reads a Rekordbox XML export;
+- it writes generated rows to `cue_points_master.csv`;
+- it caches cue-grid analysis in `cache/raw_cache.pkl` under `cue_analysis`;
+- it can write a copied XML export through `--cue-export-xml`;
+- it does not write to the live Rekordbox database;
+- it does not write to Pioneer USB/PDB databases;
+- existing Rekordbox markers are preserved by default.
+
+The default export policy is `preserve`. Conflicting markers are skipped and
+reported instead of overwritten. `replace-generated` only replaces XML markers
+that match this tool's generated name/type/color shape. `review-only` avoids XML
+marker insertion. `--cue-export-dry-run` previews export statuses without
+mutating cue rows or XML markers.
+
+Cue generation has two persistence layers:
+
+- `cache/raw_cache.pkl` stores `cue_analysis`, the expensive audio-derived cue
+  grid used by all profiles.
+- `cue_points_master.csv` stores generated cue rows: hot cues, memory cues,
+  loops, colors, names, confidence, review flags, and export statuses.
+
+Cue analysis cache entries use the shared track cache signature:
+`filename|duration|cue_analysis`. Fresh cue-grid analyses are saved to
+`cache/raw_cache.pkl` every 10 successfully analyzed tracks and once again at
+the end of the run. Generated cue rows are profile-specific and are re-created
+from the cached cue grid, so profile changes, loop-length changes, cue
+name/color changes, and review-policy changes do not force audio decoding.
+
+`--cue-force` replaces generated `auto_*` cue rows from the cached cue grid.
+`--cue-force-analysis` bypasses cached cue grids, decodes matched files again,
+rewrites `cue_analysis` entries, and also replaces generated `auto_*` cue rows
+for those matched files.
+
+### Cue Profiles
+
+Built-in profiles:
+
+| Profile | Output | Source system |
+| --- | --- | --- |
+| `v1` | Hot cues `MIX IN`, `DROP 1`, `MIX OUT` | `auto_v1` |
+| `v2` | V1 hot cues, memory cues, and intro/outro loops | `auto_v2` |
+| `v3-default` | Same cue roles as V2 with stricter confidence/review behavior and phrase-aligned section cues | `auto_v3` |
+
+Supported cue roles:
+
+```text
+mix_in, drop_1, mix_out,
+intro_start, breakdown, peak, outro_start,
+intro_loop, outro_loop
+```
+
+`configs/cue_profiles/v3-default.json` is the checked-in profile-file example.
+Custom profiles can be passed with `--cue-profile-file`; supported fields are
+`enabled_roles`, `loop_bars`, `min_confidence`, `source_system`, and
+`phrase_align_sections`.
+
+### Unified Run Options
+
+`dj run` cue options:
+
+| Option | Behavior |
+| --- | --- |
+| `--cues` | Run cue analysis for tracks matched to the Rekordbox XML export. |
+| `--cue-profile v1|v2|v3-default` | Select a built-in cue profile. |
+| `--cue-profile-file PATH` | Load a custom JSON/YAML profile. |
+| `--cue-loop-bars N` | Override loop length in bars. |
+| `--cue-force` | Remove existing generated `auto_*` cue rows for matched files before writing new generated rows. |
+| `--cue-force-analysis` | Recompute and rewrite cached `cue_analysis` grids from audio, and replace generated `auto_*` cue rows for matched files. |
+| `--cue-limit N` | Limit cue analysis to N matched XML tracks. |
+| `--cue-quality-report` | Write `reports/cue_quality_report.csv`. |
+| `--cue-validate-xml` | Validate known Rekordbox marker shapes in the input XML before cue work. |
+| `--cue-export-xml PATH` | Write generated cues into a copied XML export. |
+| `--cue-export-policy preserve|replace-generated|replace-empty-slot|review-only` | Select export conflict behavior. |
+| `--cue-export-dry-run` | Preview export statuses without mutating cue rows or XML markers. |
+
+Cue XML validation currently recognizes:
+
+- hot cues: `POSITION_MARK Type="0" Num="0..7" Start="..."`
+- memory cues: `POSITION_MARK Type="0" Num="-1" Start="..."`
+- loops: `POSITION_MARK Type="4" Num="-1" Start="..." End="..."`
+
+Local user XML exports available during implementation contained hot-cue marker
+examples only. Memory and loop output is syntactically tested and must be
+validated by importing a copied XML into Rekordbox before bulk library use.
+
+### Cue Outputs
+
+Cue-related outputs under the registry directory:
+
+- `cue_points_master.csv`
+- `reports/cue_quality_report.csv`
+- `reports/cue_rekordbox_export_report.csv`
+- `raw/cue_analysis/*.json`
+
+The JSON audit payloads are written for both fresh and cached cue-grid analyses.
+The quality report flags cues that need review, including low confidence,
+fallback placement, short loops, possible grid offset, cue-order adjustment, and
+export conflicts.
 
 ## Grouper Architecture
 
@@ -465,12 +589,16 @@ The registry sync path builds the COMMENT tag from:
 - tagger energy
 - tagger mood/vibe
 - tagger vocal
-- compact category code from the internal DJ taxonomy category label
+- compact category code from the selected flat DJ taxonomy category label
 
 The current COMMENT shape is `KEY|ENERGY|VIBE|VOCAL[|CATEGORY][|GID]`.
 `CATEGORY` is the no-space code from the category label. Each label word becomes
 3-4 uppercase characters separated by dots, for example
 `Dark Tech-House Driver -> DRK.TECH.HOUS.DRV`.
+
+`dj run` delays COMMENT tag writing until after grouping when grouping is
+enabled, so the final tag can include the `G###` group ID. If grouping is
+skipped, tags are synced after registry resolution and taxonomy classification.
 
 BPM is not currently encoded in the tag; the formatter still accepts a `bpm`
 argument so it can be reintroduced without changing call sites. Canonical BPM
@@ -489,7 +617,9 @@ Main review and audit surfaces:
 - `dj vibe-audit`
 - hydrated tagger metadata in cache
 - `files/taxonomy_ground_truth.csv`
+- `outputs/dj_taxonomy_ground_truth.csv`
 - `outputs/registry/taxonomy_model/training_report.json`
+- `outputs/registry/dj_taxonomy_model/xgb/training_report.json`
 - taxonomy evidence and warnings in `registry_overview.csv`
 
 Recommended verification loop after tuning:
@@ -504,4 +634,4 @@ Recommended verification loop after tuning:
 - registry file scanning defaults to `.mp3`, `.aiff`, `.aif` via `RegistryConfig`
 - grouping still allows Camelot distance `2` as a relaxed fallback in constrained mode
 - cache keys are still filename-plus-duration scoped, not full-path scoped
-- some docs or file names still reflect earlier terminology even though runtime behavior has changed
+- the registry reference filename `track_registery.md` keeps its historical spelling

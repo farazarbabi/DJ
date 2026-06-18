@@ -69,8 +69,13 @@ DJ/
     groups.csv
     recommendations.csv
     feedback.csv
-    Grouped/
     playlists/
+      groups/
+      by_key/
+      by_subgenre/
+      groups_coarse/          optional with --coarse-playlists
+      by_key_coarse/          optional with --coarse-playlists
+      by_subgenre_coarse/     optional with --coarse-playlists
   settings.toml             tunable derived-scoring parameters
   src/
   tests/
@@ -80,13 +85,13 @@ DJ/
 
 Run the full local pipeline:
 
-```bash
+```powershell
 dj run
 ```
 
 Useful variants:
 
-```bash
+```powershell
 dj run "E:\\Music" -w 4
 dj run --no-grouping
 dj run --no-tags
@@ -95,12 +100,23 @@ dj run --force-extract
 dj vibe-audit
 ```
 
+Generate Rekordbox cue points as part of the unified run. Cue generation is
+opt-in and requires a Rekordbox XML export, either supplied with
+`--rekordbox-xml` or auto-detected from the library folder:
+
+```powershell
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-profile v3-default --cue-force
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-export-xml "D:\\Music\\rekordbox_with_cues.xml"
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-export-xml "D:\\Music\\rekordbox_with_cues.xml" --cue-export-dry-run
+```
+
 Find and download tracks from Spotify playlist exports that aren't in your
 library yet. This works as a standalone command, or as an opt-in phase of
 `dj run` that downloads into the library being processed *before* analysis, so
 new tracks are tagged and grouped in the same run:
 
-```bash
+```powershell
 # Standalone: match against / download into --library
 dj fetch-missing playlist.csv --library "D:\\Music"
 dj fetch-missing ./playlists --library "D:\\Music"     # a directory of CSVs
@@ -114,7 +130,7 @@ dj run "D:\\Music" --fetch-missing playlist.csv --fetch-format wav
 
 Lower-level commands:
 
-```bash
+```powershell
 dj-tagger --write-tags
 dj-tagger --write-tags --no-registry
 
@@ -130,6 +146,10 @@ dj-registry dj-taxonomy generate-ground-truth --files ./files
 dj-registry dj-taxonomy train-models --labels outputs/dj_taxonomy_ground_truth.csv
 dj-registry dj-taxonomy evaluate --labels outputs/dj_taxonomy_ground_truth.csv --model-dir outputs/registry/dj_taxonomy_model
 dj-registry dj-taxonomy classify
+dj-registry cues analyze --rekordbox-xml files\files_rekordbox_export.xml --registry files\outputs\registry --profile v3-default
+dj-registry cues report-quality --registry files\outputs\registry
+dj-registry cues validate-rekordbox-xml --input-xml files\files_rekordbox_export.xml
+dj-registry cues export-rekordbox --input-xml files\files_rekordbox_export.xml --output-xml files\files_rekordbox_export_with_cues.xml --registry files\outputs\registry
 
 dj-grouper --dry-run
 dj-grouper --force-extract
@@ -141,13 +161,135 @@ dj-grouper --force-extract
 
 The unified pipeline orchestrates:
 
-1. registry scan and file linking
-2. Rekordbox and Songstats ingest
-3. local tagger analysis and cache refresh
-4. canonical key/BPM resolution
-5. internal DJ taxonomy category prediction
-6. tag writing
-7. grouping and recommendation generation
+1. optional Spotify playlist gap fill via `--fetch-missing`
+2. registry scan and file linking
+3. Rekordbox ingest plus optional Spotify ISRC and Songstats enrichment
+4. local tagger analysis and cache refresh
+5. canonical key/BPM resolution and review queue generation
+6. flat DJ taxonomy classification for COMMENT category tags when a model exists
+7. 3-level genre taxonomy classification and registry report export
+8. categorical playlist generation under `outputs/playlists/`
+9. optional cue-point generation, cue XML export, XML validation, and cue quality reporting
+10. grouping and recommendation generation unless skipped
+11. final COMMENT tag writing, delayed until after grouping when group IDs are available
+
+#### Cue Points
+
+Cue-point generation is available from the unified `dj run` command and from
+the lower-level `dj-registry cues ...` commands. The workflow is XML-first: it
+reads a Rekordbox XML export, writes generated cue rows into the registry, and
+optionally writes a copied XML file. It does not write directly to the live
+Rekordbox database or USB database.
+
+Most users should start with:
+
+```powershell
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-profile v3-default --cue-quality-report
+```
+
+That writes generated cues to:
+
+```text
+<registry>/cue_points_master.csv
+<registry>/reports/cue_quality_report.csv
+```
+
+Cue generation has two layers:
+
+- `cache/raw_cache.pkl` stores the expensive audio-derived cue grid as
+  `cue_analysis`, keyed by filename plus duration.
+- `<registry>/cue_points_master.csv` stores the generated cue rows: hot cues,
+  memory cues, loops, colors, names, review flags, and export statuses.
+
+Fresh cue-grid analyses are checkpointed every 10 tracks and flushed again at
+the end of the run. Cue profiles are applied after loading the cached cue grid,
+so changing `--cue-profile`, `--cue-loop-bars`, cue names/colors, or review
+policy should normally use `--cue-force`, not a full audio recache.
+
+Use `--cue-force` to replace generated `auto_*` cue rows for matched tracks
+from the cached cue grid. Use `--cue-force-analysis` when cue-grid analysis
+logic changed and you want matched tracks decoded again; it rewrites
+`cue_analysis` cache entries and also replaces generated `auto_*` cue rows.
+
+```powershell
+# Regenerate cue rows from cached cue analysis.
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-profile v3-default --cue-force
+
+# Recompute cue analysis from audio, then regenerate cue rows.
+dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-profile v3-default --cue-force-analysis
+```
+
+To also create a copied XML export for Rekordbox import/review:
+
+```powershell
+dj run "D:\\Music" `
+  --rekordbox-xml "D:\\Music\\rekordbox.xml" `
+  --cues `
+  --cue-profile v3-default `
+  --cue-export-xml "D:\\Music\\rekordbox_with_ai_cues.xml" `
+  --cue-export-policy preserve
+```
+
+Use `--cue-export-dry-run` first when testing export behavior. Dry-run writes
+the export report but does not update cue export statuses or insert markers into
+the output XML.
+
+Cue profiles:
+
+| Profile | Generated cues | Source system | Notes |
+| --- | --- | --- | --- |
+| `v1` | Hot cues only: `MIX IN`, `DROP 1`, `MIX OUT` | `auto_v1` | Backward-compatible V1 behavior. |
+| `v2` | V1 hot cues plus memory cues and intro/outro loops | `auto_v2` | Deterministic structural cue set. |
+| `v3-default` | Same cue roles as V2 with stricter review flags | `auto_v3` | Phrase-aligns section cues where possible and uses a higher confidence threshold. |
+
+Supported cue roles for custom profiles:
+
+```text
+mix_in, drop_1, mix_out,
+intro_start, breakdown, peak, outro_start,
+intro_loop, outro_loop
+```
+
+Custom JSON/YAML profiles can be passed with `--cue-profile-file`. The included
+example is `configs/cue_profiles/v3-default.json`.
+
+Cue run options on `dj run`:
+
+| Option | Purpose |
+| --- | --- |
+| `--cues` | Generate cue rows during the run. |
+| `--cue-profile v1|v2|v3-default` | Select the built-in cue profile. Defaults to `v3-default` when cue work is requested through `dj run`. |
+| `--cue-profile-file PATH` | Load a custom JSON/YAML cue profile. |
+| `--cue-loop-bars N` | Override generated loop length in bars. |
+| `--cue-force` | Replace existing generated `auto_*` cue rows for matched files before writing new generated cues. Manual/non-auto rows are preserved. |
+| `--cue-force-analysis` | Ignore cached `cue_analysis` grids, decode matched files again, rewrite the raw-cache entries, and replace generated `auto_*` cue rows. |
+| `--cue-limit N` | Limit cue analysis to the first N matched Rekordbox tracks. Useful for smoke tests. |
+| `--cue-quality-report` | Write `cue_quality_report.csv` without requiring XML export. |
+| `--cue-validate-xml` | Validate known Rekordbox marker shapes in the input XML before cue work. |
+| `--cue-export-xml PATH` | Write generated cues into a copied Rekordbox XML export at PATH. |
+| `--cue-export-policy preserve` | Default export behavior. Preserve existing Rekordbox markers and skip conflicts. |
+| `--cue-export-policy review-only` | Write reports/statuses without adding XML markers. |
+| `--cue-export-policy replace-generated` | Replace only markers that look like they were generated by this tool. User-created markers are preserved. |
+| `--cue-export-policy replace-empty-slot` | Currently equivalent to preserve for hot cues: only empty slots are written. |
+| `--cue-export-dry-run` | Preview export statuses without mutating cue rows or XML markers. |
+
+Generated cue outputs:
+
+| Output | Description |
+| --- | --- |
+| `cue_points_master.csv` | Registry table of generated/reviewed cue rows. |
+| `reports/cue_quality_report.csv` | Review flags such as low confidence, fallback used, short loop, possible grid offset, and export conflict. |
+| `reports/cue_rekordbox_export_report.csv` | Export statuses for inserted, skipped, invalid, unmatched, dry-run, and review-only cue rows. |
+| `raw/cue_analysis/*.json` | Per-track cue-grid audit payloads written from fresh or cached cue analysis. |
+| copied XML from `--cue-export-xml` | Rekordbox XML copy containing inserted generated markers when not dry-run/review-only. |
+
+Important safety notes:
+
+- Always export to a new XML file, not over the source XML.
+- Existing Rekordbox hot cues, memory cues, and loops are preserved by default.
+- Memory and loop XML output is syntactically validated, but your local XML
+  exports currently contain only hot-cue examples. Import a copied XML into
+  Rekordbox and verify memory/loop behavior before bulk use.
 
 It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
 
@@ -161,10 +303,15 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
    up to `--max-attempts` (default 3) before reporting the track as unmatched.
    Audio is extracted to WAV and converted losslessly to AIFF by default
    (`--format wav` to keep WAV)
-4. names files `Artist - Track` in the library convention. A track already
-   downloaded by this tool is kept if its duration is still within tolerance,
-   otherwise it is re-downloaded; differently-named user library files are
-   never touched
+4. names tool downloads as `Artist - Track[U]` so YouTube-sourced/converted
+   files are distinguishable from curated originals. Embedded Title/Artist/
+   Album/Genre/Year/Label metadata comes from the playlist row.
+5. treats curated Original/Extended variants as present for unversioned Spotify
+   titles, while true remixes stay distinct
+6. prunes `[U]` downloads once a curated unmarked original or Original/Extended
+   equivalent appears in the library. A previously downloaded `[U]` file is
+   kept only while its duration remains within tolerance; otherwise it is
+   re-downloaded.
 
 Reports and a download log are written to `<library>/outputs/fetch/`
 (`matched_report.csv`, `missing_report.csv`, `download_log.csv`, and
@@ -322,7 +469,7 @@ Current grouping pipeline:
 7. cluster with either:
    - `constrained` (default)
    - `agglomerative`
-8. write `groups.csv`, `recommendations.csv`, playlists, and optional grouped folders
+8. write `groups.csv`, `recommendations.csv`, and Rekordbox-compatible M3U8 playlists
 
 ## Cache Model
 
@@ -341,6 +488,7 @@ Stores reusable raw artifacts and external data:
 - `songstats`
 - `songstats_lookup`
 - `spotify`
+- `cue_analysis`
 - analysis observations
 
 Important: raw/data-collection cache keys are identity-only:
@@ -352,9 +500,9 @@ If a raw/data-collection entry exists for that identity, downstream changes do
 not recollect it. That includes tag formatting, category labels, grouping,
 derived scoring, signature metadata, and taxonomy changes. DSP, section DSP,
 raw analysis, embedded tags, Spotify lookups, Songstats observations, Songstats
-not-found lookups, Rekordbox imports, and registry analysis observations all use
-this rule. Raw versions/signatures are audit metadata only; forced recollection
-requires an explicit force/clear workflow.
+not-found lookups, Rekordbox imports, registry analysis observations, and cue
+analysis grids all use this rule. Raw versions/signatures are audit metadata
+only; forced recollection requires an explicit force/clear workflow.
 
 ### `cache/derived_cache.pkl`
 
@@ -413,11 +561,18 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 
 - `outputs/registry/registry_overview.csv`: main audit and review sheet
 - `files/taxonomy_ground_truth.csv`: GPT/manual seed labels for taxonomy training
+- `outputs/dj_taxonomy_ground_truth.csv`: GPT/manual seed labels for flat DJ taxonomy training
 - `outputs/registry/taxonomy_model/`: trained taxonomy model artifacts
+- `outputs/registry/dj_taxonomy_model/`: trained flat DJ taxonomy XGB artifacts
+- `outputs/registry/cue_points_master.csv`: generated/reviewed cue-point rows
+- `outputs/registry/reports/cue_quality_report.csv`: cue review flags and confidence audit
+- `outputs/registry/reports/cue_rekordbox_export_report.csv`: copied-XML cue export report
 - `outputs/groups.csv`: grouped tracks
 - `outputs/recommendations.csv`: directional recommendations
-- `outputs/Grouped/`: optional grouped folders
-- `outputs/playlists/`: generated playlists
+- `outputs/playlists/groups/`: one M3U8 playlist per generated group
+- `outputs/playlists/by_key/`: categorical key playlists from registry data
+- `outputs/playlists/by_subgenre/`: categorical DJ-taxonomy label playlists
+- `outputs/playlists/*_coarse/`: optional half-resolution playlist sets from `--coarse-playlists`
 
 ## Testing
 
@@ -425,7 +580,7 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 pytest -q
 ```
 
-Current suite size: `321` tests.
+Current suite size: `473` tests collected by `pytest --collect-only -q`.
 
 ## Documentation
 

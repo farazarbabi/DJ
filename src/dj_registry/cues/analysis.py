@@ -7,6 +7,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass
 
+from dj_tagger import universal_cache as cache_mod
 from dj_tagger.analyzers.sections import analyze_sections
 from dj_tagger.audio import load_audio_features
 from dj_tagger.raw_features import extract_raw_analysis
@@ -17,9 +18,12 @@ from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from .profiles import load_cue_profile
 from .rekordbox import match_rekordbox_tracks, parse_rekordbox_tracks
-from .selection import cue_grid_from_audio, select_profile_cues
+from .selection import CueGrid, CueSection, cue_grid_from_audio, select_profile_cues
 
 logger = logging.getLogger(__name__)
+
+CUE_ANALYSIS_CACHE_LAYER = "cue_analysis"
+CUE_ANALYSIS_CHECKPOINT_EVERY = 10
 
 
 @dataclass
@@ -27,6 +31,7 @@ class CueAnalysisStats:
     xml_tracks: int = 0
     matched: int = 0
     analyzed: int = 0
+    cached: int = 0
     skipped_existing: int = 0
     failed: int = 0
     cues_written: int = 0
@@ -45,6 +50,7 @@ def analyze_rekordbox_cues(
     include_memory: bool = False,
     include_loops: bool = False,
     loop_bars: int | None = 16,
+    force_analysis: bool = False,
     show_progress: bool = False,
 ) -> CueAnalysisStats:
     """Generate cue points for registry tracks present in a Rekordbox XML export."""
@@ -70,7 +76,8 @@ def analyze_rekordbox_cues(
     existing_auto_file_ids = {
         cue.file_id for cue in existing_cues if _is_auto_cue(cue)
     }
-    if force:
+    force_generated_rows = force or force_analysis
+    if force_generated_rows:
         cue_points = [
             cue for cue in existing_cues
             if not (_is_auto_cue(cue) and cue.file_id in selected_file_ids)
@@ -89,11 +96,12 @@ def analyze_rekordbox_cues(
     )
 
     progress = ProgressBar(len(matches), label="Cue analysis", enabled=show_progress)
-    new_cues: list[CuePoint] = []
+    ucache = cache_mod.get_cache(os.path.join("cache", "raw_cache.pkl"))
+    since_cache_checkpoint = 0
     for index, match in enumerate(matches, start=1):
         frec = match.file_record
         label = frec.file_name or os.path.basename(frec.path_abs)
-        if not force and frec.file_id in existing_auto_file_ids:
+        if not force_generated_rows and frec.file_id in existing_auto_file_ids:
             stats.skipped_existing += 1
             progress.update(index, label, skipped=stats.skipped_existing)
             continue
@@ -104,10 +112,46 @@ def analyze_rekordbox_cues(
             continue
 
         try:
-            track_audio = load_audio_features(frec.path_abs)
-            section_map = analyze_sections(track_audio)
-            raw_analysis = extract_raw_analysis(track_audio)
-            grid = cue_grid_from_audio(track_audio, section_map, raw_analysis)
+            cache_filename = frec.file_name or os.path.basename(frec.path_abs)
+            cache_duration = _cache_duration_for_file(frec, fallback=match.ref.total_time_sec)
+            cached = None if force_analysis else ucache.get_track(
+                cache_filename,
+                cache_duration,
+                CUE_ANALYSIS_CACHE_LAYER,
+            )
+            cached_analysis = _cue_analysis_from_cache(cached)
+            if cached_analysis is not None:
+                grid, raw_analysis = cached_analysis
+                stats.cached += 1
+            else:
+                track_audio = load_audio_features(frec.path_abs)
+                section_map = analyze_sections(track_audio)
+                raw_analysis = extract_raw_analysis(track_audio)
+                grid = cue_grid_from_audio(track_audio, section_map, raw_analysis)
+                cache_duration = (
+                    cache_mod.quick_duration(frec.path_abs)
+                    or frec.audio_duration_sec
+                    or match.ref.total_time_sec
+                    or float(getattr(track_audio, "duration", 0.0) or 0.0)
+                    or None
+                )
+                _put_cue_analysis_cache(
+                    ucache,
+                    cache_filename,
+                    cache_duration,
+                    _cue_analysis_cache_payload(grid, raw_analysis),
+                    force=force_analysis,
+                    mtime=_file_mtime(frec.path_abs),
+                )
+                since_cache_checkpoint += 1
+                stats.analyzed += 1
+                if since_cache_checkpoint >= CUE_ANALYSIS_CHECKPOINT_EVERY:
+                    ucache.save()
+                    logger.info(
+                        "Cue analysis checkpoint: saved %d fresh cue-analysis cache entries",
+                        since_cache_checkpoint,
+                    )
+                    since_cache_checkpoint = 0
             payload_ref = _write_analysis_payload(config, raw_dir, match, grid, raw_analysis)
             generated = select_profile_cues(
                 frec.track_id,
@@ -124,20 +168,21 @@ def analyze_rekordbox_cues(
             progress.update(index, f"{label} failed", failed=stats.failed)
             continue
 
-        new_cues.extend(generated)
-        stats.analyzed += 1
+        cue_points.extend(generated)
         stats.cues_written += len(generated)
-        progress.update(index, label, cues=stats.cues_written)
+        progress.update(index, label, cues=stats.cues_written, cached=stats.cached)
 
     progress.finish()
-    cue_points.extend(new_cues)
+    if ucache.dirty:
+        ucache.save()
     store.save_cue_points(cue_points)
 
     logger.info(
-        "Cue analysis: %d XML tracks, %d matched, %d analyzed, %d cues, %d skipped, %d failed",
+        "Cue analysis: %d XML tracks, %d matched, %d analyzed, %d cached, %d cues, %d skipped, %d failed",
         stats.xml_tracks,
         stats.matched,
         stats.analyzed,
+        stats.cached,
         stats.cues_written,
         stats.skipped_existing,
         stats.failed,
@@ -147,6 +192,95 @@ def analyze_rekordbox_cues(
 
 def _is_auto_cue(cue: CuePoint) -> bool:
     return str(cue.source_system or "").startswith("auto_")
+
+
+def _cache_duration_for_file(frec, *, fallback: float = 0.0) -> float | None:
+    return cache_mod.quick_duration(frec.path_abs) or frec.audio_duration_sec or fallback or None
+
+
+def _file_mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _put_cue_analysis_cache(
+    ucache,
+    filename: str,
+    duration: float | None,
+    payload: dict,
+    *,
+    force: bool,
+    mtime: float,
+) -> None:
+    if force:
+        key = ucache.track_key(filename, duration, CUE_ANALYSIS_CACHE_LAYER)
+        if key in ucache._entries:
+            del ucache._entries[key]
+            ucache._dirty_raw = True
+    ucache.put_track(
+        filename,
+        duration,
+        CUE_ANALYSIS_CACHE_LAYER,
+        payload,
+        mtime=mtime,
+    )
+
+
+def _cue_analysis_cache_payload(grid: CueGrid, raw_analysis: dict | None) -> dict:
+    raw_analysis = raw_analysis if isinstance(raw_analysis, dict) else {}
+    return {
+        "schema": "cue_analysis_v1",
+        "grid": {
+            "duration_sec": float(grid.duration_sec),
+            "beat_times": [float(v) for v in grid.beat_times],
+            "bar_times": [float(v) for v in grid.bar_times],
+            "bar_energies": [float(v) for v in grid.bar_energies],
+            "sections": [asdict(section) for section in grid.sections],
+        },
+        "raw_analysis": {
+            "tempo": raw_analysis.get("tempo", ""),
+        },
+    }
+
+
+def _cue_analysis_from_cache(data) -> tuple[CueGrid, dict] | None:
+    if not isinstance(data, dict):
+        return None
+    grid_data = data.get("grid")
+    if not isinstance(grid_data, dict):
+        return None
+    try:
+        sections = [
+            CueSection(
+                label=str(section.get("label", "")),
+                start_bar=int(section.get("start_bar", 0) or 0),
+                end_bar=int(section.get("end_bar", 0) or 0),
+                energy=float(section.get("energy", 0.0) or 0.0),
+            )
+            for section in grid_data.get("sections", []) or []
+            if isinstance(section, dict)
+        ]
+        grid = CueGrid(
+            duration_sec=float(grid_data.get("duration_sec", 0.0) or 0.0),
+            beat_times=_float_list(grid_data.get("beat_times")),
+            bar_times=_float_list(grid_data.get("bar_times")),
+            bar_energies=_float_list(grid_data.get("bar_energies")),
+            sections=sections,
+        )
+    except (TypeError, ValueError):
+        return None
+    if grid.duration_sec <= 0 and grid.n_bars <= 0:
+        return None
+    raw_analysis = data.get("raw_analysis")
+    return grid, raw_analysis if isinstance(raw_analysis, dict) else {}
+
+
+def _float_list(values) -> list[float]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [float(value) for value in values]
 
 
 def _write_analysis_payload(config: RegistryConfig, raw_dir: str, match, grid, raw_analysis: dict) -> str:

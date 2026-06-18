@@ -24,6 +24,7 @@ Layers:
   - "spotify"     — Spotify lookup observation
   - "analysis_librosa"  — registry librosa key analysis
   - "analysis_essentia" — registry essentia key analysis
+  - "cue_analysis"      - registry cue grid analysis
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ RAW_LAYERS = frozenset({
     "spotify",        # Spotify lookup
     "analysis_librosa",   # registry librosa key analysis
     "analysis_essentia",  # registry essentia key analysis
+    "cue_analysis",       # registry cue grid analysis
 })
 # Kept for compatibility with older imports/tests. Raw layers are not
 # version-gated on read.

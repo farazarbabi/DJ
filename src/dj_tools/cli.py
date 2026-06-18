@@ -80,6 +80,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--fetch-format", dest="fetch_format", choices=["aiff", "wav"],
                        default="aiff", help="Format for --fetch-missing downloads (default: aiff)")
+    p_run.add_argument("--cues", action="store_true",
+                       help="Generate Rekordbox cue points during the run")
+    p_run.add_argument("--cue-profile", choices=["v1", "v2", "v3-default"],
+                       default="v3-default", help="Cue generation profile (default: v3-default)")
+    p_run.add_argument("--cue-profile-file", default=None,
+                       help="JSON/YAML cue profile file")
+    p_run.add_argument("--cue-loop-bars", type=int, default=None,
+                       help="Loop length in bars for generated cue loops")
+    p_run.add_argument("--cue-force", action="store_true",
+                       help="Regenerate existing auto_* cue rows for matched files")
+    p_run.add_argument("--cue-force-analysis", action="store_true",
+                       help="Recompute and rewrite cached cue_analysis grids from audio")
+    p_run.add_argument("--cue-limit", type=int, default=None,
+                       help="Limit cue analysis to this many matched Rekordbox tracks")
+    p_run.add_argument("--cue-export-xml", default=None,
+                       help="Write generated cues into this copied Rekordbox XML export")
+    p_run.add_argument("--cue-export-policy",
+                       choices=["preserve", "replace-generated", "replace-empty-slot", "review-only"],
+                       default="preserve", help="Cue XML export policy")
+    p_run.add_argument("--cue-export-dry-run", action="store_true",
+                       help="Preview cue XML export statuses without mutating cue rows or markers")
+    p_run.add_argument("--cue-quality-report", action="store_true",
+                       help="Write cue quality report as part of the run")
+    p_run.add_argument("--cue-validate-xml", action="store_true",
+                       help="Validate Rekordbox cue marker shapes before cue work")
 
     p_fetch = sub.add_parser(
         "fetch-missing",
@@ -228,6 +253,120 @@ def _fmt_elapsed(seconds: float) -> str:
         return f"{m}m{s:02d}s"
     h, m = divmod(m, 60)
     return f"{h}h{m:02d}m{s:02d}s"
+
+
+def _cue_work_requested(args: argparse.Namespace) -> bool:
+    return any((
+        getattr(args, "cues", False),
+        bool(getattr(args, "cue_export_xml", None)),
+        getattr(args, "cue_quality_report", False),
+        getattr(args, "cue_validate_xml", False),
+    ))
+
+
+def _run_cue_work(config, store, args: argparse.Namespace, *, show_progress: bool = False) -> dict:
+    """Run cue-point analysis/export/reporting requested through `dj run`."""
+    summary: dict = {}
+    xml_path = getattr(config, "rekordbox_xml_path", "")
+    if not xml_path:
+        logger.info("Cues: skipped (no Rekordbox XML path)")
+        return summary
+
+    if getattr(args, "cue_validate_xml", False):
+        from dj_registry.cues.validate_rekordbox import validate_rekordbox_xml
+
+        validation = validate_rekordbox_xml(xml_path)
+        summary["cue_xml_markers"] = validation.markers
+        summary["cue_xml_hot"] = validation.hot_cues
+        summary["cue_xml_memory"] = validation.memory_cues
+        summary["cue_xml_loops"] = validation.loops
+        if not validation.ok:
+            for error in validation.errors:
+                logger.error("Cues XML validation: %s", error)
+            raise RuntimeError("Rekordbox XML cue validation failed")
+        logger.info(
+            "Cues: XML validation passed (%d markers: %d hot, %d memory, %d loops)",
+            validation.markers,
+            validation.hot_cues,
+            validation.memory_cues,
+            validation.loops,
+        )
+
+    should_analyze = getattr(args, "cues", False) or bool(getattr(args, "cue_export_xml", None))
+    if should_analyze:
+        from dj_registry.cues.analysis import analyze_rekordbox_cues
+
+        stats = analyze_rekordbox_cues(
+            config,
+            store,
+            limit=getattr(args, "cue_limit", None),
+            force=getattr(args, "cue_force", False),
+            profile=getattr(args, "cue_profile", "v3-default"),
+            profile_file=getattr(args, "cue_profile_file", None),
+            loop_bars=getattr(args, "cue_loop_bars", None),
+            force_analysis=getattr(args, "cue_force_analysis", False),
+            show_progress=show_progress,
+        )
+        summary["cue_tracks_analyzed"] = stats.analyzed
+        summary["cue_tracks_cached"] = stats.cached
+        summary["cue_points_written"] = stats.cues_written
+        summary["cue_tracks_skipped"] = stats.skipped_existing
+        summary["cue_tracks_failed"] = stats.failed
+        logger.info(
+            "Cues: analyzed=%d cached=%d written=%d skipped=%d failed=%d",
+            stats.analyzed,
+            stats.cached,
+            stats.cues_written,
+            stats.skipped_existing,
+            stats.failed,
+        )
+
+    if getattr(args, "cue_export_xml", None):
+        from dj_registry.cues.export_rekordbox import export_rekordbox_cues
+
+        export_stats = export_rekordbox_cues(
+            config,
+            store,
+            input_xml=xml_path,
+            output_xml=getattr(args, "cue_export_xml"),
+            policy=getattr(args, "cue_export_policy", "preserve"),
+            dry_run=getattr(args, "cue_export_dry_run", False),
+        )
+        summary["cue_export_inserted"] = export_stats.inserted
+        summary["cue_export_replaced"] = export_stats.replaced
+        summary["cue_export_would_insert"] = export_stats.would_insert
+        summary["cue_export_would_replace"] = export_stats.would_replace
+        summary["cue_export_conflicts"] = export_stats.skipped_conflict
+        summary["cue_export_invalid"] = export_stats.invalid
+        summary["cue_export_report"] = export_stats.report_path
+        logger.info(
+            "Cues: export inserted=%d replaced=%d would_insert=%d conflicts=%d invalid=%d -> %s",
+            export_stats.inserted,
+            export_stats.replaced,
+            export_stats.would_insert,
+            export_stats.skipped_conflict,
+            export_stats.invalid,
+            export_stats.output_xml,
+        )
+
+    if (
+        getattr(args, "cue_quality_report", False)
+        or getattr(args, "cues", False)
+        or bool(getattr(args, "cue_export_xml", None))
+    ):
+        from dj_registry.cues.quality import write_cue_quality_report
+
+        quality = write_cue_quality_report(config, store)
+        summary["cue_quality_report"] = quality.report_path
+        summary["cue_quality_review"] = quality.manual_review
+        logger.info(
+            "Cues: quality report %d cues, %d review -> %s",
+            quality.cues_total,
+            quality.manual_review,
+            quality.report_path,
+        )
+
+    return summary
 
 
 def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
@@ -668,6 +807,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             )
     except Exception:
         logger.warning("Categorical playlists: generation failed, continuing", exc_info=True)
+
+    # Phase 7c: Cue points
+    if _cue_work_requested(args):
+        t0 = time.perf_counter()
+        _run_cue_work(config, store, args, show_progress=show_progress)
+        logger.info("Pipeline: cue work done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 8: Grouping
     if not args.no_grouping:

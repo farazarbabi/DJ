@@ -563,11 +563,12 @@ def cmd_cues(args: argparse.Namespace) -> int:
             include_memory=getattr(args, "include_memory", False),
             include_loops=getattr(args, "include_loops", False),
             loop_bars=getattr(args, "loop_bars", 16),
+            force_analysis=getattr(args, "force_analysis", False),
             show_progress=_show_progress(args),
         )
         print(
             "Cue analysis: "
-            f"{stats.analyzed} analyzed, {stats.cues_written} cues written, "
+            f"{stats.analyzed} analyzed, {stats.cached} cached, {stats.cues_written} cues written, "
             f"{stats.skipped_existing} skipped, {stats.failed} failed -> {stats.cue_points_path}"
         )
         return 0 if stats.failed == 0 else 1
@@ -854,6 +855,7 @@ def main(argv: list[str] | None = None) -> int:
     p_cues_analyze.add_argument("--rekordbox-xml", "--xml", dest="rekordbox_xml", required=True)
     p_cues_analyze.add_argument("--limit", type=int)
     p_cues_analyze.add_argument("--force", action="store_true", help="Regenerate existing auto_* cue rows for matched files")
+    p_cues_analyze.add_argument("--force-analysis", action="store_true", help="Recompute and rewrite cached cue_analysis grids from audio")
     p_cues_analyze.add_argument("--profile", choices=("v1", "v2", "v3-default"), default="v1", help="Cue generation profile")
     p_cues_analyze.add_argument("--profile-file", help="JSON or YAML cue profile file")
     p_cues_analyze.add_argument("--include-memory", action="store_true", help="Add structural memory cues")

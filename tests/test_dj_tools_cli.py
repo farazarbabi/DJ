@@ -1,6 +1,8 @@
 """Tests for unified dj CLI helpers."""
 
-from dj_tools.cli import _load_group_ids_by_file
+from types import SimpleNamespace
+
+from dj_tools.cli import _build_parser, _cue_work_requested, _load_group_ids_by_file, _run_cue_work
 
 
 def test_load_group_ids_by_file(tmp_path):
@@ -20,3 +22,126 @@ def test_load_group_ids_by_file(tmp_path):
 
 def test_load_group_ids_missing_file_returns_empty(tmp_path):
     assert _load_group_ids_by_file(str(tmp_path / "missing.csv")) == {}
+
+
+def test_run_parser_accepts_cue_flags():
+    parser = _build_parser()
+    args = parser.parse_args([
+        "run",
+        "files",
+        "--cues",
+        "--cue-profile",
+        "v3-default",
+        "--cue-loop-bars",
+        "8",
+        "--cue-force",
+        "--cue-force-analysis",
+        "--cue-export-xml",
+        "files/out.xml",
+        "--cue-export-policy",
+        "review-only",
+        "--cue-export-dry-run",
+        "--cue-quality-report",
+        "--cue-validate-xml",
+    ])
+
+    assert args.command == "run"
+    assert args.cues is True
+    assert args.cue_profile == "v3-default"
+    assert args.cue_loop_bars == 8
+    assert args.cue_force is True
+    assert args.cue_force_analysis is True
+    assert args.cue_export_xml == "files/out.xml"
+    assert args.cue_export_policy == "review-only"
+    assert args.cue_export_dry_run is True
+    assert args.cue_quality_report is True
+    assert args.cue_validate_xml is True
+    assert _cue_work_requested(args) is True
+
+
+def test_run_cue_work_wires_analyze_export_and_report(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_validate(path):
+        calls.append(("validate", {"path": path}))
+        return SimpleNamespace(
+            ok=True,
+            markers=3,
+            hot_cues=1,
+            memory_cues=1,
+            loops=1,
+            errors=[],
+        )
+
+    def fake_analyze(config, store, **kwargs):
+        calls.append(("analyze", kwargs))
+        return SimpleNamespace(
+            analyzed=2,
+            cached=3,
+            cues_written=18,
+            skipped_existing=1,
+            failed=0,
+        )
+
+    def fake_export(config, store, **kwargs):
+        calls.append(("export", kwargs))
+        return SimpleNamespace(
+            inserted=4,
+            replaced=1,
+            would_insert=0,
+            would_replace=0,
+            skipped_conflict=2,
+            invalid=0,
+            report_path="cue-export-report.csv",
+            output_xml=kwargs["output_xml"],
+        )
+
+    def fake_quality(config, store):
+        calls.append(("quality", {}))
+        return SimpleNamespace(
+            cues_total=18,
+            manual_review=3,
+            report_path="cue-quality-report.csv",
+        )
+
+    monkeypatch.setattr("dj_registry.cues.validate_rekordbox.validate_rekordbox_xml", fake_validate)
+    monkeypatch.setattr("dj_registry.cues.analysis.analyze_rekordbox_cues", fake_analyze)
+    monkeypatch.setattr("dj_registry.cues.export_rekordbox.export_rekordbox_cues", fake_export)
+    monkeypatch.setattr("dj_registry.cues.quality.write_cue_quality_report", fake_quality)
+
+    config = SimpleNamespace(rekordbox_xml_path="library.xml")
+    store = object()
+    args = SimpleNamespace(
+        cues=True,
+        cue_profile="v3-default",
+        cue_profile_file="profile.json",
+        cue_loop_bars=8,
+        cue_force=True,
+        cue_force_analysis=True,
+        cue_limit=2,
+        cue_export_xml="out.xml",
+        cue_export_policy="review-only",
+        cue_export_dry_run=True,
+        cue_quality_report=False,
+        cue_validate_xml=True,
+    )
+
+    summary = _run_cue_work(config, store, args, show_progress=False)
+
+    assert [name for name, _kwargs in calls] == ["validate", "analyze", "export", "quality"]
+    analyze_kwargs = calls[1][1]
+    assert analyze_kwargs["profile"] == "v3-default"
+    assert analyze_kwargs["profile_file"] == "profile.json"
+    assert analyze_kwargs["loop_bars"] == 8
+    assert analyze_kwargs["force"] is True
+    assert analyze_kwargs["force_analysis"] is True
+    assert analyze_kwargs["limit"] == 2
+    export_kwargs = calls[2][1]
+    assert export_kwargs["input_xml"] == "library.xml"
+    assert export_kwargs["output_xml"] == "out.xml"
+    assert export_kwargs["policy"] == "review-only"
+    assert export_kwargs["dry_run"] is True
+    assert summary["cue_points_written"] == 18
+    assert summary["cue_tracks_cached"] == 3
+    assert summary["cue_export_inserted"] == 4
+    assert summary["cue_quality_review"] == 3

@@ -198,6 +198,7 @@ def test_raw_layers_are_not_signature_versioned(monkeypatch):
     assert versions["dsp"] == "1"
     assert versions["section_dsp"] == "1"
     assert versions["raw_analysis"] == "1"
+    assert versions["cue_analysis"] == "1"
 
 
 def test_direct_tagger_cache_rederives_from_loaded_raw_cache(tmp_path, monkeypatch):

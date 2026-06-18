@@ -11,14 +11,17 @@ from lxml import etree
 
 from dj_registry.cli import main as registry_main
 from dj_registry.config import RegistryConfig
+from dj_registry.cues.analysis import analyze_rekordbox_cues
 from dj_registry.cues.export_rekordbox import REVIEW_PLAYLIST_NAME, export_rekordbox_cues
 from dj_registry.cues.profiles import load_cue_profile
 from dj_registry.cues.quality import write_cue_quality_report
+from dj_registry.cues.rekordbox import MatchedRekordboxTrack, RekordboxTrackRef
 from dj_registry.cues.selection import CueGrid, CueSection, select_default_hot_cues, select_profile_cues
 from dj_registry.cues.slots import hot_cue_num, hot_cue_slot
 from dj_registry.cues.validate_rekordbox import validate_rekordbox_xml
 from dj_registry.models import CuePoint, FileRecord, LogicalTrack
 from dj_registry.store.csv_store import CsvStore
+from dj_tagger.universal_cache import UniversalCache, reset_cache
 
 
 def test_hot_cue_slot_mapping_supports_a_to_h():
@@ -214,6 +217,101 @@ def test_cue_points_round_trip_through_csv_store(tmp_path):
     assert loaded[0].rekordbox_num == 0
     assert loaded[0].manual_review_required is True
     assert store.get_cue_points_for_file("F1")[0].cue_id == "CUE-F1-A"
+
+
+def test_cue_analysis_caches_grids_in_raw_cache_and_reuses_them(tmp_path, monkeypatch):
+    reset_cache()
+    cache_dir = tmp_path / "cache"
+    cache = _CountingCache(str(cache_dir / "raw_cache.pkl"))
+    monkeypatch.setattr("dj_tagger.universal_cache.get_cache", lambda _path: cache)
+    monkeypatch.setattr("dj_tagger.universal_cache.quick_duration", lambda _path: 240.0)
+
+    store = CsvStore(str(tmp_path / "registry"))
+    xml_path = tmp_path / "rekordbox.xml"
+    xml_path.write_text("<DJ_PLAYLISTS/>", encoding="utf-8")
+    config = RegistryConfig(
+        output_dir=store.output_dir,
+        rekordbox_xml_path=str(xml_path),
+    )
+
+    refs: list[RekordboxTrackRef] = []
+    matches: list[MatchedRekordboxTrack] = []
+    for idx in range(11):
+        audio_path = tmp_path / f"Track {idx}.mp3"
+        audio_path.write_bytes(b"not real audio")
+        ref = RekordboxTrackRef(
+            rekordbox_track_id=str(idx),
+            name=f"Track {idx}",
+            artist="Artist",
+            location=str(audio_path),
+            local_path=str(audio_path),
+            size_bytes=audio_path.stat().st_size,
+            total_time_sec=240.0,
+        )
+        frec = FileRecord(
+            file_id=f"F{idx}",
+            track_id=f"T{idx}",
+            path_abs=str(audio_path),
+            file_name=audio_path.name,
+            audio_duration_sec=240.0,
+            is_primary_file=True,
+        )
+        refs.append(ref)
+        matches.append(MatchedRekordboxTrack(ref=ref, file_record=frec, match_method="test"))
+
+    monkeypatch.setattr("dj_registry.cues.analysis.parse_rekordbox_tracks", lambda *_args, **_kwargs: refs)
+    monkeypatch.setattr("dj_registry.cues.analysis.match_rekordbox_tracks", lambda *_args, **_kwargs: matches)
+    load_calls = []
+
+    def fake_load_audio(path):
+        load_calls.append(path)
+        return object()
+
+    monkeypatch.setattr("dj_registry.cues.analysis.load_audio_features", fake_load_audio)
+    monkeypatch.setattr("dj_registry.cues.analysis.analyze_sections", lambda _audio: object())
+    monkeypatch.setattr("dj_registry.cues.analysis.extract_raw_analysis", lambda _audio: {"tempo": 128.0})
+    monkeypatch.setattr("dj_registry.cues.analysis.cue_grid_from_audio", lambda *_args: _v2_grid())
+
+    first = analyze_rekordbox_cues(config, store, force=True, profile="v1")
+
+    assert first.analyzed == 11
+    assert first.cached == 0
+    assert first.cues_written == 33
+    assert len(load_calls) == 11
+    assert cache.save_counts == [10, 11]
+    assert (cache_dir / "raw_cache.pkl").exists()
+    assert not (cache_dir / "derived_cache.pkl").exists()
+    assert sum(1 for key in cache._entries if key.endswith("|cue_analysis")) == 11
+
+    def fail_if_audio_reloaded(path):
+        raise AssertionError(f"audio should not reload for cached cue analysis: {path}")
+
+    monkeypatch.setattr("dj_registry.cues.analysis.load_audio_features", fail_if_audio_reloaded)
+
+    second = analyze_rekordbox_cues(config, store, force=True, profile="v1")
+
+    assert second.analyzed == 0
+    assert second.cached == 11
+    assert second.cues_written == 33
+    assert len(store.load_cue_points()) == 33
+
+    recache_load_calls = []
+
+    def fake_recache_audio(path):
+        recache_load_calls.append(path)
+        return object()
+
+    monkeypatch.setattr("dj_registry.cues.analysis.load_audio_features", fake_recache_audio)
+
+    third = analyze_rekordbox_cues(config, store, force_analysis=True, profile="v1")
+
+    assert third.analyzed == 11
+    assert third.cached == 0
+    assert third.cues_written == 33
+    assert len(recache_load_calls) == 11
+    assert len(store.load_cue_points()) == 33
+    assert cache.save_counts[-2:] == [11, 11]
+    reset_cache()
 
 
 def test_rekordbox_export_preserves_conflicts_inserts_missing_slots_and_playlist(tmp_path):
@@ -497,6 +595,16 @@ def _store_with_xml_fixture(tmp_path, *, include_v2: bool = False, generated_b: 
         encoding="utf-8",
     )
     return store, xml_path, audio_path
+
+
+class _CountingCache(UniversalCache):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.save_counts: list[int] = []
+
+    def save(self) -> None:
+        self.save_counts.append(sum(1 for key in self._entries if key.endswith("|cue_analysis")))
+        super().save()
 
 
 def _cue(cue_id, track_id, file_id, slot, num, name, time_sec):
