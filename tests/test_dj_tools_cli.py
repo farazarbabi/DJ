@@ -65,6 +65,12 @@ def test_run_parser_accepts_cue_flags():
     assert _cue_work_requested(args) is True
 
 
+def test_run_parser_fine_playlists_defaults_off():
+    parser = _build_parser()
+    assert parser.parse_args(["run", "files"]).fine_playlists is False
+    assert parser.parse_args(["run", "files", "--fine-playlists"]).fine_playlists is True
+
+
 def test_fetch_missing_parser_allows_prune_only_without_playlists():
     parser = _build_parser()
     args = parser.parse_args(["fetch-missing", "--prune-only", "--library", "D:/Music"])

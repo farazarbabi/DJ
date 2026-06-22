@@ -69,8 +69,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-essentia", action="store_true", help="Skip essentia key analysis")
     p_run.add_argument("-w", "--workers", type=int, default=1, help="Analysis workers (default: 1)")
     p_run.add_argument("--force-extract", action="store_true", help="Force re-extraction in grouper")
-    p_run.add_argument("--coarse-playlists", action="store_true",
-                       help="Also write coarser, half-resolution playlists (by_key_coarse/, by_subgenre_coarse/, groups_coarse/) alongside the fine-grained ones")
+    p_run.add_argument("--fine-playlists", action="store_true",
+                       help="Also write fine-grained playlists (by_key/, by_subgenre/, groups/) alongside the coarse, half-resolution ones written by default")
     p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
     p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
     p_run.add_argument(
@@ -794,24 +794,14 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             store.load_tracks(),
             store.load_files(),
             playlists_root,
-            coarse=getattr(args, "coarse_playlists", False),
+            fine=getattr(args, "fine_playlists", False),
+            coarse=True,
         )
-        if "by_key_coarse" in cat_counts:
-            logger.info(
-                "Pipeline: categorical playlists — by_key=%d, by_subgenre=%d, by_key_coarse=%d, by_subgenre_coarse=%d in %s",
-                cat_counts["by_key"],
-                cat_counts["by_subgenre"],
-                cat_counts["by_key_coarse"],
-                cat_counts["by_subgenre_coarse"],
-                playlists_root,
-            )
-        else:
-            logger.info(
-                "Pipeline: categorical playlists — by_key=%d, by_subgenre=%d in %s",
-                cat_counts["by_key"],
-                cat_counts["by_subgenre"],
-                playlists_root,
-            )
+        logger.info(
+            "Pipeline: categorical playlists — %s in %s",
+            ", ".join(f"{k}={v}" for k, v in cat_counts.items()) or "none",
+            playlists_root,
+        )
     except Exception:
         logger.warning("Categorical playlists: generation failed, continuing", exc_info=True)
 
@@ -836,8 +826,8 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 grouper_argv.append("--force-extract")
             if args.workers > 1:
                 grouper_argv.extend(["-w", str(args.workers)])
-            if getattr(args, "coarse_playlists", False):
-                grouper_argv.append("--coarse-playlists")
+            if getattr(args, "fine_playlists", False):
+                grouper_argv.append("--fine-playlists")
             grouper_main(grouper_argv)
             logger.info("Pipeline: grouping done in %s", _fmt_elapsed(time.perf_counter() - t0))
             if not args.no_tags:

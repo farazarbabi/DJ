@@ -109,3 +109,11 @@ def test_generate_coarse_group_playlists_writes_files(tmp_path):
     # (Rekordbox anchors relative M3U8 entries to the playlist folder).
     for i in range(6):
         assert os.path.abspath(f"/music/{i}.aiff") in contents
+
+
+def test_run_parser_fine_playlists_defaults_off():
+    from dj_grouper.cli import _build_parser
+
+    parser = _build_parser()
+    assert parser.parse_args(["run", "files"]).fine_playlists is False
+    assert parser.parse_args(["run", "files", "--fine-playlists"]).fine_playlists is True

@@ -270,22 +270,27 @@ def generate_categorical_playlists(
     files: list[FileRecord],
     playlists_root: str,
     *,
+    fine: bool = True,
     coarse: bool = False,
 ) -> dict[str, int]:
-    """Write by_key/ and by_subgenre/ M3U8 playlists.
+    """Write categorical M3U8 playlists, gated independently by resolution.
 
-    When ``coarse`` is True, also write by_key_coarse/ and by_subgenre_coarse/
-    alongside (existing fine-grained outputs are kept untouched).
+    ``fine`` writes by_key/ and by_subgenre/; ``coarse`` writes by_key_coarse/
+    and by_subgenre_coarse/. They are independent, so any combination
+    (fine-only, coarse-only, or both) is valid.
 
-    Returns counts of playlists written per category.
+    Returns counts of playlists written per category (only the keys actually
+    generated are present).
     """
     root = Path(playlists_root)
     path_by_id = _resolve_paths(tracks, files)
 
-    counts = {
-        "by_key": _write_by_key(root / "by_key", tracks, path_by_id),
-        "by_subgenre": _write_by_subgenre(root / "by_subgenre", tracks, path_by_id),
-    }
+    counts: dict[str, int] = {}
+    if fine:
+        counts["by_key"] = _write_by_key(root / "by_key", tracks, path_by_id)
+        counts["by_subgenre"] = _write_by_subgenre(
+            root / "by_subgenre", tracks, path_by_id
+        )
     if coarse:
         counts["by_key_coarse"] = _write_by_key_coarse(
             root / "by_key_coarse", tracks, path_by_id
@@ -293,17 +298,8 @@ def generate_categorical_playlists(
         counts["by_subgenre_coarse"] = _write_by_subgenre_coarse(
             root / "by_subgenre_coarse", tracks, path_by_id
         )
-        logger.info(
-            "Categorical playlists: by_key=%d, by_subgenre=%d, by_key_coarse=%d, by_subgenre_coarse=%d",
-            counts["by_key"],
-            counts["by_subgenre"],
-            counts["by_key_coarse"],
-            counts["by_subgenre_coarse"],
-        )
-    else:
-        logger.info(
-            "Categorical playlists: by_key=%d, by_subgenre=%d",
-            counts["by_key"],
-            counts["by_subgenre"],
-        )
+    logger.info(
+        "Categorical playlists: %s",
+        ", ".join(f"{k}={v}" for k, v in counts.items()) or "none",
+    )
     return counts

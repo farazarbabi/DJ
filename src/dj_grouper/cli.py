@@ -70,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--force-extract", action="store_true", help="Clear cache + outputs, re-extract")
     p_run.add_argument("--force-clap", action="store_true", help="Re-extract CLAP embeddings")
     p_run.add_argument("--rebuild", action="store_true", help="Force full re-clustering (ignore existing groups)")
-    p_run.add_argument("--coarse-playlists", action="store_true", help="Also write half-resolution group playlists to groups_coarse/")
+    p_run.add_argument("--fine-playlists", action="store_true", help="Also write full-resolution group playlists to groups/ (groups_coarse/ is written by default)")
     p_run.add_argument("--clean", action="store_true", help="Delete all outputs and caches, then exit")
 
     # --- extract ---
@@ -992,18 +992,20 @@ def _cmd_run(args) -> int:
         # Clean and recreate group playlists. Categorical playlists
         # (by_key/by_subgenre/by_popularity) live under the same root but are
         # written by the registry pipeline; leave them untouched here.
-        groups_subdir = str(Path(args.playlists) / "groups")
-        _safe_rmtree(groups_subdir, _allowed)
-        generate_group_playlists(feature_tracks, assignment, args.playlists)
-        print(f"  Playlists: {args.playlists}/groups/")
-        if getattr(args, "coarse_playlists", False):
-            from .output.coarse_groups import generate_coarse_group_playlists
-            coarse_subdir = str(Path(args.playlists) / "groups_coarse")
-            _safe_rmtree(coarse_subdir, _allowed)
-            n_coarse = generate_coarse_group_playlists(
-                feature_tracks, assignment, config, args.playlists
-            )
-            print(f"  Playlists: {args.playlists}/groups_coarse/ ({n_coarse} coarse groups)")
+        # Coarse, half-resolution group playlists are the default; full-
+        # resolution groups/ are opt-in via --fine-playlists.
+        from .output.coarse_groups import generate_coarse_group_playlists
+        coarse_subdir = str(Path(args.playlists) / "groups_coarse")
+        _safe_rmtree(coarse_subdir, _allowed)
+        n_coarse = generate_coarse_group_playlists(
+            feature_tracks, assignment, config, args.playlists
+        )
+        print(f"  Playlists: {args.playlists}/groups_coarse/ ({n_coarse} coarse groups)")
+        if getattr(args, "fine_playlists", False):
+            groups_subdir = str(Path(args.playlists) / "groups")
+            _safe_rmtree(groups_subdir, _allowed)
+            generate_group_playlists(feature_tracks, assignment, args.playlists)
+            print(f"  Playlists: {args.playlists}/groups/")
 
     print(f"\nDone in {_fmt_elapsed(_time.perf_counter() - t_step)}.")
     return 0

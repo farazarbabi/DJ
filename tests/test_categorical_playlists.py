@@ -259,6 +259,25 @@ def test_coarse_flag_writes_parallel_dirs(tmp_path):
     assert counts["by_subgenre_coarse"] == 1
 
 
+def test_coarse_only_skips_fine_dirs(tmp_path):
+    tracks = [
+        _track("t1", file_id="f1", key="1A", bpm="120", subgenre="Acid House"),
+        _track("t2", file_id="f2", key="2B", bpm="121", subgenre="Acid Techno"),
+    ]
+    files = [_file("f1", "/music/a.aiff"), _file("f2", "/music/b.aiff")]
+    counts = generate_categorical_playlists(
+        tracks, files, str(tmp_path), fine=False, coarse=True
+    )
+
+    # Coarse dirs written, fine dirs skipped entirely.
+    assert (tmp_path / "by_key_coarse" / "01A-02B.m3u8").exists()
+    assert not (tmp_path / "by_key").exists()
+    assert not (tmp_path / "by_subgenre").exists()
+    assert "by_key" not in counts
+    assert "by_subgenre" not in counts
+    assert counts["by_key_coarse"] == 1
+
+
 def test_coarse_flag_off_writes_no_coarse_dirs(tmp_path):
     tracks = [_track("t1", file_id="f1", key="1A", bpm="120", subgenre="Acid House")]
     files = [_file("f1", "/music/a.aiff")]

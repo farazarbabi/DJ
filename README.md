@@ -70,12 +70,13 @@ DJ/
     recommendations.csv
     feedback.csv
     playlists/
-      groups/
-      by_key/
-      by_subgenre/
-      groups_coarse/          optional with --coarse-playlists
-      by_key_coarse/          optional with --coarse-playlists
-      by_subgenre_coarse/     optional with --coarse-playlists
+      groups_coarse/          default
+      by_key_coarse/          default
+      by_subgenre_coarse/     default
+      groups/                 optional with --fine-playlists
+      by_key/                 optional with --fine-playlists
+      by_subgenre/            optional with --fine-playlists
+      spotify/                one .m3u8 per fetched Spotify CSV
   settings.toml             tunable derived-scoring parameters
   src/
   tests/
@@ -569,10 +570,9 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 - `outputs/registry/reports/cue_rekordbox_export_report.csv`: copied-XML cue export report
 - `outputs/groups.csv`: grouped tracks
 - `outputs/recommendations.csv`: directional recommendations
-- `outputs/playlists/groups/`: one M3U8 playlist per generated group
-- `outputs/playlists/by_key/`: categorical key playlists from registry data
-- `outputs/playlists/by_subgenre/`: categorical DJ-taxonomy label playlists
-- `outputs/playlists/*_coarse/`: optional half-resolution playlist sets from `--coarse-playlists`
+- `outputs/playlists/*_coarse/`: half-resolution playlist sets (groups_coarse/, by_key_coarse/, by_subgenre_coarse/), written by default
+- `outputs/playlists/groups/`, `by_key/`, `by_subgenre/`: full-resolution playlists, optional with `--fine-playlists`
+- `outputs/playlists/spotify/`: one M3U8 mirroring each fetched Spotify CSV (from `dj fetch-missing` / `--fetch-missing`)
 
 ## Testing
 

@@ -199,6 +199,12 @@ As built today:
 - BPM spread above `bpm_group_max_spread_pct` is a hard grouping constraint
 - agglomerative mode applies post-clustering key/BPM/energy validation
 
+Playlist output resolution (both `dj run` and `dj-grouper run`):
+
+- coarse, half-resolution playlists (`groups_coarse/`, `by_key_coarse/`, `by_subgenre_coarse/`) are written by default
+- `--fine-playlists` additionally writes the full-resolution `groups/`, `by_key/`, `by_subgenre/`
+- `generate_categorical_playlists(..., fine=, coarse=)` gates the two resolutions independently (function defaults stay `fine=True, coarse=False`; the CLI passes `fine=<flag>, coarse=True`)
+
 Do not document the proposed redesign as if it already exists.
 
 ## Calibration-Sensitive Files
@@ -240,7 +246,7 @@ Do not add instructions that tell contributors to bump a manual cache version.
 
 ## Testing Notes
 
-- current suite size: `505` tests collected by `pytest --collect-only -q`
+- current suite size: `508` tests collected by `pytest --collect-only -q`
 - tests use synthetic audio fixtures
 - registry, tagger, grouper, and cache behaviors all have direct coverage
 
