@@ -11,6 +11,8 @@ It is the source of truth for:
 - canonical key
 - canonical BPM
 - stored tagger outputs per logical track
+- 3-level genre taxonomy fields
+- flat DJ taxonomy category fields used for COMMENT category codes and playlists
 - review and audit exports
 
 ## Current Pipeline
@@ -26,11 +28,17 @@ scan
   -> analyze
   -> resolve
   -> review-queue
+  -> dj-taxonomy classify when a trained model exists
   -> sync-tags
+  -> taxonomy classify
   -> export
 ```
 
-The unified `dj run` command orchestrates the same flow and then optionally runs grouping.
+The unified `dj run` command wraps that registry flow, optionally runs
+`fetch-missing` before analysis, generates categorical playlists after registry
+export, and then runs grouping/recommendations unless skipped. When grouping is
+enabled, final tag sync is delayed until after grouping so COMMENT tags can
+include the `G###` group ID.
 
 ## Commands
 
@@ -47,6 +55,8 @@ Available `dj-registry` commands:
 - `import-reviews`
 - `sync-tags`
 - `export`
+- `taxonomy`
+- `dj-taxonomy`
 - `run`
 
 ## Current Source Systems
@@ -245,7 +255,7 @@ Tagger-derived fields are not voted across sources; they are stored directly fro
 
 `dj-registry sync-tags` writes only the COMMENT tag:
 
-- COMMENT tag built from: canonical key, stored tagger energy/mood/vocal, and compact internal DJ taxonomy category label code
+- COMMENT tag built from: canonical key, stored tagger energy/mood/vocal, and compact selected flat DJ taxonomy category label code
 - Current shape: `KEY|ENERGY|VIBE|VOCAL[|CATEGORY][|GID]`
 - BPM is intentionally not encoded in the tag right now; canonical BPM remains in the registry, and the formatter still accepts `bpm` so it can be reintroduced later
 - `CATEGORY` is derived from the selected category label, not written as `category_id`

@@ -1,7 +1,13 @@
 # DJ Taxonomy Classifier — v2 Improvement Spec
 
+> Historical draft, not the current as-built implementation. The current
+> flat DJ taxonomy runtime trains and applies one XGBoost classifier under
+> `outputs/registry/dj_taxonomy_model/xgb/`, mirrors that same prediction into
+> the internal/external compatibility columns, and documents the as-built flow in
+> `docs/taxonomy_ground_truth_and_model.md`.
+
 Version: dj-taxonomy-v2.0
-Status: draft (replaces all prior genre-classification specs)
+Status: historical draft, superseded by the current XGB implementation
 Date: 2026-05-23
 
 ---

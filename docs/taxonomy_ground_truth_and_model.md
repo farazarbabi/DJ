@@ -292,9 +292,9 @@ both internal and external columns:
 Standalone classification and tag-writing use the same XGB-selected category as
 the primary `dj_taxonomy_id`, label, metadata, and confidence.
 
-For COMMENT tag writing, the selected internal model category contributes a
-compact code derived from `dj_taxonomy_label`. The tag does not write
-`category_id`; IDs remain internal registry/model fields.
+For COMMENT tag writing, the selected XGB category contributes a compact code
+derived from `dj_taxonomy_label`. The tag does not write `category_id`; IDs
+remain internal registry/model fields.
 
 ### Ground-Truth Guardrails
 
