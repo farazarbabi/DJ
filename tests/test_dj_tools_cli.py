@@ -2,7 +2,13 @@
 
 from types import SimpleNamespace
 
-from dj_tools.cli import _build_parser, _cue_work_requested, _load_group_ids_by_file, _run_cue_work
+from dj_tools.cli import (
+    _build_parser,
+    _cue_work_requested,
+    _load_group_ids_by_file,
+    _run_cue_work,
+    _run_fetch_missing,
+)
 
 
 def test_load_group_ids_by_file(tmp_path):
@@ -57,6 +63,47 @@ def test_run_parser_accepts_cue_flags():
     assert args.cue_quality_report is True
     assert args.cue_validate_xml is True
     assert _cue_work_requested(args) is True
+
+
+def test_fetch_missing_parser_allows_prune_only_without_playlists():
+    parser = _build_parser()
+    args = parser.parse_args(["fetch-missing", "--prune-only", "--library", "D:/Music"])
+    assert args.prune_only is True
+    assert args.playlists == []
+
+
+def test_run_fetch_missing_prune_only_deletes_superseded(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    orig = lib / "Artist - Song.aiff"
+    marked = lib / "Artist - Song[U].aiff"
+    orig.write_bytes(b"\x00")
+    marked.write_bytes(b"\x00")
+
+    parser = _build_parser()
+    args = parser.parse_args(["fetch-missing", "--prune-only", "--library", str(lib)])
+    rc = _run_fetch_missing(args)
+
+    assert rc == 0
+    assert orig.exists()
+    assert not marked.exists()  # superseded [U] copy removed
+
+
+def test_run_fetch_missing_prune_only_dry_run_keeps_files(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "Artist - Song.aiff").write_bytes(b"\x00")
+    marked = lib / "Artist - Song[U].aiff"
+    marked.write_bytes(b"\x00")
+
+    parser = _build_parser()
+    args = parser.parse_args(
+        ["fetch-missing", "--prune-only", "--dry-run", "--library", str(lib)]
+    )
+    rc = _run_fetch_missing(args)
+
+    assert rc == 0
+    assert marked.exists()  # dry run reports without deleting
 
 
 def test_run_cue_work_wires_analyze_export_and_report(monkeypatch):

@@ -1,5 +1,7 @@
 """Tests for the Spotify playlist fetch-missing feature."""
 
+import os
+
 from dj_tools.spotify_fetch import (
     PlaylistTrack,
     best_match,
@@ -10,6 +12,7 @@ from dj_tools.spotify_fetch import (
     collect_playlists,
     duration_mismatch,
     fetch_missing,
+    generate_spotify_playlists,
     load_unique_tracks,
     parse_candidate_lines,
     parse_playlist_csv,
@@ -380,6 +383,120 @@ def test_prune_superseded_downloads_dry_run_reports_without_deleting(tmp_path):
     removed = prune_superseded_downloads(str(tmp_path), dry_run=True)
     assert removed == [str(marked)]
     assert marked.exists()  # dry run leaves files in place
+
+
+# --------------------------------------------------------------------------- #
+# Representative per-playlist M3U8s
+# --------------------------------------------------------------------------- #
+def _read_playlist(path):
+    text = path.read_text(encoding="utf-8-sig")  # transparently strips the BOM
+    return text.splitlines()
+
+
+def test_generate_spotify_playlists_writes_one_per_csv_in_order(tmp_path):
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    (library / "Iorie - Matter of Fact (Extended Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "Sunset Set.csv", [
+        _row("a", "Matter of Fact", "Iorie", 357000),
+        _row("b", "Skyfall", "Adele", 286000),
+    ])
+
+    summary = generate_spotify_playlists([csv_path], str(library))
+
+    out = library / "outputs" / "playlists" / "spotify" / "Sunset Set.m3u8"
+    assert out.exists()
+    assert summary == {"playlists_written": 1, "tracks_added": 2, "tracks_skipped": 0}
+
+    lines = _read_playlist(out)
+    assert lines[0] == "#EXTM3U"
+    paths = [ln for ln in lines if not ln.startswith("#")]
+    # CSV order preserved: Matter of Fact before Skyfall.
+    assert paths[0].endswith("Iorie - Matter of Fact (Extended Mix).aiff")
+    assert paths[1].endswith("Adele - Skyfall (Original Mix).aiff")
+    assert all(os.path.isabs(p) for p in paths)
+    assert lines.count("#EXTM3U") == 1
+    assert sum(1 for ln in lines if ln.startswith("#EXTINF")) == 2
+
+
+def test_generate_spotify_playlists_has_utf8_bom(tmp_path):
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Skyfall", "Adele", 286000)])
+
+    generate_spotify_playlists([csv_path], str(library))
+
+    raw = (library / "outputs" / "playlists" / "spotify" / "p.m3u8").read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")  # Rekordbox requires the UTF-8 BOM
+
+
+def test_generate_spotify_playlists_skips_unresolvable(tmp_path):
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Free Babe", "Elodie Gervaise", 200000),  # not in library
+    ])
+
+    summary = generate_spotify_playlists([csv_path], str(library))
+
+    assert summary["tracks_added"] == 1
+    assert summary["tracks_skipped"] == 1
+    paths = [ln for ln in _read_playlist(
+        library / "outputs" / "playlists" / "spotify" / "p.m3u8"
+    ) if not ln.startswith("#")]
+    assert len(paths) == 1
+    assert paths[0].endswith("Adele - Skyfall (Original Mix).aiff")
+
+
+def test_generate_spotify_playlists_resolves_downloaded_marked_file(tmp_path):
+    # A just-downloaded [U] file resolves into its playlist (marker is matcher-invisible).
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Elodie Gervaise - Free Babe[U].aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Free Babe", "Elodie Gervaise", 200000),
+    ])
+
+    summary = generate_spotify_playlists([csv_path], str(library))
+
+    assert summary["tracks_added"] == 1
+    paths = [ln for ln in _read_playlist(
+        library / "outputs" / "playlists" / "spotify" / "p.m3u8"
+    ) if not ln.startswith("#")]
+    assert paths[0].endswith("Elodie Gervaise - Free Babe[U].aiff")
+
+
+def test_playlist_stem_drops_csv_and_sanitizes():
+    from dj_tools.spotify_fetch import _playlist_stem
+
+    # ".csv" extension dropped, spaces kept.
+    assert _playlist_stem("Sunset Set.csv") == "Sunset Set"
+    # Illegal Windows filename chars stripped (these can't appear in a real CSV
+    # filename on Windows, but a name may arrive sanitization-needing).
+    assert _playlist_stem('House/Techno.csv') == "HouseTechno"
+    assert _playlist_stem("") == "playlist"
+
+
+def test_fetch_missing_dry_run_generates_playlists(tmp_path):
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Free Babe", "Elodie Gervaise", 200000),
+    ])
+
+    summary = fetch_missing([csv_path], str(library), dry_run=True)
+
+    assert summary["playlists_written"] == 1
+    out = library / "outputs" / "playlists" / "spotify" / "p.m3u8"
+    assert out.exists()
+    paths = [ln for ln in _read_playlist(out) if not ln.startswith("#")]
+    assert paths == [p for p in paths if p.endswith("Adele - Skyfall (Original Mix).aiff")]
 
 
 def test_embed_metadata_writes_id3_tags(tmp_path):

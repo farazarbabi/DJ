@@ -610,6 +610,73 @@ def _write_match_report(path: str, results: list[MatchResult]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Representative per-playlist M3U8s
+# --------------------------------------------------------------------------- #
+def _playlist_stem(playlist_filename: str) -> str:
+    """CSV basename -> sanitized playlist name (drops the .csv extension)."""
+    stem = os.path.splitext(playlist_filename)[0]
+    return sanitize_filename(stem) or "playlist"
+
+
+def generate_spotify_playlists(
+    csv_paths: list[str],
+    library: str,
+    *,
+    threshold: float = 0.62,
+    playlists_dir: str | None = None,
+) -> dict[str, int]:
+    """Write one Rekordbox-ready ``.m3u8`` per Spotify CSV.
+
+    Each playlist mirrors its CSV: the library tracks (already-present, an
+    Original/Extended variant, or just downloaded as ``[U]``) that resolve to
+    that CSV's tracks, listed in CSV order. Tracks with no library match are
+    skipped. Unlike :func:`load_unique_tracks`, this parses each CSV separately
+    so per-playlist membership and order are preserved.
+
+    Re-scans ``library`` so files downloaded earlier in this run are included.
+    Returns counts: ``playlists_written``, ``tracks_added``, ``tracks_skipped``.
+    """
+    out_dir = Path(playlists_dir or os.path.join(library, "outputs", "playlists")) / "spotify"
+    index = scan_library(library)
+
+    written = added = skipped = 0
+    for csv_path in csv_paths:
+        playlist_tracks = parse_playlist_csv(csv_path)
+        if not playlist_tracks:
+            continue
+        lines = ["#EXTM3U"]
+        resolved = 0
+        for t in playlist_tracks:
+            path, score = best_match(t, index)
+            if path and score >= threshold:
+                lines.append(f"#EXTINF:-1,{Path(path).stem}")
+                lines.append(os.path.abspath(path))
+                resolved += 1
+        name = _playlist_stem(playlist_tracks[0].playlist or os.path.basename(csv_path))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # utf-8-sig: Rekordbox requires a UTF-8 BOM on .m3u8 files, else entries
+        # with non-ASCII path characters fail to match and the playlist imports
+        # empty.
+        (out_dir / f"{name}.m3u8").write_text("\n".join(lines), encoding="utf-8-sig")
+        missed = len(playlist_tracks) - resolved
+        added += resolved
+        skipped += missed
+        written += 1
+        suffix = f" ({missed} skipped)" if missed else ""
+        logger.info(
+            "fetch-missing: playlist %s.m3u8 -> %d/%d track(s) resolved%s",
+            name, resolved, len(playlist_tracks), suffix,
+        )
+
+    if written:
+        logger.info(
+            "fetch-missing: wrote %d representative playlist(s) to %s",
+            written, out_dir,
+        )
+    return {"playlists_written": written, "tracks_added": added, "tracks_skipped": skipped}
+
+
+# --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
 def resolve_library_dir(path: str) -> str:
@@ -781,6 +848,8 @@ def fetch_missing(
         if dry_run:
             for r in missing:
                 logger.info("  [%.2f] %s - %s", r.score, r.track.artist_display, r.track.name)
+            logger.info("fetch-missing: playlists reflect the current library (no downloads in dry-run)")
+        summary.update(generate_spotify_playlists(csv_paths, library, threshold=threshold))
         return summary
 
     has_ytdlp, has_ffmpeg = tools_available()
@@ -839,4 +908,6 @@ def fetch_missing(
         )
         for t, detail in summary["unmatched_results"]:
             logger.info("  %s - %s  (%s)", t.artist_display, t.name, detail)
+
+    summary.update(generate_spotify_playlists(csv_paths, library, threshold=threshold))
     return summary

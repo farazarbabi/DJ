@@ -111,12 +111,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Download tracks from Spotify playlist CSVs that aren't in your library yet",
     )
     p_fetch.add_argument(
-        "playlists", nargs="+", metavar="CSV",
-        help="Exportify-style Spotify playlist CSV file(s) or a directory of them",
+        "playlists", nargs="*", metavar="CSV",
+        help="Exportify-style Spotify playlist CSV file(s) or a directory of them "
+             "(not required with --prune-only)",
     )
     p_fetch.add_argument(
         "--library", default="./files", metavar="DIR",
         help="Library dir to check for existing tracks and download into (default: ./files)",
+    )
+    p_fetch.add_argument(
+        "--prune-only", action="store_true",
+        help="Only delete superseded [U] downloads whose curated original now "
+             "exists in the library, then exit. No matching, downloads, or "
+             "playlists. Honors --dry-run (report without deleting).",
     )
     p_fetch.add_argument("--format", dest="audio_format", choices=["aiff", "wav"],
                          default="aiff", help="Download format (default: aiff)")
@@ -855,7 +862,22 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 
 def _run_fetch_missing(args: argparse.Namespace) -> int:
     """Match Spotify playlist CSVs against the library and download what's missing."""
-    from .spotify_fetch import fetch_missing
+    from .spotify_fetch import fetch_missing, prune_superseded_downloads
+
+    if args.prune_only:
+        if not os.path.isdir(args.library):
+            logger.error("fetch-missing: library dir not found: %s", args.library)
+            return 1
+        removed = prune_superseded_downloads(args.library, dry_run=args.dry_run)
+        verb = "would remove" if args.dry_run else "removed"
+        logger.info("fetch-missing: %s %d superseded [U] download(s)", verb, len(removed))
+        for p in removed:
+            logger.info("  %s %s", verb, os.path.basename(p))
+        return 0
+
+    if not args.playlists:
+        logger.error("fetch-missing: provide playlist CSV(s)/dir, or use --prune-only")
+        return 1
 
     try:
         fetch_missing(
