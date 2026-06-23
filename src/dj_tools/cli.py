@@ -74,9 +74,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
     p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
     p_run.add_argument(
-        "--fetch-missing", dest="fetch_missing", nargs="+", default=None, metavar="CSV",
+        "--fetch-missing", dest="fetch_missing", nargs="*", default=None, metavar="CSV",
         help="Before analysis, download tracks from these Spotify playlist CSV(s)/dir "
-             "that aren't already in the library being processed",
+             "that aren't already in the library being processed. Pass the flag with "
+             "no value to use <library>/spotify-playlists",
     )
     p_run.add_argument("--fetch-format", dest="fetch_format", choices=["aiff", "wav"],
                        default="aiff", help="Format for --fetch-missing downloads (default: aiff)")
@@ -112,7 +113,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_fetch.add_argument(
         "playlists", nargs="*", metavar="CSV",
-        help="Exportify-style Spotify playlist CSV file(s) or a directory of them "
+        help="Exportify-style Spotify playlist CSV file(s) or a directory of them. "
+             "Defaults to <library>/spotify-playlists when omitted "
              "(not required with --prune-only)",
     )
     p_fetch.add_argument(
@@ -706,15 +708,18 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # Clear stale observations — rebuilt from cache each run
     store.save_observations([])
 
-    # Phase 0: Fetch missing tracks from Spotify playlists into the library
-    if getattr(args, "fetch_missing", None):
-        from .spotify_fetch import fetch_missing, resolve_library_dir
+    # Phase 0: Fetch missing tracks from Spotify playlists into the library.
+    # `is not None` (not truthiness): an empty list means the flag was passed
+    # with no value, which requests the default <library>/spotify-playlists dir.
+    if getattr(args, "fetch_missing", None) is not None:
+        from .spotify_fetch import default_playlists_dir, fetch_missing, resolve_library_dir
 
         t0 = time.perf_counter()
         library_dir = resolve_library_dir(args.paths[0] if args.paths else "./files")
+        playlists = args.fetch_missing or [default_playlists_dir(library_dir)]
         try:
             summary = fetch_missing(
-                args.fetch_missing,
+                playlists,
                 library_dir,
                 audio_format=getattr(args, "fetch_format", "aiff"),
             )
@@ -865,13 +870,22 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             logger.info("  %s %s", verb, os.path.basename(p))
         return 0
 
-    if not args.playlists:
-        logger.error("fetch-missing: provide playlist CSV(s)/dir, or use --prune-only")
-        return 1
+    playlists = args.playlists
+    if not playlists:
+        from .spotify_fetch import default_playlists_dir
+        default_dir = default_playlists_dir(args.library)
+        if not os.path.isdir(default_dir):
+            logger.error(
+                "fetch-missing: no playlists given and default %s not found; "
+                "pass CSV(s)/dir or use --prune-only", default_dir,
+            )
+            return 1
+        logger.info("fetch-missing: no playlists given, using default %s", default_dir)
+        playlists = [default_dir]
 
     try:
         fetch_missing(
-            args.playlists,
+            playlists,
             args.library,
             audio_format=args.audio_format,
             threshold=args.threshold,

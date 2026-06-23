@@ -71,6 +71,47 @@ def test_run_parser_fine_playlists_defaults_off():
     assert parser.parse_args(["run", "files", "--fine-playlists"]).fine_playlists is True
 
 
+def test_run_fetch_missing_flag_nargs_distinguishes_absent_bare_explicit():
+    parser = _build_parser()
+    # Absent -> None (Phase 0 skipped).
+    assert parser.parse_args(["run", "files"]).fetch_missing is None
+    # Bare flag -> [] (Phase 0 uses default <library>/spotify-playlists).
+    assert parser.parse_args(["run", "files", "--fetch-missing"]).fetch_missing == []
+    # Explicit -> list.
+    assert parser.parse_args(
+        ["run", "files", "--fetch-missing", "a.csv", "b.csv"]
+    ).fetch_missing == ["a.csv", "b.csv"]
+
+
+def test_run_fetch_missing_defaults_to_library_playlists_dir(tmp_path, monkeypatch):
+    lib = tmp_path / "lib"
+    (lib / "spotify-playlists").mkdir(parents=True)
+    captured = {}
+
+    def fake_fetch_missing(playlists, library, **kwargs):
+        captured["playlists"] = playlists
+        captured["library"] = library
+
+    # _run_fetch_missing does `from .spotify_fetch import fetch_missing` at call
+    # time, so patching the source attribute is what takes effect.
+    monkeypatch.setattr("dj_tools.spotify_fetch.fetch_missing", fake_fetch_missing)
+
+    parser = _build_parser()
+    args = parser.parse_args(["fetch-missing", "--library", str(lib)])
+    rc = _run_fetch_missing(args)
+
+    assert rc == 0
+    assert captured["playlists"] == [str(lib / "spotify-playlists")]
+
+
+def test_run_fetch_missing_errors_when_default_dir_absent(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()  # no spotify-playlists/ inside
+    parser = _build_parser()
+    args = parser.parse_args(["fetch-missing", "--library", str(lib)])
+    assert _run_fetch_missing(args) == 1
+
+
 def test_fetch_missing_parser_allows_prune_only_without_playlists():
     parser = _build_parser()
     args = parser.parse_args(["fetch-missing", "--prune-only", "--library", "D:/Music"])

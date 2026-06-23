@@ -679,6 +679,11 @@ def generate_spotify_playlists(
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
+# Conventional location for a library's Spotify playlist CSV exports, used as
+# the default when no explicit playlists path is given on the command line.
+DEFAULT_PLAYLISTS_SUBDIR = "spotify-playlists"
+
+
 def resolve_library_dir(path: str) -> str:
     """The directory to match against and download into.
 
@@ -686,6 +691,11 @@ def resolve_library_dir(path: str) -> str:
     works whether ``dj run`` is pointed at a library folder or a single track.
     """
     return path if os.path.isdir(path) else os.path.dirname(os.path.abspath(path))
+
+
+def default_playlists_dir(library: str) -> str:
+    """Conventional playlists dir for a library: ``<library>/spotify-playlists``."""
+    return os.path.join(library, DEFAULT_PLAYLISTS_SUBDIR)
 
 
 def tool_file_for(track: PlaylistTrack, library: str) -> str | None:

@@ -10,6 +10,7 @@ from dj_tools.spotify_fetch import (
     classify_tracks,
     clean_track_name,
     collect_playlists,
+    default_playlists_dir,
     duration_mismatch,
     fetch_missing,
     generate_spotify_playlists,
@@ -282,6 +283,12 @@ def test_fetch_missing_treats_extended_variant_as_present(tmp_path):
     assert summary["present"] == 1
     assert summary["missing"] == 0
     assert summary["downloaded"] == 0
+
+
+def test_default_playlists_dir():
+    assert default_playlists_dir(os.path.join("D:", "Music")) == os.path.join(
+        "D:", "Music", "spotify-playlists"
+    )
 
 
 def test_fetch_missing_bad_library_raises(tmp_path):
