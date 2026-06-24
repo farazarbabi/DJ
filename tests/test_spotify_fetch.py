@@ -796,3 +796,30 @@ def test_fetch_missing_clears_cache_when_found(tmp_path, monkeypatch):
     fetch_missing([csv_path], str(library), audio_format="aiff", force_lookup=True)
     cache = sf.load_not_found_cache(str(library / "outputs" / "fetch"))
     assert "spotify:track:a" not in cache
+
+
+def test_fetch_missing_does_not_cache_when_soundeo_had_match(tmp_path, monkeypatch):
+    # Soundeo lists the track but the download fails; YouTube also misses.
+    # It must NOT be cached as not-found (it IS on Soundeo).
+    _no_match_yt(monkeypatch)
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Aerial", "Azzecca", 200000)])
+
+    class ListedButFailsClient:
+        def login(self): pass
+        def close(self): pass
+        def search(self, track):
+            return [so.SoundeoResult("1", "Azzecca", "Aerial", 200, formats=["aiff"])]
+        def pick(self, track, results):
+            return results[0]
+        def download(self, result, dest):
+            raise so.SoundeoError("not available on Soundeo (HTTP 404)")
+
+    monkeypatch.setattr(so.SoundeoClient, "from_env",
+                        classmethod(lambda cls, **kw: ListedButFailsClient()))
+
+    s = fetch_missing([csv_path], str(library), audio_format="aiff")
+    assert s["unmatched"] == 1
+    cache = sf.load_not_found_cache(str(library / "outputs" / "fetch"))
+    assert "spotify:track:a" not in cache  # on Soundeo -> not cached as not-found

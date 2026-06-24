@@ -252,7 +252,7 @@ Do not add instructions that tell contributors to bump a manual cache version.
 
 ## Testing Notes
 
-- current suite size: `549` tests collected by `pytest --collect-only -q`
+- current suite size: `550` tests collected by `pytest --collect-only -q`
 - tests use synthetic audio fixtures
 - registry, tagger, grouper, and cache behaviors all have direct coverage
 

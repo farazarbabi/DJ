@@ -461,6 +461,10 @@ class DownloadOutcome:
     outfile: str = ""
     detail: str = ""
     source: str = "youtube"  # "soundeo" | "youtube"
+    # True when Soundeo *had* a matching result for this track (even if the
+    # download then failed / hit quota). Prevents caching an on-Soundeo track as
+    # "not found" just because YouTube also missed it.
+    soundeo_listed: bool = False
 
 
 def _remove_quiet(path: str) -> None:
@@ -630,6 +634,7 @@ def acquire_track(
     A successful Soundeo download lands at the unmarked ``Artist - Title`` path,
     so any pre-existing ``[U]`` YouTube copy is superseded and gets pruned.
     """
+    soundeo_listed = False
     if soundeo is not None:
         from .soundeo import SoundeoError, SoundeoQuotaExceeded
 
@@ -642,28 +647,34 @@ def acquire_track(
             pick = None
 
         if pick is not None:
+            soundeo_listed = True  # on Soundeo — never cache as "not found"
             if quota is not None and quota.exhausted:
                 return DownloadOutcome(
-                    "quota_skip", "", "on Soundeo; daily quota exhausted", "soundeo")
+                    "quota_skip", "", "on Soundeo; daily quota exhausted", "soundeo",
+                    soundeo_listed=True)
             # Unmarked path: treat a Soundeo original like a curated original.
             dest = os.path.join(dest_dir, track.target_basename() + ".aiff")
             try:
                 soundeo.download(pick, dest)
                 _embed_metadata(dest, track)
-                return DownloadOutcome("ok", dest, f"soundeo:{pick.id}", "soundeo")
+                return DownloadOutcome("ok", dest, f"soundeo:{pick.id}", "soundeo",
+                                       soundeo_listed=True)
             except SoundeoQuotaExceeded as exc:
                 if quota is not None:
                     quota.exhausted = True
-                return DownloadOutcome("quota_skip", "", str(exc), "soundeo")
+                return DownloadOutcome("quota_skip", "", str(exc), "soundeo",
+                                       soundeo_listed=True)
             except SoundeoError as exc:
                 logger.warning("soundeo: download error for %s — %s; trying YouTube",
                                track.name, exc)
                 # fall through to YouTube
 
-    return download_track(
+    outcome = download_track(
         track, dest_dir, audio_format=audio_format, tolerance=tolerance,
         max_attempts=max_attempts, min_duration=min_duration, max_duration=max_duration,
     )
+    outcome.soundeo_listed = soundeo_listed
+    return outcome
 
 
 # --------------------------------------------------------------------------- #
@@ -1073,9 +1084,12 @@ def fetch_missing(
                 elif outcome.status == "no_match":
                     summary["unmatched"] += 1
                     summary["unmatched_results"].append((t, outcome.detail))
-                    # Remember it so future runs skip the search (until --force-lookup).
-                    not_found[key] = {"artists": t.artist_display, "name": t.name,
-                                      "detail": outcome.detail}
+                    # Cache as not-found ONLY when neither source had it. If
+                    # Soundeo listed it but the download failed (error/credit),
+                    # leave it uncached so a later run retries Soundeo.
+                    if not outcome.soundeo_listed:
+                        not_found[key] = {"artists": t.artist_display, "name": t.name,
+                                          "detail": outcome.detail}
                     logger.warning("%s NOT FOUND on Soundeo or YouTube: %s  (%s)",
                                    prefix, label, outcome.detail)
                 elif outcome.status == "fail":
