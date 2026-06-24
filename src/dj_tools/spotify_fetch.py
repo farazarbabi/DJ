@@ -572,6 +572,7 @@ def download_track(
 
     out_template = os.path.join(dest_dir, base + ".%(ext)s")
     last_detail = ""
+    last_was_download_error = False
     for vid in attempts:
         _remove_quiet(wav_path)
         dl = subprocess.run(build_download_command(vid, out_template),
@@ -580,12 +581,14 @@ def download_track(
         if not os.path.exists(wav_path):
             lines = (dl.stderr or dl.stdout or "").strip().splitlines()
             last_detail = lines[-1] if lines else "download produced no file"
+            last_was_download_error = True  # transient (e.g. HTTP 403), not "absent"
             continue
         if expected is not None:
             actual = probe_duration(wav_path)
             if actual is None or abs(actual - expected) > tolerance + _SANITY_SLACK_SEC:
                 last_detail = (f"got {actual:.0f}s vs {expected:.0f}s"
                                if actual is not None else "could not probe download")
+                last_was_download_error = False  # a real (wrong-duration) result
                 _remove_quiet(wav_path)
                 continue
         outcome = _finalize_wav(wav_path, aiff_path, audio_format)
@@ -593,6 +596,10 @@ def download_track(
             _embed_metadata(outcome.outfile, track)
         return outcome
 
+    # A download error (403/network) is transient -> "fail" (retried next run,
+    # not cached as not-found). Only a genuine duration miss is "no_match".
+    if last_was_download_error:
+        return DownloadOutcome("fail", "", last_detail or "download failed")
     return DownloadOutcome(
         "no_match", "",
         last_detail or f"no match within ±{tolerance:.0f}s after {len(attempts)} attempt(s)",

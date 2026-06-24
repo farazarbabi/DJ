@@ -823,3 +823,25 @@ def test_fetch_missing_does_not_cache_when_soundeo_had_match(tmp_path, monkeypat
     assert s["unmatched"] == 1
     cache = sf.load_not_found_cache(str(library / "outputs" / "fetch"))
     assert "spotify:track:a" not in cache  # on Soundeo -> not cached as not-found
+
+
+def test_download_track_transient_403_is_fail_not_no_match(tmp_path, monkeypatch):
+    # A YouTube download that 403s on every attempt is transient -> "fail"
+    # (retried next run, never cached as not-found), not "no_match".
+    def fake_run(cmd, **kw):
+        class R:
+            pass
+        r = R()
+        if any("ytsearch" in a for a in cmd):          # candidate listing
+            r.stdout, r.stderr = "vid1\t200\tTitle\n", ""
+        else:                                           # the download attempt
+            r.stdout = ""
+            r.stderr = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        return r
+
+    monkeypatch.setattr(sf.subprocess, "run", fake_run)
+    monkeypatch.setattr(sf.os.path, "exists", lambda p: False)  # no wav ever produced
+    t = PlaylistTrack(name="RIZZ", artists=["AYYBO"], duration_sec=200)
+    out = sf.download_track(t, str(tmp_path))
+    assert out.status == "fail"
+    assert "403" in out.detail
