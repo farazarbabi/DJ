@@ -887,6 +887,33 @@ def save_not_found_cache(report_dir: str, cache: dict) -> None:
         logger.warning("fetch-missing: could not write %s", path)
 
 
+def forget_not_found(
+    library: str, queries: list[str], *, dry_run: bool = False,
+    report_dir: str | None = None,
+) -> list[str]:
+    """Drop entries from the not-found cache so they're re-searched next run.
+
+    Each query is matched case-insensitively as a substring of a cached entry's
+    ``Artist - Title`` label (so ``"Malevolence"`` or the full label both work),
+    or the literal ``all`` clears every entry. Returns the labels removed.
+    """
+    report_dir = report_dir or os.path.join(library, "outputs", "fetch")
+    cache = load_not_found_cache(report_dir)
+    wants = [q.strip().lower() for q in queries if q.strip()]
+    clear_all = "all" in wants
+    removed: list[str] = []
+    for key in list(cache.keys()):
+        v = cache[key]
+        label = f"{v.get('artists', '')} - {v.get('name', '')}".strip(" -")
+        if clear_all or any(q in label.lower() for q in wants):
+            removed.append(label)
+            if not dry_run:
+                del cache[key]
+    if removed and not dry_run:
+        save_not_found_cache(report_dir, cache)
+    return removed
+
+
 def fetch_missing(
     playlists: list[str],
     library: str,

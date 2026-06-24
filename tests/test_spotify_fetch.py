@@ -845,3 +845,51 @@ def test_download_track_transient_403_is_fail_not_no_match(tmp_path, monkeypatch
     out = sf.download_track(t, str(tmp_path))
     assert out.status == "fail"
     assert "403" in out.detail
+
+
+# --------------------------------------------------------------------------- #
+# forget_not_found (drop cached not-found entries)
+# --------------------------------------------------------------------------- #
+def _seed_cache(report_dir, entries):
+    import os as _os
+    _os.makedirs(report_dir, exist_ok=True)
+    sf.save_not_found_cache(report_dir, entries)
+
+
+def test_forget_not_found_matches_substring(tmp_path):
+    rd = str(tmp_path / "outputs" / "fetch")
+    _seed_cache(rd, {
+        "spotify:track:a": {"artists": "bawab, Sydka", "name": "Malevolence"},
+        "spotify:track:b": {"artists": "AYYBO", "name": "RIZZ"},
+    })
+    removed = sf.forget_not_found(str(tmp_path), ["Malevolence"])
+    assert removed == ["bawab, Sydka - Malevolence"]
+    remaining = sf.load_not_found_cache(rd)
+    assert "spotify:track:a" not in remaining and "spotify:track:b" in remaining
+
+
+def test_forget_not_found_all_clears(tmp_path):
+    rd = str(tmp_path / "outputs" / "fetch")
+    _seed_cache(rd, {"spotify:track:a": {"artists": "X", "name": "Y"},
+                     "spotify:track:b": {"artists": "P", "name": "Q"}})
+    removed = sf.forget_not_found(str(tmp_path), ["all"])
+    assert len(removed) == 2
+    assert sf.load_not_found_cache(rd) == {}
+
+
+def test_forget_not_found_dry_run_keeps_entries(tmp_path):
+    rd = str(tmp_path / "outputs" / "fetch")
+    _seed_cache(rd, {"spotify:track:a": {"artists": "X", "name": "Y"}})
+    removed = sf.forget_not_found(str(tmp_path), ["X - Y"], dry_run=True)
+    assert removed == ["X - Y"]
+    assert "spotify:track:a" in sf.load_not_found_cache(rd)  # dry run leaves it
+
+
+def test_cli_forget_cached_removes_entry(tmp_path):
+    from dj_tools.cli import _build_parser, _run_fetch_missing
+    rd = str(tmp_path / "lib" / "outputs" / "fetch")
+    _seed_cache(rd, {"spotify:track:a": {"artists": "Spada", "name": "I Lose My Mind"}})
+    args = _build_parser().parse_args(
+        ["fetch-missing", "--library", str(tmp_path / "lib"), "--forget-cached", "Lose My Mind"])
+    assert _run_fetch_missing(args) == 0
+    assert sf.load_not_found_cache(rd) == {}

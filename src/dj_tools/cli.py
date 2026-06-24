@@ -140,6 +140,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--force-lookup", dest="force_lookup", action="store_true",
                          help="Re-search tracks previously cached as not found on "
                               "Soundeo or YouTube (default: skip them)")
+    p_fetch.add_argument("--forget-cached", dest="forget_cached", nargs="+", metavar="QUERY",
+                         help="Drop matching entries from the not-found cache and exit "
+                              "(match a substring of 'Artist - Title', or 'all' to clear "
+                              "it). Honors --dry-run.")
     p_fetch.add_argument("--threshold", type=float, default=0.62,
                          help="Match score threshold; below this counts as missing (default: 0.62)")
     p_fetch.add_argument("--duration-tolerance", dest="tolerance", type=float, default=3.0,
@@ -871,6 +875,19 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 def _run_fetch_missing(args: argparse.Namespace) -> int:
     """Match Spotify playlist CSVs against the library and download what's missing."""
     from .spotify_fetch import fetch_missing, prune_superseded_downloads
+
+    if getattr(args, "forget_cached", None):
+        from .spotify_fetch import forget_not_found
+        removed = forget_not_found(args.library, args.forget_cached, dry_run=args.dry_run)
+        verb = "would forget" if args.dry_run else "forgot"
+        if removed:
+            logger.info("fetch-missing: %s %d cached not-found entry(ies)", verb, len(removed))
+            for label in removed:
+                logger.info("  %s %s", verb, label)
+        else:
+            logger.info("fetch-missing: no cached not-found entries matched %s",
+                        args.forget_cached)
+        return 0
 
     if args.prune_only:
         if not os.path.isdir(args.library):
