@@ -139,11 +139,63 @@ def test_pick_selects_best_artist_title_match():
     c.close()
 
 
-def test_pick_rejects_when_duration_off():
+def test_pick_keeps_extended_despite_longer_duration():
+    # The Extended Mix runs far longer than Spotify's cut; must NOT be rejected.
     track = _track("Some Tune", ["Artist"], duration=200)
-    results = [SoundeoResult("9", "Artist", "Some Tune", 280, formats=["aiff"])]
+    results = [SoundeoResult("9", "Artist", "Some Tune (Extended Mix)", 360,
+                             formats=["aiff"])]
     c = _client(lambda r: httpx.Response(200, json={}))
-    assert c.pick(track, results, tolerance=6.0) is None
+    assert c.pick(track, results).id == "9"
+    c.close()
+
+
+def test_pick_prefers_extended_over_original():
+    track = _track("Magna Terram", ["Township Rebellion"], duration=200)
+    results = [
+        SoundeoResult("orig", "Township Rebellion", "Magna Terram (Original Mix)",
+                      200, formats=["aiff"]),
+        SoundeoResult("ext", "Township Rebellion", "Magna Terram (Extended Mix)",
+                      505, formats=["aiff"]),
+    ]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "ext"
+    c.close()
+
+
+def test_pick_falls_back_to_original_without_extended():
+    track = _track("Magna Terram", ["Township Rebellion"])
+    results = [SoundeoResult("orig", "Township Rebellion",
+                             "Magna Terram (Original Mix)", 200, formats=["aiff"])]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "orig"
+    c.close()
+
+
+def test_pick_excludes_true_remix_for_untagged_track():
+    # Spotify lists the original (no suffix); a real remix must not be chosen.
+    track = _track("Magna Terram", ["Township Rebellion"])
+    results = [
+        SoundeoResult("rmx", "Township Rebellion",
+                      "Magna Terram (Henry Saiz Remix)", 400, formats=["aiff"]),
+        SoundeoResult("orig", "Township Rebellion",
+                      "Magna Terram (Original Mix)", 200, formats=["aiff"]),
+    ]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "orig"
+    c.close()
+
+
+def test_pick_matches_requested_remix():
+    # When the Spotify title names a remix, that remix should match.
+    track = _track("Kryptonite - Mateo! Remix", ["Cristhian Valencia"])
+    results = [
+        SoundeoResult("orig", "Cristhian Valencia", "Kryptonite (Original Mix)",
+                      200, formats=["aiff"]),
+        SoundeoResult("rmx", "Cristhian Valencia", "Kryptonite (Mateo! Remix)",
+                      240, formats=["aiff"]),
+    ]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "rmx"
     c.close()
 
 

@@ -271,35 +271,52 @@ class SoundeoClient:
 
     def pick(
         self, track: PlaylistTrack, results: list[SoundeoResult],
-        *, threshold: float = 0.62, tolerance: float = 6.0,
     ) -> SoundeoResult | None:
-        """Best Soundeo result for ``track``, or None if none is good enough.
+        """Best Soundeo result for ``track``, preferring the Extended Mix.
 
-        Requires the chosen format to be available and (when both durations are
-        known) the lengths to agree within ``tolerance`` seconds, so a wrong
-        remix/edit is rejected. Ties broken by closest duration.
+        Duration is intentionally **not** a filter: the Extended Mix is longer
+        than Spotify's (Original/radio) cut, so length-matching would reject the
+        very version we want. Instead we match on title/artist tokens, which
+        ignore the ``Original``/``Extended``/``Mix`` descriptors (stopwords) that
+        Spotify titles usually omit — so "Title", "Title (Original Mix)" and
+        "Title (Extended Mix)" of the same song all match a suffix-less Spotify
+        title. A genuine remix carries extra remixer-name tokens and is rejected
+        unless the Spotify title itself asked for that remix (then those tokens
+        are part of the query and match). Among the survivors, the Extended Mix
+        wins, then the longest cut; otherwise the Original/only version.
         """
+        from .spotify_fetch import tokens  # lazy: avoid import cycle
+
+        want = tokens(track.name)
+        want_artist = tokens(track.artist_display)
+        if not want:
+            return None
         fmt = self.audio_format
-        best: tuple[float, float, SoundeoResult] | None = None
+        matches: list[SoundeoResult] = []
         for r in results:
-            # Require the format to be explicitly offered. Tracks without an
-            # AIFF download link (mp3-only, or vote-required/upcoming entries
-            # that parse to no formats) are skipped so the caller backfalls to
-            # YouTube instead of hitting a 404 on the download endpoint.
+            # Require the AIFF link to be present (skip mp3-only or
+            # vote-required/upcoming entries) so the caller backfalls to YouTube
+            # instead of hitting a 404 on the download endpoint.
             if fmt not in r.formats:
                 continue
-            score = _score(track, r)
-            if score < threshold:
+            have_title = tokens(r.title)
+            have_artist = tokens(r.artist)
+            if not want <= (have_title | have_artist):
+                continue  # not all Spotify title tokens present
+            # Extra identifying tokens (a remixer name) mean a different version
+            # than this suffix-less Spotify track wants — Original/Extended carry
+            # none (stopwords), a remix does.
+            if have_title - want - want_artist:
                 continue
-            if (track.duration_sec and r.duration_sec
-                    and abs(track.duration_sec - r.duration_sec) > tolerance):
+            artist_ok = bool(want_artist & (have_artist | have_title)) if want_artist else True
+            if not artist_ok and len(want) < 3:  # allow artistless match only for distinctive titles
                 continue
-            dur_gap = (abs(track.duration_sec - r.duration_sec)
-                       if track.duration_sec and r.duration_sec else 0.0)
-            cand = (-score, dur_gap, r)
-            if best is None or cand[:2] < best[:2]:
-                best = cand
-        return best[2] if best else None
+            matches.append(r)
+        if not matches:
+            return None
+        matches.sort(key=lambda r: (0 if "extended" in r.title.lower() else 1,
+                                    -(r.duration_sec or 0.0)))
+        return matches[0]
 
     # -- download ----------------------------------------------------------- #
     def download(self, result: SoundeoResult, dest_path: str) -> None:

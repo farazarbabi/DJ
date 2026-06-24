@@ -83,6 +83,9 @@ def _build_parser() -> argparse.ArgumentParser:
                        default="aiff", help="Format for --fetch-missing downloads (default: aiff)")
     p_run.add_argument("--no-soundeo", dest="no_soundeo", action="store_true",
                        help="With --fetch-missing, force YouTube-only (skip the Soundeo source)")
+    p_run.add_argument("--force-lookup", dest="force_lookup", action="store_true",
+                       help="With --fetch-missing, re-search tracks previously cached as "
+                            "not found on Soundeo or YouTube")
     p_run.add_argument("--cues", action="store_true",
                        help="Generate Rekordbox cue points during the run")
     p_run.add_argument("--cue-profile", choices=["v1", "v2", "v3-default"],
@@ -134,6 +137,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--no-soundeo", dest="no_soundeo", action="store_true",
                          help="Force YouTube-only; skip the Soundeo source even if "
                               "SOUNDEO_USER/SOUNDEO_PASS are configured")
+    p_fetch.add_argument("--force-lookup", dest="force_lookup", action="store_true",
+                         help="Re-search tracks previously cached as not found on "
+                              "Soundeo or YouTube (default: skip them)")
     p_fetch.add_argument("--threshold", type=float, default=0.62,
                          help="Match score threshold; below this counts as missing (default: 0.62)")
     p_fetch.add_argument("--duration-tolerance", dest="tolerance", type=float, default=3.0,
@@ -728,6 +734,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 library_dir,
                 audio_format=getattr(args, "fetch_format", "aiff"),
                 use_soundeo=not getattr(args, "no_soundeo", False),
+                force_lookup=getattr(args, "force_lookup", False),
             )
             logger.info(
                 "Pipeline: fetch-missing done in %s (downloaded=%d skipped=%d failed=%d pruned=%d)",
@@ -901,6 +908,7 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             max_duration=args.max_duration,
             dry_run=args.dry_run,
             use_soundeo=not getattr(args, "no_soundeo", False),
+            force_lookup=getattr(args, "force_lookup", False),
         )
     except (FileNotFoundError, RuntimeError) as exc:
         logger.error("fetch-missing: %s", exc)

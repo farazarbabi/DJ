@@ -22,6 +22,7 @@ registry. ``yt-dlp`` and ``ffmpeg`` must be on PATH for the download step.
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import re
@@ -840,6 +841,34 @@ def prune_superseded_downloads(library: str, *, dry_run: bool = False) -> list[s
     return removed
 
 
+_NOT_FOUND_CACHE_NAME = "not_found_cache.json"
+
+
+def _track_identity(track: PlaylistTrack) -> str:
+    """Stable per-track key for the not-found cache (URI, else name+artist)."""
+    return track.uri or f"{track.name}\x00{track.artist_display}".lower()
+
+
+def load_not_found_cache(report_dir: str) -> dict:
+    """Load the set of tracks previously not found on Soundeo *or* YouTube."""
+    path = os.path.join(report_dir, _NOT_FOUND_CACHE_NAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_not_found_cache(report_dir: str, cache: dict) -> None:
+    path = os.path.join(report_dir, _NOT_FOUND_CACHE_NAME)
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except OSError:
+        logger.warning("fetch-missing: could not write %s", path)
+
+
 def fetch_missing(
     playlists: list[str],
     library: str,
@@ -853,6 +882,7 @@ def fetch_missing(
     dry_run: bool = False,
     report_dir: str | None = None,
     use_soundeo: bool = True,
+    force_lookup: bool = False,
 ) -> dict:
     """Match playlist CSVs against ``library`` and download what's missing.
 
@@ -913,9 +943,24 @@ def fetch_missing(
     _write_match_report(os.path.join(report_dir, "matched_report.csv"), present)
     _write_match_report(os.path.join(report_dir, "missing_report.csv"), missing)
 
+    # Skip tracks already known to be on neither Soundeo nor YouTube, so repeat
+    # runs don't re-search them every time. --force-lookup retries them. `missing`
+    # itself (and missing_report.csv) stays complete; only the work set is trimmed.
+    not_found = load_not_found_cache(report_dir)
+    for r in present:  # a now-present track is no longer "not found"
+        not_found.pop(_track_identity(r.track), None)
+    to_download = [r for r in missing
+                   if force_lookup or _track_identity(r.track) not in not_found]
+    cached_skipped = len(missing) - len(to_download)
+    if cached_skipped:
+        logger.info(
+            "fetch-missing: skipping %d track(s) previously not found on Soundeo "
+            "or YouTube (use --force-lookup to retry)", cached_skipped,
+        )
+
     # Work set: genuinely-missing tracks (download) plus already tool-downloaded
     # tracks (re-verify duration, re-download if it has drifted out of bounds).
-    work = list(missing)
+    work = list(to_download)
     reverify = [r for r in present if tool_file_for(r.track, library)]
     work.extend(reverify)
 
@@ -925,6 +970,7 @@ def fetch_missing(
         "pruned": len(pruned),
         "downloaded": 0, "skipped": 0, "failed": 0, "unmatched": 0,
         "soundeo": 0, "youtube": 0, "quota_skipped": 0, "deferred": 0,
+        "cached_skipped": cached_skipped,
         "missing_results": missing, "unmatched_results": [], "report_dir": report_dir,
     }
     logger.info(
@@ -1014,8 +1060,10 @@ def fetch_missing(
                 lf.flush()
                 prefix = f"[{i}/{len(work)}]"
                 label = f"{t.artist_display} - {t.name}"
+                key = _track_identity(t)
                 if outcome.status == "skip":
                     summary["skipped"] += 1
+                    not_found.pop(key, None)
                     logger.info("%s PRESENT  (already downloaded, duration ok): %s",
                                 prefix, label)
                 elif outcome.status == "quota_skip":
@@ -1025,6 +1073,9 @@ def fetch_missing(
                 elif outcome.status == "no_match":
                     summary["unmatched"] += 1
                     summary["unmatched_results"].append((t, outcome.detail))
+                    # Remember it so future runs skip the search (until --force-lookup).
+                    not_found[key] = {"artists": t.artist_display, "name": t.name,
+                                      "detail": outcome.detail}
                     logger.warning("%s NOT FOUND on Soundeo or YouTube: %s  (%s)",
                                    prefix, label, outcome.detail)
                 elif outcome.status == "fail":
@@ -1034,12 +1085,15 @@ def fetch_missing(
                 else:
                     summary["downloaded"] += 1
                     summary[outcome.source] = summary.get(outcome.source, 0) + 1
+                    not_found.pop(key, None)  # found now — clear any stale mark
                     src = "SOUNDEO " if outcome.source == "soundeo" else "YOUTUBE "
                     logger.info("%s %s -> %s", prefix, src,
                                 os.path.basename(outcome.outfile))
     finally:
         if soundeo is not None:
             soundeo.close()
+
+    save_not_found_cache(report_dir, not_found)
 
     # A Soundeo original lands unmarked, so it may now supersede a [U] YouTube
     # copy fetched on an earlier run — prune those before regenerating playlists.
@@ -1059,10 +1113,10 @@ def fetch_missing(
 
     logger.info(
         "fetch-missing: done — downloaded=%d (soundeo=%d youtube=%d) "
-        "skipped=%d quota_skipped=%d deferred=%d unmatched=%d failed=%d",
+        "skipped=%d quota_skipped=%d deferred=%d unmatched=%d failed=%d cached_skipped=%d",
         summary["downloaded"], summary["soundeo"], summary["youtube"],
         summary["skipped"], summary["quota_skipped"], summary["deferred"],
-        summary["unmatched"], summary["failed"],
+        summary["unmatched"], summary["failed"], summary["cached_skipped"],
     )
     if summary["unmatched_results"]:
         logger.info(

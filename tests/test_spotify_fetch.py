@@ -734,3 +734,65 @@ def test_acquire_soundeo_download_error_falls_back_to_youtube(tmp_path, monkeypa
     out = sf.acquire_track(track, str(tmp_path), soundeo=ErrClient(), quota=sf._QuotaState())
     assert out.source == "youtube"                       # per-track backfall
     assert (tmp_path / "Artist - Tune[U].aiff").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Not-found cache (skip re-searching tracks absent from both sources)
+# --------------------------------------------------------------------------- #
+def _no_match_yt(monkeypatch):
+    # download_track always reports "not found on YouTube".
+    monkeypatch.setattr(sf, "download_track",
+                        lambda track, dest_dir, **kw: sf.DownloadOutcome(
+                            "no_match", "", "no result", "youtube"))
+
+
+def test_fetch_missing_caches_not_found_and_skips_next_run(tmp_path, monkeypatch):
+    _no_match_yt(monkeypatch)  # YouTube-only (no Soundeo creds), nothing found
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Ghost", "Nobody", 200000)])
+
+    s1 = fetch_missing([csv_path], str(library), audio_format="aiff")
+    assert s1["unmatched"] == 1 and s1["cached_skipped"] == 0
+    cache = sf.load_not_found_cache(str(library / "outputs" / "fetch"))
+    assert "spotify:track:a" in cache  # remembered
+
+    # Second run: the search is skipped, download_track must NOT be called.
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("should not search a cached not-found track")))
+    s2 = fetch_missing([csv_path], str(library), audio_format="aiff")
+    assert s2["cached_skipped"] == 1
+    assert s2["unmatched"] == 0
+
+
+def test_fetch_missing_force_lookup_retries_cached(tmp_path, monkeypatch):
+    _no_match_yt(monkeypatch)
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Ghost", "Nobody", 200000)])
+    fetch_missing([csv_path], str(library), audio_format="aiff")  # seeds the cache
+
+    calls = []
+    monkeypatch.setattr(sf, "download_track",
+                        lambda track, dest_dir, **kw: calls.append(track)
+                        or sf.DownloadOutcome("no_match", "", "no result", "youtube"))
+    s = fetch_missing([csv_path], str(library), audio_format="aiff", force_lookup=True)
+    assert s["cached_skipped"] == 0
+    assert len(calls) == 1  # re-searched despite being cached
+
+
+def test_fetch_missing_clears_cache_when_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Ghost", "Nobody", 200000)])
+    _no_match_yt(monkeypatch)
+    fetch_missing([csv_path], str(library), audio_format="aiff")  # cached not-found
+
+    # Now YouTube "finds" it -> cache entry must be cleared.
+    _yt_stub(monkeypatch)
+    fetch_missing([csv_path], str(library), audio_format="aiff", force_lookup=True)
+    cache = sf.load_not_found_cache(str(library / "outputs" / "fetch"))
+    assert "spotify:track:a" not in cache
