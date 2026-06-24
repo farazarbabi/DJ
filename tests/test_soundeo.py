@@ -316,3 +316,57 @@ def test_pick_skips_when_formats_unknown():
     c = _client(lambda r: httpx.Response(200, json={}))
     assert c.pick(track, results) is None
     c.close()
+
+
+# --------------------------------------------------------------------------- #
+# out-of-credit detection via the downloads counter
+# --------------------------------------------------------------------------- #
+_HEADER_N = ('<ul class="top-menu"><li id="top-menu-downloads"><a href="/account/logout">'
+             '<span id=\'span-downloads\'><span title="Main (will be reset in 5h)">{n}</span>'
+             '</span></a></li></ul>')
+
+
+def test_remaining_downloads_parses_header():
+    from dj_tools.soundeo import _remaining_downloads
+    assert _remaining_downloads({"header": _HEADER_N.format(n=19)}) == 19
+    assert _remaining_downloads({"header": _HEADER_N.format(n=0)}) == 0
+    assert _remaining_downloads({"header": "<ul></ul>"}) is None
+    assert _remaining_downloads({}) is None
+
+
+def test_download_no_url_with_zero_credit_is_quota(tmp_path):
+    # Login reports 0 left; the download endpoint returns no URL -> QUOTA, not error.
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/account/logoreg":
+            hdr = _HEADER_N.format(n=0)
+            return (httpx.Response(200, json={"success": True, "header": hdr})
+                    if request.method == "POST" else httpx.Response(200, json={"success": False}))
+        if path.startswith("/download/"):
+            return httpx.Response(200, json={"success": False, "jsActions": {},
+                                             "header": _HEADER_N.format(n=0),
+                                             "flash": "no download URL returned"})
+        return httpx.Response(404)
+
+    c = _client(handler)
+    c.login()
+    with pytest.raises(SoundeoQuotaExceeded):
+        c.download(SoundeoResult("1", "A", "B", formats=["aiff"]), str(tmp_path / "x.aiff"))
+    c.close()
+
+
+def test_download_short_circuits_when_credit_zero(tmp_path):
+    # With the counter already at 0, download() must raise quota WITHOUT a request.
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"success": True, "header": _HEADER_N.format(n=0)})
+
+    c = _client(handler)
+    c.login()
+    calls.clear()
+    with pytest.raises(SoundeoQuotaExceeded):
+        c.download(SoundeoResult("1", "A", "B", formats=["aiff"]), str(tmp_path / "x.aiff"))
+    assert calls == []  # no download request was attempted
+    c.close()

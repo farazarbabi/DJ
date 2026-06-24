@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -172,6 +173,9 @@ class SoundeoClient:
         )
         self._logged_in = False
         self._last_request = 0.0
+        # Remaining daily downloads, parsed from each response header's
+        # `span-downloads` counter; 0 means out of credit. None = unknown yet.
+        self._remaining: int | None = None
 
     # -- lifecycle ---------------------------------------------------------- #
     @classmethod
@@ -217,7 +221,14 @@ class SoundeoClient:
         self._throttle()
         resp = self._client.get(path, **kw)
         resp.raise_for_status()
-        return _as_envelope(resp)
+        env = _as_envelope(resp)
+        self._note_remaining(env)
+        return env
+
+    def _note_remaining(self, env: dict) -> None:
+        n = _remaining_downloads(env)
+        if n is not None:
+            self._remaining = n
 
     # -- auth --------------------------------------------------------------- #
     def login(self) -> None:
@@ -254,7 +265,12 @@ class SoundeoClient:
             raise SoundeoAuthError(
                 f"login rejected: {_flash_text(env) or 'invalid credentials or changed form'}")
         self._logged_in = True
-        logger.info("soundeo: logged in as %s", self.user)
+        self._note_remaining(env)
+        if self._remaining is not None:
+            logger.info("soundeo: logged in as %s (%d download(s) left today)",
+                        self.user, self._remaining)
+        else:
+            logger.info("soundeo: logged in as %s", self.user)
 
     # -- search ------------------------------------------------------------- #
     def search(self, track: PlaylistTrack) -> list[SoundeoResult]:
@@ -329,6 +345,11 @@ class SoundeoClient:
         """
         if not self._logged_in:
             self.login()
+        # Out of credit (counter known to be 0): stop before spending a request,
+        # so the caller defers rather than falling back to YouTube.
+        if self._remaining is not None and self._remaining <= 0:
+            raise SoundeoQuotaExceeded(
+                "Soundeo daily download limit reached (0 downloads left)")
         fmt = FORMAT_CODE.get(self.audio_format, self.audio_format)
         try:
             info = self._get_json(DOWNLOAD_INFO_TEMPLATE.format(id=result.id, fmt=fmt))
@@ -343,7 +364,10 @@ class SoundeoClient:
         url = (info.get("jsActions") or {}).get("redirect", {}).get("url", "")
         if not url:
             msg = _flash_text(info) or "no download URL returned"
-            if _looks_like_quota(msg):
+            # No URL because the daily limit is spent (counter hit 0, or a limit
+            # message) -> quota, which stops the run. Otherwise a genuine
+            # per-track failure -> SoundeoError, which backfalls to YouTube.
+            if (self._remaining is not None and self._remaining <= 0) or _looks_like_quota(msg):
                 raise SoundeoQuotaExceeded(f"Soundeo download limit reached: {msg}")
             raise SoundeoError(f"Soundeo download failed: {msg}")
 
@@ -396,6 +420,29 @@ def _flash_text(env: dict) -> str:
 def _looks_like_quota(message: str) -> bool:
     m = message.lower()
     return any(h in m for h in _QUOTA_HINTS)
+
+
+def _remaining_downloads(env: dict) -> int | None:
+    """Remaining daily downloads from a response header's `span-downloads`.
+
+    Every Soundeo JSON envelope carries the top-menu header, which includes
+    ``<span id='span-downloads'>…N…</span>`` (N = downloads left in the Main
+    pool). Returns N, or None if the header is absent/unparseable.
+    """
+    header = env.get("header") or ""
+    if "span-downloads" not in header:
+        return None
+    try:
+        from lxml import html as lxml_html
+
+        doc = lxml_html.fromstring(header)
+        nodes = doc.xpath('//span[@id="span-downloads"]')
+        if not nodes:
+            return None
+        m = re.search(r"\d+", nodes[0].text_content())
+        return int(m.group()) if m else None
+    except Exception:
+        return None
 
 
 def _parse_results(content_html: str) -> list[SoundeoResult]:
