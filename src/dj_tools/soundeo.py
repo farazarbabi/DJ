@@ -158,8 +158,15 @@ class SoundeoClient:
         self._client = httpx.Client(
             base_url=self.base_url, timeout=_TIMEOUT, follow_redirects=True,
             headers={
-                "User-Agent": "Mozilla/5.0 (dj-tools soundeo client)",
-                "X-Requested-With": "XMLHttpRequest",  # site serves the JSON envelope
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                ),
+                # Both are required for the server to return its JSON envelope
+                # instead of the full HTML page (content negotiation).
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": self.base_url + "/",
             },
             transport=transport,  # tests inject httpx.MockTransport
         )
@@ -233,9 +240,19 @@ class SoundeoClient:
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             raise SoundeoAuthError(f"login request failed: {exc}") from exc
+
+        ctype = resp.headers.get("content-type", "")
         env = _as_envelope(resp)
-        if not env.get("success") or "/account/logout" not in (env.get("header") or ""):
-            raise SoundeoAuthError("login rejected (check SOUNDEO_USER/SOUNDEO_PASS)")
+        if not env:
+            raise SoundeoAuthError(
+                f"login response was not the expected JSON envelope "
+                f"(status={resp.status_code}, content-type={ctype!r}); the site "
+                f"may have changed or blocked the request")
+        # `success` is the canonical signal; a logged-in header confirms it.
+        authed = "/account/logout" in (env.get("header") or "")
+        if not env.get("success") and not authed:
+            raise SoundeoAuthError(
+                f"login rejected: {_flash_text(env) or 'invalid credentials or changed form'}")
         self._logged_in = True
         logger.info("soundeo: logged in as %s", self.user)
 

@@ -924,7 +924,7 @@ def fetch_missing(
         "present": len(present), "missing": len(missing), "reverify": len(reverify),
         "pruned": len(pruned),
         "downloaded": 0, "skipped": 0, "failed": 0, "unmatched": 0,
-        "soundeo": 0, "youtube": 0, "quota_skipped": 0,
+        "soundeo": 0, "youtube": 0, "quota_skipped": 0, "deferred": 0,
         "missing_results": missing, "unmatched_results": [], "report_dir": report_dir,
     }
     logger.info(
@@ -941,10 +941,11 @@ def fetch_missing(
         summary.update(generate_spotify_playlists(csv_paths, library, threshold=threshold))
         return summary
 
-    # Soundeo (primary source) — built once and reused; absent creds or a login
-    # failure leaves it disabled and we behave exactly like the YouTube-only
-    # tool. quota tracks the daily limit so we stop downloading (not YouTube)
-    # once it is hit.
+    # Soundeo (primary source) — built once and reused; absent creds leaves it
+    # disabled (YouTube-only). A login *failure* aborts the run rather than
+    # silently downloading everything from YouTube — the user must fix the
+    # credentials or pass --no-soundeo to opt into YouTube explicitly. quota
+    # tracks the daily limit so we stop (not YouTube) once it is hit.
     soundeo = None
     quota = _QuotaState()
     if use_soundeo and audio_format == "aiff":
@@ -955,9 +956,12 @@ def fetch_missing(
             try:
                 soundeo.login()
             except SoundeoAuthError as exc:
-                logger.warning("soundeo: login failed (%s); using YouTube only", exc)
                 soundeo.close()
-                soundeo = None
+                raise RuntimeError(
+                    f"Soundeo login failed: {exc}. Aborting — not falling back to "
+                    f"YouTube automatically. Fix SOUNDEO_USER/SOUNDEO_PASS, or pass "
+                    f"--no-soundeo to download from YouTube only."
+                ) from exc
     elif use_soundeo and audio_format != "aiff":
         logger.info("soundeo: skipped (only used for --format aiff)")
 
@@ -977,6 +981,21 @@ def fetch_missing(
             log.writerow(["status", "source", "artists", "name", "query", "outfile", "detail"])
             for i, r in enumerate(work, 1):
                 t = r.track
+                # Soundeo quota is spent: stop the whole run (do NOT fall back to
+                # YouTube for the remainder). Re-run after the midnight CET reset.
+                if quota.exhausted:
+                    deferred = work[i - 1:]
+                    summary["deferred"] = len(deferred)
+                    for dr in deferred:
+                        log.writerow(["deferred", "soundeo", dr.track.artist_display,
+                                      dr.track.name, dr.track.search_query(), "",
+                                      "soundeo daily limit reached"])
+                    logger.warning(
+                        "soundeo: daily download limit reached — STOPPING. "
+                        "%d track(s) deferred; re-run after midnight CET to continue.",
+                        len(deferred),
+                    )
+                    break
                 outcome = acquire_track(
                     t, library, soundeo=soundeo, quota=quota,
                     audio_format=audio_format, tolerance=tolerance,
@@ -1029,10 +1048,10 @@ def fetch_missing(
 
     logger.info(
         "fetch-missing: done — downloaded=%d (soundeo=%d youtube=%d) "
-        "skipped=%d quota_skipped=%d unmatched=%d failed=%d",
+        "skipped=%d quota_skipped=%d deferred=%d unmatched=%d failed=%d",
         summary["downloaded"], summary["soundeo"], summary["youtube"],
-        summary["skipped"], summary["quota_skipped"], summary["unmatched"],
-        summary["failed"],
+        summary["skipped"], summary["quota_skipped"], summary["deferred"],
+        summary["unmatched"], summary["failed"],
     )
     if summary["unmatched_results"]:
         logger.info(

@@ -652,3 +652,66 @@ def test_fetch_missing_routes_soundeo_then_youtube(tmp_path, monkeypatch):
     assert fake.closed
     log = (library / "outputs" / "fetch" / "download_log.csv").read_text(encoding="utf-8")
     assert "soundeo" in log and "youtube" in log
+
+
+def test_fetch_missing_aborts_on_soundeo_login_failure(tmp_path, monkeypatch):
+    import pytest
+    _yt_stub(monkeypatch)  # present only to prove it is NOT used
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Tune", "Artist", 200000)])
+
+    class FailClient:
+        def login(self):
+            raise so.SoundeoAuthError("bad creds")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(so.SoundeoClient, "from_env",
+                        classmethod(lambda cls, **kw: FailClient()))
+
+    with pytest.raises(RuntimeError, match="Soundeo login failed"):
+        fetch_missing([csv_path], str(library), audio_format="aiff")
+    # No automatic YouTube fallback on login failure.
+    assert not (library / "Artist - Tune[U].aiff").exists()
+
+
+def test_fetch_missing_stops_on_quota_without_youtube(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)  # would create [U] files if (wrongly) used
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "First", "Artist A", 200000),
+        _row("b", "Second", "Artist B", 200000),
+        _row("c", "Third", "Artist C", 200000),
+    ])
+
+    class QuotaClient:
+        audio_format = "aiff"
+
+        def login(self):
+            pass
+
+        def close(self):
+            pass
+
+        def search(self, track):
+            return [so.SoundeoResult("x", track.primary_artist, track.name, 200,
+                                     formats=["aiff"])]
+
+        def pick(self, track, results):
+            return results[0]
+
+        def download(self, result, dest):
+            raise so.SoundeoQuotaExceeded("daily limit reached")
+
+    monkeypatch.setattr(so.SoundeoClient, "from_env",
+                        classmethod(lambda cls, **kw: QuotaClient()))
+
+    summary = fetch_missing([csv_path], str(library), audio_format="aiff")
+
+    assert summary["quota_skipped"] == 1   # the track that hit the limit
+    assert summary["deferred"] == 2        # the rest, stopped (not YouTubed)
+    assert summary["youtube"] == 0
+    assert not any(p.name.endswith("[U].aiff") for p in library.iterdir())
