@@ -455,10 +455,11 @@ def _wav_to_aiff(wav_path: str, aiff_path: str) -> bool:
 
 @dataclass
 class DownloadOutcome:
-    # "ok" | "ok_wav" | "skip" | "no_match" | "fail"
+    # "ok" | "ok_wav" | "skip" | "no_match" | "fail" | "quota_skip"
     status: str
     outfile: str = ""
     detail: str = ""
+    source: str = "youtube"  # "soundeo" | "youtube"
 
 
 def _remove_quiet(path: str) -> None:
@@ -590,6 +591,77 @@ def download_track(
     return DownloadOutcome(
         "no_match", "",
         last_detail or f"no match within ±{tolerance:.0f}s after {len(attempts)} attempt(s)",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Source routing: Soundeo (primary, original AIFF) -> YouTube (fallback)
+# --------------------------------------------------------------------------- #
+class _QuotaState:
+    """Tracks whether Soundeo's daily download quota has been hit this run."""
+
+    def __init__(self) -> None:
+        self.exhausted = False
+
+
+def acquire_track(
+    track: PlaylistTrack,
+    dest_dir: str,
+    *,
+    soundeo=None,
+    quota: _QuotaState | None = None,
+    audio_format: str = "aiff",
+    tolerance: float = DEFAULT_TOLERANCE_SEC,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    min_duration: int = 30,
+    max_duration: int = 900,
+) -> DownloadOutcome:
+    """Acquire one track, preferring Soundeo's original AIFF over YouTube.
+
+    Per-track routing (search never costs quota, only a download does):
+
+    * on Soundeo + quota available -> download the **unmarked** original AIFF;
+    * on Soundeo + quota exhausted  -> ``quota_skip`` (retry after midnight CET),
+      *not* downloaded from YouTube;
+    * not on Soundeo (or Soundeo errored/disabled) -> fall back to
+      :func:`download_track` (YouTube, ``[U]``-marked).
+
+    A successful Soundeo download lands at the unmarked ``Artist - Title`` path,
+    so any pre-existing ``[U]`` YouTube copy is superseded and gets pruned.
+    """
+    if soundeo is not None:
+        from .soundeo import SoundeoError, SoundeoQuotaExceeded
+
+        try:
+            results = soundeo.search(track)
+            pick = soundeo.pick(track, results) if results else None
+        except SoundeoError as exc:
+            logger.warning("soundeo: search error for %s — %s; trying YouTube",
+                           track.name, exc)
+            pick = None
+
+        if pick is not None:
+            if quota is not None and quota.exhausted:
+                return DownloadOutcome(
+                    "quota_skip", "", "on Soundeo; daily quota exhausted", "soundeo")
+            # Unmarked path: treat a Soundeo original like a curated original.
+            dest = os.path.join(dest_dir, track.target_basename() + ".aiff")
+            try:
+                soundeo.download(pick, dest)
+                _embed_metadata(dest, track)
+                return DownloadOutcome("ok", dest, f"soundeo:{pick.id}", "soundeo")
+            except SoundeoQuotaExceeded as exc:
+                if quota is not None:
+                    quota.exhausted = True
+                return DownloadOutcome("quota_skip", "", str(exc), "soundeo")
+            except SoundeoError as exc:
+                logger.warning("soundeo: download error for %s — %s; trying YouTube",
+                               track.name, exc)
+                # fall through to YouTube
+
+    return download_track(
+        track, dest_dir, audio_format=audio_format, tolerance=tolerance,
+        max_attempts=max_attempts, min_duration=min_duration, max_duration=max_duration,
     )
 
 
@@ -780,8 +852,14 @@ def fetch_missing(
     max_duration: int = 900,
     dry_run: bool = False,
     report_dir: str | None = None,
+    use_soundeo: bool = True,
 ) -> dict:
     """Match playlist CSVs against ``library`` and download what's missing.
+
+    When Soundeo credentials are present (``SOUNDEO_USER``/``SOUNDEO_PASS`` in
+    ``.env``) and ``use_soundeo`` is True, each track is sourced from Soundeo's
+    original AIFF first and from YouTube only as a fallback; pass
+    ``use_soundeo=False`` to force YouTube-only.
 
     Downloads are duration-verified: only YouTube results within ``tolerance``
     seconds of the Spotify track are accepted, retrying up to ``max_attempts``
@@ -846,6 +924,7 @@ def fetch_missing(
         "present": len(present), "missing": len(missing), "reverify": len(reverify),
         "pruned": len(pruned),
         "downloaded": 0, "skipped": 0, "failed": 0, "unmatched": 0,
+        "soundeo": 0, "youtube": 0, "quota_skipped": 0,
         "missing_results": missing, "unmatched_results": [], "report_dir": report_dir,
     }
     logger.info(
@@ -862,41 +941,82 @@ def fetch_missing(
         summary.update(generate_spotify_playlists(csv_paths, library, threshold=threshold))
         return summary
 
+    # Soundeo (primary source) — built once and reused; absent creds or a login
+    # failure leaves it disabled and we behave exactly like the YouTube-only
+    # tool. quota tracks the daily limit so we stop downloading (not YouTube)
+    # once it is hit.
+    soundeo = None
+    quota = _QuotaState()
+    if use_soundeo and audio_format == "aiff":
+        from .soundeo import SoundeoAuthError, SoundeoClient
+
+        soundeo = SoundeoClient.from_env(audio_format=audio_format)
+        if soundeo is not None:
+            try:
+                soundeo.login()
+            except SoundeoAuthError as exc:
+                logger.warning("soundeo: login failed (%s); using YouTube only", exc)
+                soundeo.close()
+                soundeo = None
+    elif use_soundeo and audio_format != "aiff":
+        logger.info("soundeo: skipped (only used for --format aiff)")
+
     has_ytdlp, has_ffmpeg = tools_available()
     if not has_ytdlp:
-        raise RuntimeError("yt-dlp not found on PATH (required to download)")
-    if audio_format == "aiff" and not has_ffmpeg:
+        # YouTube is the fallback; required outright only when Soundeo is off.
+        if soundeo is None:
+            raise RuntimeError("yt-dlp not found on PATH (required to download)")
+        logger.warning("yt-dlp not found on PATH; tracks absent from Soundeo cannot be fetched")
+    if audio_format == "aiff" and not has_ffmpeg and soundeo is None:
         raise RuntimeError("ffmpeg not found on PATH (required for AIFF conversion)")
 
     log_path = os.path.join(report_dir, "download_log.csv")
-    with open(log_path, "w", encoding="utf-8", newline="") as lf:
-        log = csv.writer(lf)
-        log.writerow(["status", "artists", "name", "query", "outfile", "detail"])
-        for i, r in enumerate(work, 1):
-            t = r.track
-            outcome = download_track(
-                t, library, audio_format=audio_format,
-                tolerance=tolerance, max_attempts=max_attempts,
-                min_duration=min_duration, max_duration=max_duration,
-            )
-            log.writerow([outcome.status, t.artist_display, t.name,
-                          t.search_query(), outcome.outfile, outcome.detail])
-            lf.flush()
-            prefix = f"[{i}/{len(work)}]"
-            if outcome.status == "skip":
-                summary["skipped"] += 1
-                logger.info("%s skip (duration ok): %s", prefix, t.target_basename())
-            elif outcome.status == "no_match":
-                summary["unmatched"] += 1
-                summary["unmatched_results"].append((t, outcome.detail))
-                logger.warning("%s NO MATCH within ±%.0fs: %s — %s",
-                               prefix, tolerance, t.name, outcome.detail)
-            elif outcome.status == "fail":
-                summary["failed"] += 1
-                logger.warning("%s FAILED: %s — %s", prefix, t.name, outcome.detail)
-            else:
-                summary["downloaded"] += 1
-                logger.info("%s ok: %s", prefix, os.path.basename(outcome.outfile))
+    try:
+        with open(log_path, "w", encoding="utf-8", newline="") as lf:
+            log = csv.writer(lf)
+            log.writerow(["status", "source", "artists", "name", "query", "outfile", "detail"])
+            for i, r in enumerate(work, 1):
+                t = r.track
+                outcome = acquire_track(
+                    t, library, soundeo=soundeo, quota=quota,
+                    audio_format=audio_format, tolerance=tolerance,
+                    max_attempts=max_attempts,
+                    min_duration=min_duration, max_duration=max_duration,
+                )
+                log.writerow([outcome.status, outcome.source, t.artist_display, t.name,
+                              t.search_query(), outcome.outfile, outcome.detail])
+                lf.flush()
+                prefix = f"[{i}/{len(work)}]"
+                if outcome.status == "skip":
+                    summary["skipped"] += 1
+                    logger.info("%s skip (duration ok): %s", prefix, t.target_basename())
+                elif outcome.status == "quota_skip":
+                    summary["quota_skipped"] += 1
+                    logger.info("%s soundeo quota — deferring to tomorrow: %s",
+                                prefix, t.name)
+                elif outcome.status == "no_match":
+                    summary["unmatched"] += 1
+                    summary["unmatched_results"].append((t, outcome.detail))
+                    logger.warning("%s NO MATCH within ±%.0fs: %s — %s",
+                                   prefix, tolerance, t.name, outcome.detail)
+                elif outcome.status == "fail":
+                    summary["failed"] += 1
+                    logger.warning("%s FAILED: %s — %s", prefix, t.name, outcome.detail)
+                else:
+                    summary["downloaded"] += 1
+                    summary[outcome.source] = summary.get(outcome.source, 0) + 1
+                    logger.info("%s ok (%s): %s", prefix, outcome.source,
+                                os.path.basename(outcome.outfile))
+    finally:
+        if soundeo is not None:
+            soundeo.close()
+
+    # A Soundeo original lands unmarked, so it may now supersede a [U] YouTube
+    # copy fetched on an earlier run — prune those before regenerating playlists.
+    superseded = prune_superseded_downloads(library)
+    if superseded:
+        logger.info("fetch-missing: pruned %d [U] copy(ies) superseded by Soundeo originals",
+                    len(superseded))
 
     if summary["unmatched_results"]:
         with open(os.path.join(report_dir, "unmatched_report.csv"),
@@ -908,8 +1028,11 @@ def fetch_missing(
                             f"{t.duration_sec:.0f}" if t.duration_sec else "", detail])
 
     logger.info(
-        "fetch-missing: done — downloaded=%d skipped=%d unmatched=%d failed=%d",
-        summary["downloaded"], summary["skipped"], summary["unmatched"], summary["failed"],
+        "fetch-missing: done — downloaded=%d (soundeo=%d youtube=%d) "
+        "skipped=%d quota_skipped=%d unmatched=%d failed=%d",
+        summary["downloaded"], summary["soundeo"], summary["youtube"],
+        summary["skipped"], summary["quota_skipped"], summary["unmatched"],
+        summary["failed"],
     )
     if summary["unmatched_results"]:
         logger.info(

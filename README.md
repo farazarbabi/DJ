@@ -123,6 +123,7 @@ dj fetch-missing playlist.csv --library "D:\\Music"
 dj fetch-missing ./playlists --library "D:\\Music"     # a directory of CSVs
 dj fetch-missing playlist.csv --library "D:\\Music" --dry-run
 dj fetch-missing playlist.csv --library "D:\\Music" --format wav
+dj fetch-missing playlist.csv --library "D:\\Music" --no-soundeo   # YouTube only
 
 # As part of the pipeline: download into the library being run, then analyze
 dj run "D:\\Music" --fetch-missing ./playlists
@@ -298,15 +299,25 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
 2. fuzzy-matches each track against the audio files already in `--library`,
    requiring artist agreement so unrelated same-title tracks and alternate
    remixes of a track you only own the original of count as missing
-3. downloads the missing tracks via `yt-dlp` YouTube search, **verifying
-   duration**: only results within `--duration-tolerance` seconds (default 3)
-   of the Spotify track are accepted, trying the closest candidate first and
-   up to `--max-attempts` (default 3) before reporting the track as unmatched.
-   Audio is extracted to WAV and converted losslessly to AIFF by default
-   (`--format wav` to keep WAV)
-4. names tool downloads as `Artist - Track[U]` so YouTube-sourced/converted
-   files are distinguishable from curated originals. Embedded Title/Artist/
-   Album/Genre/Year/Label metadata comes from the playlist row.
+3. downloads the missing tracks from **Soundeo first, YouTube as fallback**:
+   - **Soundeo** (your music-pool subscription, original AIFF) is used when
+     `SOUNDEO_USER`/`SOUNDEO_PASS` are set in `.env` and `--format aiff` (the
+     default). Per track: search (free); if found and the daily quota (resets
+     midnight CET) isn't spent, download the original AIFF **unmarked**; if the
+     quota is spent, defer to tomorrow (status `quota_skip`, not YouTubed).
+     `--no-soundeo` forces YouTube-only.
+   - **YouTube** via `yt-dlp` is used when a track isn't on Soundeo (or Soundeo
+     is off/login fails), **verifying duration**: only results within
+     `--duration-tolerance` seconds (default 3) of the Spotify track are
+     accepted, trying the closest candidate first and up to `--max-attempts`
+     (default 3). Audio is extracted to WAV and converted losslessly to AIFF
+     by default (`--format wav` to keep WAV).
+4. names YouTube downloads `Artist - Track[U]` so they're distinguishable from
+   curated originals; Soundeo downloads are unmarked (`Artist - Track`) and
+   treated as curated originals — so a Soundeo download supersedes and prunes
+   any prior `[U]` copy, and present `[U]` tracks are upgraded to Soundeo AIFF
+   when available. Embedded Title/Artist/Album/Genre/Year/Label metadata comes
+   from the playlist row.
 5. treats curated Original/Extended variants as present for unversioned Spotify
    titles, while true remixes stay distinct
 6. prunes `[U]` downloads once a curated unmarked original or Original/Extended
@@ -315,10 +326,11 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
    re-downloaded.
 
 Reports and a download log are written to `<library>/outputs/fetch/`
-(`matched_report.csv`, `missing_report.csv`, `download_log.csv`, and
-`unmatched_report.csv` for tracks with no in-tolerance result). `--dry-run`
-reports the missing set without downloading. Requires `yt-dlp` and `ffmpeg`
-on `PATH`.
+(`matched_report.csv`, `missing_report.csv`, `download_log.csv` with a `source`
+column, and `unmatched_report.csv` for tracks with no in-tolerance result).
+`--dry-run` reports the missing set without downloading. The YouTube fallback
+requires `yt-dlp` and `ffmpeg` on `PATH`; the Soundeo source requires
+`SOUNDEO_USER`/`SOUNDEO_PASS` in `.env` (alongside the Spotify/Songstats keys).
 
 The same logic is available inside the pipeline via `dj run --fetch-missing
 CSV...`, which runs as Phase 0 and downloads into the first `dj run` path

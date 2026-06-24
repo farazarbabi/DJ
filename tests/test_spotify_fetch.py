@@ -26,6 +26,8 @@ from dj_tools.spotify_fetch import (
     tool_file_for,
     version_key,
 )
+from dj_tools import spotify_fetch as sf
+from dj_tools import soundeo as so
 
 CSV_HEADER = (
     "Track URI,Track Name,Album Name,Artist Name(s),Release Date,"
@@ -532,3 +534,121 @@ def test_embed_metadata_writes_id3_tags(tmp_path):
     assert str(tags.get("TCON")) == "melodic techno"
     assert str(tags.get("TDRC")) == "2023"
     assert str(tags.get("TPUB")) == "Get Physical Music"
+
+
+# --------------------------------------------------------------------------- #
+# Source routing: Soundeo (primary) -> YouTube (fallback)
+# --------------------------------------------------------------------------- #
+class _FakeSoundeo:
+    """Stand-in for SoundeoClient: serves a single optional result."""
+
+    audio_format = "aiff"
+
+    def __init__(self, result=None, quota_exhausted=False):
+        self.result = result
+        self.quota_exhausted = quota_exhausted
+        self.download_calls = 0
+        self.closed = False
+
+    def login(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def search(self, track):
+        return [self.result] if self.result else []
+
+    def pick(self, track, results):
+        return results[0] if results else None
+
+    def download(self, result, dest):
+        self.download_calls += 1
+        if self.quota_exhausted:
+            raise so.SoundeoQuotaExceeded("quota")
+        with open(dest, "wb") as f:
+            f.write(b"AIFFdata")
+
+
+def _yt_stub(monkeypatch):
+    def fake_dl(track, dest_dir, **kw):
+        p = os.path.join(dest_dir, track.target_basename(sf.SOURCE_MARKER) + ".aiff")
+        with open(p, "wb") as f:
+            f.write(b"YT")
+        return sf.DownloadOutcome("ok", p, "youtube-stub", "youtube")
+    monkeypatch.setattr(sf, "download_track", fake_dl)
+
+
+def test_acquire_prefers_soundeo_unmarked(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)
+    track = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
+    fake = _FakeSoundeo(so.SoundeoResult("1", "Artist", "Tune", 200, formats=["aiff"]))
+    out = sf.acquire_track(track, str(tmp_path), soundeo=fake, quota=sf._QuotaState())
+    assert out.status == "ok" and out.source == "soundeo"
+    assert (tmp_path / "Artist - Tune.aiff").exists()       # unmarked
+    assert not (tmp_path / "Artist - Tune[U].aiff").exists()
+
+
+def test_acquire_falls_back_to_youtube_when_absent(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)
+    track = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
+    fake = _FakeSoundeo(result=None)  # not on Soundeo
+    out = sf.acquire_track(track, str(tmp_path), soundeo=fake, quota=sf._QuotaState())
+    assert out.source == "youtube"
+    assert (tmp_path / "Artist - Tune[U].aiff").exists()    # marked
+
+
+def test_acquire_quota_skip_and_no_further_attempts(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)
+    quota = sf._QuotaState()
+    fake = _FakeSoundeo(
+        so.SoundeoResult("1", "Artist", "Tune", 200, formats=["aiff"]),
+        quota_exhausted=True,
+    )
+    t1 = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
+    out1 = sf.acquire_track(t1, str(tmp_path), soundeo=fake, quota=quota)
+    assert out1.status == "quota_skip" and quota.exhausted
+    # Second on-Soundeo track: already exhausted -> immediate skip, no download.
+    t2 = PlaylistTrack(name="Other", artists=["Artist"], duration_sec=200)
+    fake.result = so.SoundeoResult("2", "Artist", "Other", 200, formats=["aiff"])
+    out2 = sf.acquire_track(t2, str(tmp_path), soundeo=fake, quota=quota)
+    assert out2.status == "quota_skip"
+    assert fake.download_calls == 1  # not attempted again after exhaustion
+
+
+def test_acquire_without_soundeo_uses_youtube(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)
+    track = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
+    out = sf.acquire_track(track, str(tmp_path), soundeo=None, quota=sf._QuotaState())
+    assert out.source == "youtube"
+
+
+def test_fetch_missing_routes_soundeo_then_youtube(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "On Soundeo", "Artist A", 200000),
+        _row("b", "Only Youtube", "Artist B", 180000),
+    ])
+
+    def fake_from_env(cls, **kw):
+        return _FakeSoundeo(
+            so.SoundeoResult("s1", "Artist A", "On Soundeo", 200, formats=["aiff"]))
+
+    # Serve a Soundeo hit only for the "On Soundeo" track.
+    fake = _FakeSoundeo(
+        so.SoundeoResult("s1", "Artist A", "On Soundeo", 200, formats=["aiff"]))
+    orig_search = fake.search
+    fake.search = lambda track: orig_search(track) if "soundeo" in track.name.lower() else []
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: fake))
+
+    summary = fetch_missing([csv_path], str(library), audio_format="aiff")
+
+    assert summary["soundeo"] == 1
+    assert summary["youtube"] == 1
+    assert (library / "Artist A - On Soundeo.aiff").exists()        # unmarked Soundeo
+    assert (library / "Artist B - Only Youtube[U].aiff").exists()   # YouTube fallback
+    assert fake.closed
+    log = (library / "outputs" / "fetch" / "download_log.csv").read_text(encoding="utf-8")
+    assert "soundeo" in log and "youtube" in log
