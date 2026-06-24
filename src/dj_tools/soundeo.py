@@ -5,24 +5,30 @@ serves the genuine original **AIFF** releases, far superior to a YouTube rip, so
 ``fetch-missing`` prefers it and falls back to YouTube only when a track is not
 on Soundeo. This automates the user's own paid account.
 
-Soundeo has **no public API**; this client logs in and scrapes the
-server-rendered site with ``httpx`` (a persistent session for cookie
-continuity) + ``lxml.html`` for parsing — no new heavy dependencies.
+Soundeo has **no public API**; this client logs in and drives the site's
+AJAX-JSON endpoints with ``httpx`` (one persistent session for cookie
+continuity) + ``lxml.html`` to parse the embedded result markup — no new heavy
+dependencies. Every endpoint returns a JSON envelope
+(``{content, header, jsActions, success, flash, ...}``) where ``content`` /
+``header`` carry HTML fragments.
 
-Downloads are duration- and quota-limited:
+Flow (pinned from a real HAR capture):
 
-  * search does **not** consume quota; only a download does,
-  * the daily quota resets at midnight CET,
-  * a download that hits the quota raises :class:`SoundeoQuotaExceeded` so the
-    orchestrator can skip the rest for tomorrow rather than YouTube them.
+* **login**  — ``GET`` then ``POST /account/logoreg`` with CakePHP form fields
+  ``_method`` / ``data[User][login]`` / ``data[User][password]`` /
+  ``data[remember]`` (no CSRF token); success is JSON ``success: true``.
+* **search** — ``GET /search?q=<query>``; ``content`` holds
+  ``div.trackitem[data-track-id]`` rows with ``<strong><a>Artist - Title</a>``,
+  ``<time>m:ss</time>`` and ``a.track-download-lnk[data-track-format]`` links
+  (format codes ``1``=MP3, ``2``=WAV, ``3``=AIFF).
+* **download** — ``GET /download/<id>/3`` returns ``jsActions.redirect.url``
+  (a tokenized CDN link on ``dl*.sndstatic.com``); a second ``GET`` of that URL
+  streams the AIFF. Quota does not block search, only the download step.
 
-The concrete HTTP details (login URL + form fields + CSRF token name, the search
-endpoint and its result markup, the per-format download URL, and the
-quota-exhausted response shape) are pinned from a HAR capture of a real session.
-Every such value is centralized in the ``# HAR:`` constants below so wiring the
-real endpoints is a localized edit; the matching (:meth:`SoundeoClient.pick`),
-credential loading, and orchestration around them are source-agnostic and
-already complete.
+Downloads are duration- and quota-limited; the daily quota resets midnight CET.
+A download that cannot return a CDN URL because the limit is spent raises
+:class:`SoundeoQuotaExceeded` so the orchestrator can defer the rest to
+tomorrow rather than YouTube them.
 """
 
 from __future__ import annotations
@@ -40,28 +46,21 @@ if TYPE_CHECKING:  # avoid a runtime import cycle with spotify_fetch
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-# HAR-pinned constants — fill/confirm these from the captured session.
-# --------------------------------------------------------------------------- #
 BASE_URL = "https://soundeo.com"
-# HAR: GET page that carries the login form + CSRF token, and the POST target.
-LOGIN_PAGE_PATH = "/account/login"
-LOGIN_POST_PATH = "/account/login"
-# HAR: form field names on the login POST (confirm exact keys).
-LOGIN_FIELD_USER = "email"
-LOGIN_FIELD_PASS = "password"
-# HAR: CSRF token — the <input name=...> on the login page and the POST key it
-# maps to. Leave CSRF_INPUT_NAME = "" if the site uses no CSRF token.
-CSRF_INPUT_NAME = "_token"
-CSRF_FIELD = "_token"
-# HAR: search endpoint + query param, and the per-format download URL template.
+LOGIN_PATH = "/account/logoreg"          # GET (form) then POST (credentials)
 SEARCH_PATH = "/search"
 SEARCH_QUERY_PARAM = "q"
-# {fmt} in {"aiff","wav","mp3"}; {id} is SoundeoResult.id.
-DOWNLOAD_PATH_TEMPLATE = "/download/{id}/{fmt}"
-FORMAT_CODE = {"aiff": "aiff", "wav": "wav", "mp3": "mp3"}
+DOWNLOAD_INFO_TEMPLATE = "/download/{id}/{fmt}"   # JSON -> jsActions.redirect.url
+# Soundeo numeric format codes (data-track-format on the download links).
+FORMAT_CODE = {"mp3": "1", "wav": "2", "aiff": "3"}
+_CODE_TO_FORMAT = {v: k for k, v in FORMAT_CODE.items()}
+# Substrings in a failed download's flash message that mean "out of quota"
+# rather than a one-off error (so we defer vs. fall back to YouTube). Refine if
+# a real exhausted-quota response surfaces a different wording.
+_QUOTA_HINTS = ("limit", "quota", "reset", "premium", "no downloads",
+                "downloads left", "reached")
 
-_TIMEOUT = 30.0
+_TIMEOUT = 60.0
 _DEFAULT_RATE = 1.0  # max requests/sec (be a polite scraper)
 
 
@@ -119,6 +118,19 @@ def _score(track: PlaylistTrack, result: SoundeoResult) -> float:
     return title_cov if artist_ok else title_cov * 0.7
 
 
+def _parse_mmss(text: str) -> float | None:
+    """'8:25' -> 505.0; '1:02:03' -> 3723.0; None if unparseable."""
+    parts = text.strip().split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    secs = 0.0
+    for n in nums:
+        secs = secs * 60 + n
+    return secs if nums else None
+
+
 class SoundeoClient:
     """Authenticated Soundeo session: login, search, download.
 
@@ -145,7 +157,10 @@ class SoundeoClient:
         self.rate_limit = rate_limit
         self._client = httpx.Client(
             base_url=self.base_url, timeout=_TIMEOUT, follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (dj-tools soundeo client)"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (dj-tools soundeo client)",
+                "X-Requested-With": "XMLHttpRequest",  # site serves the JSON envelope
+            },
             transport=transport,  # tests inject httpx.MockTransport
         )
         self._logged_in = False
@@ -158,8 +173,8 @@ class SoundeoClient:
 
         Loads ``.env`` via the shared registry loader so the same file that
         holds the Spotify/Songstats secrets supplies the Soundeo credentials.
-        Missing credentials disable Soundeo entirely (YouTube-only), which keeps
-        the feature opt-in and fully backward compatible.
+        Missing credentials disable Soundeo entirely (YouTube-only), keeping the
+        feature opt-in and fully backward compatible.
         """
         try:
             from dj_registry.config import RegistryConfig
@@ -191,57 +206,38 @@ class SoundeoClient:
             time.sleep(interval - elapsed)
         self._last_request = time.time()
 
+    def _get_json(self, path: str, **kw) -> dict:
+        self._throttle()
+        resp = self._client.get(path, **kw)
+        resp.raise_for_status()
+        return _as_envelope(resp)
+
     # -- auth --------------------------------------------------------------- #
     def login(self) -> None:
         """Authenticate and retain the session cookies.
 
-        GET the login page, lift the CSRF token (if any), POST credentials.
-        Raises :class:`SoundeoAuthError` on any failure so the orchestrator can
-        degrade to YouTube-only.
+        GET the login form (sets the initial session cookie), then POST the
+        CakePHP-style credential fields. Raises :class:`SoundeoAuthError` on any
+        failure so the orchestrator can degrade to YouTube-only.
         """
         self._throttle()
         try:
-            page = self._client.get(LOGIN_PAGE_PATH)
-            page.raise_for_status()
-            data = {LOGIN_FIELD_USER: self.user, LOGIN_FIELD_PASS: self.password}
-            token = self._extract_csrf(page.text)
-            if CSRF_INPUT_NAME and token:
-                data[CSRF_FIELD] = token
+            self._client.get(LOGIN_PATH).raise_for_status()
             self._throttle()
-            resp = self._client.post(LOGIN_POST_PATH, data=data)
+            resp = self._client.post(LOGIN_PATH, data={
+                "_method": "POST",
+                "data[User][login]": self.user,
+                "data[User][password]": self.password,
+                "data[remember]": "1",
+            })
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             raise SoundeoAuthError(f"login request failed: {exc}") from exc
-        if not self._login_succeeded(resp):
+        env = _as_envelope(resp)
+        if not env.get("success") or "/account/logout" not in (env.get("header") or ""):
             raise SoundeoAuthError("login rejected (check SOUNDEO_USER/SOUNDEO_PASS)")
         self._logged_in = True
         logger.info("soundeo: logged in as %s", self.user)
-
-    @staticmethod
-    def _extract_csrf(html: str) -> str:
-        """Read the CSRF token value from the login page, or '' if none."""
-        if not CSRF_INPUT_NAME:
-            return ""
-        try:
-            from lxml import html as lxml_html
-
-            doc = lxml_html.fromstring(html)
-            nodes = doc.xpath(f'//input[@name="{CSRF_INPUT_NAME}"]/@value')
-            return nodes[0] if nodes else ""
-        except Exception:
-            return ""
-
-    def _login_succeeded(self, resp: httpx.Response) -> bool:
-        """Whether the POST landed in an authenticated state.
-
-        HAR: refine against the real response (a redirect to the dashboard, an
-        auth cookie being set, or absence of an error banner). The cookie check
-        is a sane default for a form-login site.
-        """
-        if any("session" in c.lower() or "auth" in c.lower()
-               for c in self._client.cookies.keys()):
-            return True
-        return resp.status_code == 200 and "logout" in resp.text.lower()
 
     # -- search ------------------------------------------------------------- #
     def search(self, track: PlaylistTrack) -> list[SoundeoResult]:
@@ -249,26 +245,12 @@ class SoundeoClient:
         if not self._logged_in:
             self.login()
         query = f"{track.primary_artist} {track.name}".strip()
-        self._throttle()
         try:
-            resp = self._client.get(SEARCH_PATH, params={SEARCH_QUERY_PARAM: query})
-            resp.raise_for_status()
+            env = self._get_json(SEARCH_PATH, params={SEARCH_QUERY_PARAM: query})
         except httpx.HTTPError as exc:
             logger.warning("soundeo: search failed for %r: %s", query, exc)
             return []
-        return self._parse_results(resp.text)
-
-    @staticmethod
-    def _parse_results(html: str) -> list[SoundeoResult]:
-        """Parse the search-results markup into :class:`SoundeoResult` rows.
-
-        HAR: implement against the real result-row structure (the container
-        selector and the per-row id / artist / title / duration / format
-        attributes). Returns [] when nothing parses.
-        """
-        # Placeholder until the HAR pins the markup; kept import-safe and tested
-        # via SoundeoClient.pick with constructed SoundeoResult lists.
-        return []
+        return _parse_results(env.get("content") or "")
 
     def pick(
         self, track: PlaylistTrack, results: list[SoundeoResult],
@@ -280,7 +262,7 @@ class SoundeoClient:
         known) the lengths to agree within ``tolerance`` seconds, so a wrong
         remix/edit is rejected. Ties broken by closest duration.
         """
-        fmt = FORMAT_CODE.get(self.audio_format, self.audio_format)
+        fmt = self.audio_format
         best: tuple[float, float, SoundeoResult] | None = None
         for r in results:
             if r.formats and fmt not in r.formats:
@@ -302,51 +284,102 @@ class SoundeoClient:
     def download(self, result: SoundeoResult, dest_path: str) -> None:
         """Download ``result`` to ``dest_path`` in the client's audio format.
 
-        Raises :class:`SoundeoQuotaExceeded` when the daily quota is spent and
+        Two-step: ``GET /download/<id>/<fmt>`` yields a tokenized CDN URL, then
+        that URL streams the file. Raises :class:`SoundeoQuotaExceeded` when the
+        daily quota is spent (no CDN URL + a limit message) and
         :class:`SoundeoError` on other failures, leaving no partial file.
         """
         if not self._logged_in:
             self.login()
         fmt = FORMAT_CODE.get(self.audio_format, self.audio_format)
-        url = DOWNLOAD_PATH_TEMPLATE.format(id=result.id, fmt=fmt)
-        self._throttle()
+        info = self._get_json(DOWNLOAD_INFO_TEMPLATE.format(id=result.id, fmt=fmt))
+        url = (info.get("jsActions") or {}).get("redirect", {}).get("url", "")
+        if not url:
+            msg = _flash_text(info) or "no download URL returned"
+            if _looks_like_quota(msg):
+                raise SoundeoQuotaExceeded(f"Soundeo download limit reached: {msg}")
+            raise SoundeoError(f"Soundeo download failed: {msg}")
+
         tmp = dest_path + ".part"
         try:
+            self._throttle()
             with self._client.stream("GET", url) as resp:
-                if self._is_quota_response(resp):
-                    raise SoundeoQuotaExceeded(
-                        "daily Soundeo download quota exhausted (resets midnight CET)")
                 resp.raise_for_status()
+                ctype = resp.headers.get("content-type", "").lower()
+                if "audio" not in ctype and "octet-stream" not in ctype:
+                    raise SoundeoError(f"unexpected content-type {ctype!r} from CDN")
                 os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
                 with open(tmp, "wb") as f:
                     for chunk in resp.iter_bytes():
                         f.write(chunk)
-        except SoundeoQuotaExceeded:
-            _unlink_quiet(tmp)
-            raise
         except httpx.HTTPError as exc:
             _unlink_quiet(tmp)
             raise SoundeoError(f"download failed: {exc}") from exc
+        except SoundeoError:
+            _unlink_quiet(tmp)
+            raise
         if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
             _unlink_quiet(tmp)
             raise SoundeoError("download produced no data")
         os.replace(tmp, dest_path)
 
-    @staticmethod
-    def _is_quota_response(resp: httpx.Response) -> bool:
-        """Detect a quota-exhausted response before reading the body.
 
-        HAR: refine against the real signal (a 402/403, a redirect to an
-        upgrade page, or a JSON/HTML error). The content-type heuristic below —
-        a non-audio body where an audio download was expected — is a safe
-        default that also catches "you hit your limit" HTML pages.
-        """
-        ctype = resp.headers.get("content-type", "").lower()
-        if resp.status_code in (402, 403, 429):
-            return True
-        if resp.status_code == 200 and ("text/html" in ctype or "application/json" in ctype):
-            return True
-        return False
+# --------------------------------------------------------------------------- #
+# Parsing helpers
+# --------------------------------------------------------------------------- #
+def _as_envelope(resp: httpx.Response) -> dict:
+    """Soundeo replies with a JSON envelope; tolerate a non-JSON body."""
+    try:
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _flash_text(env: dict) -> str:
+    """Human-readable text from the envelope's flash/alerts, for error messages."""
+    bits = []
+    for key in ("flash", "alerts"):
+        v = env.get(key)
+        if v:
+            bits.append(v if isinstance(v, str) else str(v))
+    return " ".join(bits).strip()
+
+
+def _looks_like_quota(message: str) -> bool:
+    m = message.lower()
+    return any(h in m for h in _QUOTA_HINTS)
+
+
+def _parse_results(content_html: str) -> list[SoundeoResult]:
+    """Parse the search ``content`` HTML into :class:`SoundeoResult` rows."""
+    if not content_html.strip():
+        return []
+    try:
+        from lxml import html as lxml_html
+    except Exception:
+        logger.warning("soundeo: lxml not available; cannot parse search results")
+        return []
+    doc = lxml_html.fromstring(content_html)
+    out: list[SoundeoResult] = []
+    for item in doc.xpath('//div[contains(concat(" ", normalize-space(@class), " "), " trackitem ")]'):
+        tid = item.get("data-track-id") or ""
+        if not tid:
+            continue
+        label_nodes = item.xpath('.//strong//a/text()')
+        label = (label_nodes[0] if label_nodes else "").strip()
+        artist, _, title = label.partition(" - ")
+        if not title:
+            artist, title = "", label
+        time_nodes = item.xpath('.//time/text()')
+        duration = _parse_mmss(time_nodes[0]) if time_nodes else None
+        codes = item.xpath('.//a[contains(@class,"track-download-lnk")]/@data-track-format')
+        formats = [_CODE_TO_FORMAT.get(c, c) for c in codes]
+        out.append(SoundeoResult(
+            id=tid, artist=artist.strip(), title=title.strip(),
+            duration_sec=duration, formats=formats,
+        ))
+    return out
 
 
 def _unlink_quiet(path: str) -> None:

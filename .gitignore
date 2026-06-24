@@ -216,3 +216,6 @@ config
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Soundeo HAR captures (contain session cookies + credentials)
+*.har
