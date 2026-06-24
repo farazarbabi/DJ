@@ -963,7 +963,14 @@ def fetch_missing(
                     f"--no-soundeo to download from YouTube only."
                 ) from exc
     elif use_soundeo and audio_format != "aiff":
-        logger.info("soundeo: skipped (only used for --format aiff)")
+        logger.info("Soundeo: skipped (only used for --format aiff) — using YouTube only")
+
+    if soundeo is not None:
+        logger.info("Source order: Soundeo (original AIFF) first, YouTube fallback")
+    elif not use_soundeo:
+        logger.info("Source: YouTube only (--no-soundeo)")
+    elif audio_format == "aiff":
+        logger.info("Source: YouTube only (no SOUNDEO_USER/SOUNDEO_PASS configured)")
 
     has_ytdlp, has_ffmpeg = tools_available()
     if not has_ytdlp:
@@ -1006,25 +1013,29 @@ def fetch_missing(
                               t.search_query(), outcome.outfile, outcome.detail])
                 lf.flush()
                 prefix = f"[{i}/{len(work)}]"
+                label = f"{t.artist_display} - {t.name}"
                 if outcome.status == "skip":
                     summary["skipped"] += 1
-                    logger.info("%s skip (duration ok): %s", prefix, t.target_basename())
+                    logger.info("%s PRESENT  (already downloaded, duration ok): %s",
+                                prefix, label)
                 elif outcome.status == "quota_skip":
                     summary["quota_skipped"] += 1
-                    logger.info("%s soundeo quota — deferring to tomorrow: %s",
-                                prefix, t.name)
+                    logger.info("%s DEFERRED (Soundeo quota reached, retry after midnight CET): %s",
+                                prefix, label)
                 elif outcome.status == "no_match":
                     summary["unmatched"] += 1
                     summary["unmatched_results"].append((t, outcome.detail))
-                    logger.warning("%s NO MATCH within ±%.0fs: %s — %s",
-                                   prefix, tolerance, t.name, outcome.detail)
+                    logger.warning("%s NOT FOUND on Soundeo or YouTube: %s  (%s)",
+                                   prefix, label, outcome.detail)
                 elif outcome.status == "fail":
                     summary["failed"] += 1
-                    logger.warning("%s FAILED: %s — %s", prefix, t.name, outcome.detail)
+                    logger.warning("%s FAILED   (%s): %s  (%s)",
+                                   prefix, outcome.source, label, outcome.detail)
                 else:
                     summary["downloaded"] += 1
                     summary[outcome.source] = summary.get(outcome.source, 0) + 1
-                    logger.info("%s ok (%s): %s", prefix, outcome.source,
+                    src = "SOUNDEO " if outcome.source == "soundeo" else "YOUTUBE "
+                    logger.info("%s %s -> %s", prefix, src,
                                 os.path.basename(outcome.outfile))
     finally:
         if soundeo is not None:

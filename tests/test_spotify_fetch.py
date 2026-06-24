@@ -715,3 +715,22 @@ def test_fetch_missing_stops_on_quota_without_youtube(tmp_path, monkeypatch):
     assert summary["deferred"] == 2        # the rest, stopped (not YouTubed)
     assert summary["youtube"] == 0
     assert not any(p.name.endswith("[U].aiff") for p in library.iterdir())
+
+
+def test_acquire_soundeo_download_error_falls_back_to_youtube(tmp_path, monkeypatch):
+    _yt_stub(monkeypatch)
+    track = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
+
+    class ErrClient:  # found on Soundeo, but the download endpoint 404s
+        def search(self, t):
+            return [so.SoundeoResult("1", "Artist", "Tune", 200, formats=["aiff"])]
+
+        def pick(self, t, results):
+            return results[0]
+
+        def download(self, result, dest):
+            raise so.SoundeoError("not available on Soundeo (HTTP 404)")
+
+    out = sf.acquire_track(track, str(tmp_path), soundeo=ErrClient(), quota=sf._QuotaState())
+    assert out.source == "youtube"                       # per-track backfall
+    assert (tmp_path / "Artist - Tune[U].aiff").exists()

@@ -234,3 +234,33 @@ def test_download_rejects_non_audio_cdn_body(tmp_path):
         c.download(SoundeoResult("1", "A", "B", formats=["aiff"]), str(tmp_path / "x.aiff"))
     c.close()
     assert not (tmp_path / "x.aiff").exists()
+
+
+def test_download_404_raises_soundeo_error_not_quota(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "sndstatic.com" in request.url.host:
+            return httpx.Response(200, headers={"content-type": "audio/x-aiff"}, content=b"x")
+        path = request.url.path
+        if path == "/account/logoreg":
+            return (httpx.Response(200, json={"success": True, "header": _LOGGED_IN_HEADER})
+                    if request.method == "POST" else httpx.Response(200, json={"success": False}))
+        if path.startswith("/download/"):
+            return httpx.Response(404, json={"success": False})
+        return httpx.Response(404)
+
+    c = _client(handler)
+    c.login()
+    with pytest.raises(SoundeoError) as ei:
+        c.download(SoundeoResult("14272211", "A", "B", formats=["aiff"]), str(tmp_path / "x.aiff"))
+    assert not isinstance(ei.value, SoundeoQuotaExceeded)  # 404 != quota
+    c.close()
+    assert not (tmp_path / "x.aiff").exists()
+
+
+def test_pick_skips_when_formats_unknown():
+    # No parsed download links (e.g. vote-required/upcoming) -> not picked.
+    track = _track("Some Tune", ["Artist"], duration=200)
+    results = [SoundeoResult("9", "Artist", "Some Tune", 200, formats=[])]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results) is None
+    c.close()

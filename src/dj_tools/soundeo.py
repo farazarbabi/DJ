@@ -282,7 +282,11 @@ class SoundeoClient:
         fmt = self.audio_format
         best: tuple[float, float, SoundeoResult] | None = None
         for r in results:
-            if r.formats and fmt not in r.formats:
+            # Require the format to be explicitly offered. Tracks without an
+            # AIFF download link (mp3-only, or vote-required/upcoming entries
+            # that parse to no formats) are skipped so the caller backfalls to
+            # YouTube instead of hitting a 404 on the download endpoint.
+            if fmt not in r.formats:
                 continue
             score = _score(track, r)
             if score < threshold:
@@ -309,7 +313,16 @@ class SoundeoClient:
         if not self._logged_in:
             self.login()
         fmt = FORMAT_CODE.get(self.audio_format, self.audio_format)
-        info = self._get_json(DOWNLOAD_INFO_TEMPLATE.format(id=result.id, fmt=fmt))
+        try:
+            info = self._get_json(DOWNLOAD_INFO_TEMPLATE.format(id=result.id, fmt=fmt))
+        except httpx.HTTPStatusError as exc:
+            # e.g. 404: this track isn't downloadable on Soundeo (upcoming /
+            # vote-required / format not offered). Treat as "not available here"
+            # so the caller backfalls to YouTube for this one track.
+            raise SoundeoError(
+                f"not available on Soundeo (HTTP {exc.response.status_code})") from exc
+        except httpx.HTTPError as exc:
+            raise SoundeoError(f"download info request failed: {exc}") from exc
         url = (info.get("jsActions") or {}).get("redirect", {}).get("url", "")
         if not url:
             msg = _flash_text(info) or "no download URL returned"
