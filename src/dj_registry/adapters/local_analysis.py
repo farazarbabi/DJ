@@ -34,12 +34,17 @@ logger = logging.getLogger(__name__)
 def _default_analysis_workers() -> int:
     """Pick a sensible default worker count for cache-miss analysis.
 
-    Each worker runs its own Demucs model (~90% of per-track cost) plus decoded
-    audio, so the limit is RAM, not just core count. Leave a couple of cores for
-    the OS/parent (cache writes) and budget ~2 GB per worker.
+    Demucs (~90% of per-track cost) already multi-threads a single inference, so
+    serial is not single-core. Measured per-core throughput peaks at ~2 threads
+    per worker and falls off sharply above that — so the win comes from running
+    ~cpu/2 independent tracks in parallel, each pinned to ~2 threads, which fills
+    all cores at their most efficient operating point (see _pool_worker_init).
+
+    Each worker holds its own Demucs model + decoded audio, so RAM (not cores) is
+    the real ceiling — budget ~2 GB per worker.
     """
     cpu = os.cpu_count() or 1
-    workers = max(1, cpu - 2)
+    workers = max(1, cpu // 2)  # ~2 threads/worker -> ~cpu total threads
     try:
         import psutil
 
@@ -50,7 +55,7 @@ def _default_analysis_workers() -> int:
         workers = min(workers, 8)
     # Hard cap — beyond this, per-track gains are eaten by the parent's serial
     # cache-write/checkpoint cost and model-load overhead.
-    return max(1, min(workers, 12))
+    return max(1, min(workers, 16))
 
 
 def _pool_worker_init(threads: int) -> None:
