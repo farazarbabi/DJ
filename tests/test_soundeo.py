@@ -20,6 +20,8 @@ from dj_tools.soundeo import (
     _parse_mmss,
     _parse_results,
     _score,
+    _search_title,
+    _version_rank,
 )
 from dj_tools.spotify_fetch import PlaylistTrack
 
@@ -159,6 +161,71 @@ def test_pick_prefers_extended_over_original():
     ]
     c = _client(lambda r: httpx.Response(200, json={}))
     assert c.pick(track, results).id == "ext"
+    c.close()
+
+
+def test_search_title_strips_generic_version_keeps_remix():
+    # Generic cuts are stripped so the search finds whichever cut Soundeo lists.
+    assert _search_title("Diclofél - Radio Edit") == "Diclofél"
+    assert _search_title("Title (Original Mix)") == "Title"
+    assert _search_title("Title - Extended Mix") == "Title"
+    # A remixer name is identifying and must stay in the query.
+    assert _search_title("Kryptonite - Mateo! Remix") == "Kryptonite - Mateo! Remix"
+    # No version -> unchanged.
+    assert _search_title("Magna Terram") == "Magna Terram"
+
+
+def test_search_query_omits_radio_edit(monkeypatch):
+    # The failing case: Spotify says "Radio Edit" but Soundeo lists the Original
+    # Mix. The search query must drop "Radio Edit" so the Original Mix is found.
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/account/logoreg":
+            return (httpx.Response(200, json={"success": True, "header": _LOGGED_IN_HEADER})
+                    if request.method == "POST" else httpx.Response(200, json={"success": False}))
+        if path == "/search":
+            seen["q"] = request.url.params.get("q")
+            return httpx.Response(200, json={"success": True, "content": SEARCH_HTML})
+        return httpx.Response(404)
+
+    c = _client(handler)
+    c.search(_track("Diclofél - Radio Edit", ["Julian Schraven"]))
+    c.close()
+    assert seen["q"] == "Julian Schraven Diclofél"
+
+
+def test_version_rank_orders_extended_original_plain_radio():
+    assert _version_rank("Title (Extended Mix)") == 0
+    assert _version_rank("Title (Original Mix)") == 1
+    assert _version_rank("Title") == 2
+    assert _version_rank("Title (Radio Edit)") == 3
+
+
+def test_pick_prefers_original_over_radio_edit():
+    # Spotify title is a Radio Edit, but the Original Mix must win when both list.
+    track = _track("Diclofél - Radio Edit", ["Julian Schraven"])
+    results = [
+        SoundeoResult("radio", "Julian Schraven", "Diclofél (Radio Edit)",
+                      190, formats=["aiff"]),
+        SoundeoResult("orig", "Julian Schraven", "Diclofél (Original Mix)",
+                      420, formats=["aiff"]),
+    ]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "orig"
+    c.close()
+
+
+def test_pick_prefers_plain_over_radio_edit():
+    track = _track("Diclofél - Radio Edit", ["Julian Schraven"])
+    results = [
+        SoundeoResult("radio", "Julian Schraven", "Diclofél (Radio Edit)",
+                      420, formats=["aiff"]),  # longer, but still the radio cut
+        SoundeoResult("plain", "Julian Schraven", "Diclofél", 190, formats=["aiff"]),
+    ]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "plain"
     c.close()
 
 

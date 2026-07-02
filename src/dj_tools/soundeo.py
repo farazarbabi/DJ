@@ -64,6 +64,46 @@ _QUOTA_HINTS = ("limit", "quota", "reset", "premium", "no downloads",
 _TIMEOUT = 60.0
 _DEFAULT_RATE = 1.0  # max requests/sec (be a polite scraper)
 
+# A trailing *generic* version descriptor on a Spotify title (e.g. "Diclofél -
+# Radio Edit", "Title (Original Mix)"). Stripped from the **search query** only:
+# Soundeo may list the very same song under a different generic cut (usually the
+# Original/Extended Mix), so searching the raw "… Radio Edit" would miss it. A
+# remixer name is NOT generic and is deliberately kept, so a requested remix
+# still narrows the search. `pick()` does the final version selection.
+_SEARCH_VERSION_RE = re.compile(
+    r"\s*[-(\[]\s*(?:original|extended|radio)"
+    r"(?:\s+(?:mix|version|edit|re-?edit|cut))?\s*[)\]]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _search_title(name: str) -> str:
+    """Drop a trailing generic version descriptor for the Soundeo search query.
+
+    ``"Diclofél - Radio Edit"`` / ``"Title (Original Mix)"`` -> ``"Diclofél"`` /
+    ``"Title"`` so the search finds the track whichever generic cut Soundeo
+    lists; a remixer name (``"- Mateo! Remix"``) is left intact.
+    """
+    return _SEARCH_VERSION_RE.sub("", name).strip() or name.strip()
+
+
+def _version_rank(title: str) -> int:
+    """Preference rank for a Soundeo candidate's cut: lower is better.
+
+    Extended Mix (0) > Original Mix (1) > plain / other (2) > Radio Edit (3).
+    So every track prefers the Extended cut, then the Original, then a
+    suffix-less listing, and picks a Radio Edit — the short broadcast cut, least
+    useful for DJing — only when nothing better matches.
+    """
+    t = title.lower()
+    if "extended" in t:
+        return 0
+    if "radio" in t:
+        return 3
+    if "original" in t:
+        return 1
+    return 2
+
 
 class SoundeoError(Exception):
     """Base class for Soundeo client failures."""
@@ -277,7 +317,7 @@ class SoundeoClient:
         """Search Soundeo for ``track`` (does not consume download quota)."""
         if not self._logged_in:
             self.login()
-        query = f"{track.primary_artist} {track.name}".strip()
+        query = f"{track.primary_artist} {_search_title(track.name)}".strip()
         try:
             env = self._get_json(SEARCH_PATH, params={SEARCH_QUERY_PARAM: query})
         except httpx.HTTPError as exc:
@@ -298,8 +338,9 @@ class SoundeoClient:
         "Title (Extended Mix)" of the same song all match a suffix-less Spotify
         title. A genuine remix carries extra remixer-name tokens and is rejected
         unless the Spotify title itself asked for that remix (then those tokens
-        are part of the query and match). Among the survivors, the Extended Mix
-        wins, then the longest cut; otherwise the Original/only version.
+        are part of the query and match). Among the survivors, cuts are ranked
+        Extended Mix > Original Mix > suffix-less/other > Radio Edit (see
+        :func:`_version_rank`), breaking ties by the longest duration.
         """
         from .spotify_fetch import tokens  # lazy: avoid import cycle
 
@@ -330,8 +371,7 @@ class SoundeoClient:
             matches.append(r)
         if not matches:
             return None
-        matches.sort(key=lambda r: (0 if "extended" in r.title.lower() else 1,
-                                    -(r.duration_sec or 0.0)))
+        matches.sort(key=lambda r: (_version_rank(r.title), -(r.duration_sec or 0.0)))
         return matches[0]
 
     # -- download ----------------------------------------------------------- #
