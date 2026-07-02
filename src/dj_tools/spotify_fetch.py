@@ -132,6 +132,7 @@ class PlaylistTrack:
     year: str = ""
     genres: list[str] = field(default_factory=list)
     label: str = ""
+    added_at: str = ""
 
     @property
     def primary_artist(self) -> str:
@@ -195,6 +196,7 @@ def parse_playlist_csv(path: str | os.PathLike) -> list[PlaylistTrack]:
                     year=release[:4],
                     genres=genres,
                     label=(row.get("Record Label") or "").strip(),
+                    added_at=(row.get("Added At") or "").strip(),
                 )
             )
     return tracks
@@ -735,25 +737,49 @@ def generate_spotify_playlists(
         playlist_tracks = parse_playlist_csv(csv_path)
         if not playlist_tracks:
             continue
+        # Newest-first: the Exportify "Added At" column is ISO-8601 UTC, which
+        # sorts lexically as chronologically. reverse=True puts the most
+        # recently added track at the top; the stable sort keeps CSV order
+        # among equal timestamps, and rows with no "Added At" sort last.
+        playlist_tracks.sort(key=lambda t: t.added_at, reverse=True)
         lines = ["#EXTM3U"]
+        seen: set[str] = set()
         resolved = 0
+        duplicates = 0
         for t in playlist_tracks:
             path, score = best_match(t, index)
-            if path and score >= threshold:
-                lines.append(f"#EXTINF:-1,{Path(path).stem}")
-                lines.append(os.path.abspath(path))
-                resolved += 1
+            if not (path and score >= threshold):
+                continue
+            abs_path = os.path.abspath(path)
+            # A Spotify export can list the same track twice, and two distinct
+            # rows (e.g. an alternate title/version) can resolve to the same
+            # library file — either way, emit each file at most once per
+            # playlist so Rekordbox doesn't import duplicate entries. normcase
+            # so Windows' case-insensitive paths dedupe correctly.
+            key = os.path.normcase(abs_path)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            lines.append(f"#EXTINF:-1,{Path(path).stem}")
+            lines.append(abs_path)
+            resolved += 1
         name = _playlist_stem(playlist_tracks[0].playlist or os.path.basename(csv_path))
         out_dir.mkdir(parents=True, exist_ok=True)
         # utf-8-sig: Rekordbox requires a UTF-8 BOM on .m3u8 files, else entries
         # with non-ASCII path characters fail to match and the playlist imports
         # empty.
         (out_dir / f"{name}.m3u8").write_text("\n".join(lines), encoding="utf-8-sig")
-        missed = len(playlist_tracks) - resolved
+        missed = len(playlist_tracks) - resolved - duplicates
         added += resolved
         skipped += missed
         written += 1
-        suffix = f" ({missed} skipped)" if missed else ""
+        notes = []
+        if missed:
+            notes.append(f"{missed} skipped")
+        if duplicates:
+            notes.append(f"{duplicates} dup")
+        suffix = f" ({', '.join(notes)})" if notes else ""
         logger.info(
             "fetch-missing: playlist %s.m3u8 -> %d/%d track(s) resolved%s",
             name, resolved, len(playlist_tracks), suffix,

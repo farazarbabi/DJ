@@ -35,10 +35,10 @@ CSV_HEADER = (
 )
 
 
-def _row(uri, name, artists, ms):
+def _row(uri, name, artists, ms, added_at="2020-01-01T00:00:00Z"):
     return (
         f"spotify:track:{uri},\"{name}\",\"Album\",\"{artists}\","
-        f"2020-01-01,{ms},50,false,user,2020-01-01T00:00:00Z,\"\",\"Label\"\n"
+        f"2020-01-01,{ms},50,false,user,{added_at},\"\",\"Label\"\n"
     )
 
 
@@ -477,6 +477,53 @@ def test_generate_spotify_playlists_resolves_downloaded_marked_file(tmp_path):
         library / "outputs" / "playlists" / "spotify" / "p.m3u8"
     ) if not ln.startswith("#")]
     assert paths[0].endswith("Elodie Gervaise - Free Babe[U].aiff")
+
+
+def test_generate_spotify_playlists_dedupes_repeated_tracks(tmp_path):
+    # A Spotify export can list the same track twice, and two rows (an alternate
+    # title/version) can resolve to the same library file — each file must
+    # appear at most once per playlist so Rekordbox has no duplicate entries.
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Skyfall", "Adele", 286000),          # exact duplicate row
+        _row("c", "Skyfall (Extended Mix)", "Adele", 286000),  # variant → same file
+    ])
+
+    summary = generate_spotify_playlists([csv_path], str(library))
+
+    assert summary["tracks_added"] == 1
+    assert summary["tracks_skipped"] == 0  # the extra rows are dups, not misses
+    paths = [ln for ln in _read_playlist(
+        library / "outputs" / "playlists" / "spotify" / "p.m3u8"
+    ) if not ln.startswith("#")]
+    assert paths == [p for p in paths if p.endswith("Adele - Skyfall (Original Mix).aiff")]
+    assert len(paths) == 1
+
+
+def test_generate_spotify_playlists_orders_newest_added_first(tmp_path):
+    # Playlists list tracks by "Added At" descending (most recently added first).
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    (library / "Iorie - Matter of Fact (Extended Mix).aiff").write_bytes(b"\x00")
+    (library / "Baime - Satara (Original Mix).aiff").write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Skyfall", "Adele", 286000, added_at="2021-06-01T00:00:00Z"),
+        _row("b", "Satara", "Baime", 300000, added_at="2023-01-15T00:00:00Z"),  # newest
+        _row("c", "Matter of Fact", "Iorie", 357000, added_at="2019-03-10T00:00:00Z"),  # oldest
+    ])
+
+    generate_spotify_playlists([csv_path], str(library))
+
+    paths = [ln for ln in _read_playlist(
+        library / "outputs" / "playlists" / "spotify" / "p.m3u8"
+    ) if not ln.startswith("#")]
+    assert paths[0].endswith("Baime - Satara (Original Mix).aiff")
+    assert paths[1].endswith("Adele - Skyfall (Original Mix).aiff")
+    assert paths[2].endswith("Iorie - Matter of Fact (Extended Mix).aiff")
 
 
 def test_playlist_stem_drops_csv_and_sanitizes():
