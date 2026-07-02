@@ -78,6 +78,7 @@ DJ/
       by_key/                 optional with --fine-playlists
       by_subgenre/            optional with --fine-playlists
       spotify/                one .m3u8 per fetched Spotify CSV
+      collection.xml          Rekordbox XML (tracks + playlist tree + key/BPM/beatgrid/cues), default
   settings.toml             tunable derived-scoring parameters
   src/
   tests/
@@ -101,6 +102,29 @@ dj run --no-songstats
 dj run --force-extract
 dj vibe-audit
 ```
+
+### Rekordbox collection (get playlists onto CDJ/XDJ)
+
+Every `dj run` writes a single Rekordbox XML at
+`outputs/playlists/collection.xml`. It carries every library track with its
+canonical key, BPM, a beatgrid (`TEMPO`), and any generated cue points
+(`POSITION_MARK`), plus the full playlist tree mirroring `outputs/playlists/`
+(categorical, grouper, and Spotify playlists).
+
+Import it once via Rekordbox's XML bridge
+(Preferences → Advanced → Database → *rekordbox xml* → set the imported library
+to this file), drag the tree into your collection — it imports **pre-analyzed**,
+so Rekordbox does not re-analyze — then Export to USB for CDJ/XDJ.
+
+```powershell
+dj run "D:\\Music"                                            # writes collection.xml by default
+dj run "D:\\Music" --rekordbox-collection "D:\\Music\\rb.xml"  # override output path
+dj run "D:\\Music" --no-rekordbox-collection                  # skip it
+dj export-rekordbox "D:\\Music"                               # regenerate from an existing registry (no full run)
+```
+
+The fully standalone route (writing a CDJ USB database with no Rekordbox at all)
+is intentionally out of scope here; see `specs/standalone_usb_device_export.md`.
 
 Generate Rekordbox cue points as part of the unified run. Cue generation is
 opt-in and requires a Rekordbox XML export, either supplied with

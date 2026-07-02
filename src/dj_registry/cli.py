@@ -692,7 +692,8 @@ def main(argv: list[str] | None = None) -> int:
     # analyze
     p_an = sub.add_parser("analyze", help="Run local key analysis")
     p_an.add_argument("--no-essentia", action="store_true")
-    p_an.add_argument("-w", "--workers", type=int, default=1)
+    p_an.add_argument("-w", "--workers", type=int, default=0,
+                      help="Analysis workers (0 = auto; 1 = serial)")
     p_an.add_argument("--output", default="./outputs/registry")
     add_no_progress(p_an)
 
@@ -890,7 +891,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--dry-run", action="store_true", default=True)
     p_run.add_argument("--write-tags", action="store_true")
     p_run.add_argument("--no-essentia", action="store_true")
-    p_run.add_argument("-w", "--workers", type=int, default=1)
+    p_run.add_argument("-w", "--workers", type=int, default=0,
+                       help="Analysis workers (0 = auto; 1 = serial)")
     p_run.add_argument("--output", default="./outputs/registry")
     add_no_progress(p_run)
 

@@ -51,7 +51,9 @@ class SectionMap:
 
 def analyze_sections(track_audio: TrackAudio) -> SectionMap:
     """Detect sections by analyzing bar-level energy envelope."""
-    onset_env = librosa.onset.onset_strength(y=track_audio.y, sr=track_audio.sr)
+    onset_env = track_audio.onset_env
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=track_audio.y, sr=track_audio.sr)
     beat_frames = track_audio.beat_frames
 
     # Compute per-bar energy

@@ -33,6 +33,11 @@ dj run --no-songstats
 dj run --force-extract
 dj vibe-audit
 
+# Rekordbox XML collection (written by default to <playlists>/collection.xml)
+dj run "D:\\Music" --rekordbox-collection "D:\\Music\\rb.xml"  # override path
+dj run "D:\\Music" --no-rekordbox-collection                   # skip it
+dj export-rekordbox "D:\\Music"                                # regenerate from an existing registry
+
 # Fetch tracks from Spotify playlist CSVs that aren't in the library yet
 dj fetch-missing playlist.csv --library "D:\\Music"
 dj fetch-missing ./playlists --library "D:\\Music" --dry-run
@@ -213,6 +218,13 @@ Playlist output resolution (both `dj run` and `dj-grouper run`):
 - coarse, half-resolution playlists (`groups_coarse/`, `by_key_coarse/`, `by_bpm_coarse/`, `by_subgenre_coarse/`) are written by default
 - `--fine-playlists` additionally writes the full-resolution `groups/`, `by_key/`, `by_subgenre/`
 - `generate_categorical_playlists(..., fine=, coarse=)` gates the two resolutions independently (function defaults stay `fine=True, coarse=False`; the CLI passes `fine=<flag>, coarse=True`)
+
+Rekordbox XML collection (Spec 1, `specs/rekordbox_xml_collection_export.md`):
+
+- `dj run` writes `outputs/playlists/collection.xml` **by default** (Phase 9, last, so its playlist tree captures categorical + grouper + Spotify playlists); `--rekordbox-collection PATH` overrides the path, `--no-rekordbox-collection` skips it. Standalone: `dj export-rekordbox`.
+- `generate_rekordbox_collection()` in `src/dj_registry/sync/rekordbox_export.py` emits a `COLLECTION` from registry tracks (with `TEMPO` beatgrid + `POSITION_MARK` cues, reusing `_append_position_mark` from `cues/export_rekordbox.py`) and a `PLAYLISTS` tree built by walking `outputs/playlists/**/*.m3u8` and mapping abs paths to TrackIDs via `files_master` — no bucketer refactor, mirrors the m3u8 tree exactly.
+- Beatgrid `Inizio` comes from `LogicalTrack.tagger_first_beat_sec` (Librosa `beat_frames[0]` in `compute_tagger_artifacts`, threaded via `local_analysis.py`), falling back to `0.000`.
+- Meant for Rekordbox's rekordbox-xml import bridge (carries key/BPM/beatgrid/cues, so Rekordbox skips re-analysis), then Export to USB. The zero-Rekordbox standalone USB writer is deferred to `specs/standalone_usb_device_export.md`.
 
 Do not document the proposed redesign as if it already exists.
 

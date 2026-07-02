@@ -31,6 +31,11 @@ class TrackAudio:
     tempo: float
     beat_frames: NDArray[np.intp]
     duration: float
+    # Full-track onset-strength envelope, precomputed once at load and shared by
+    # dsp/raw/section analyzers (they otherwise each recompute the identical
+    # onset_strength(y, sr)). None for lazily-built section slices, which compute
+    # their own envelope on the slice.
+    onset_env: NDArray[np.floating] | None = None
 
 
 def _read_native_bpm(path: str) -> float | None:
@@ -141,6 +146,10 @@ def load_audio_features(
 
     y_harmonic, y_percussive = librosa.effects.hpss(y)
 
+    # Shared full-track onset envelope (default params match every downstream
+    # onset_strength(y, sr) call site, so this is a pure dedup).
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+
     tempo, beat_frames = librosa.beat.beat_track(y=y_percussive, sr=sr)
     if hasattr(tempo, "__len__"):
         tempo = float(tempo[0]) if len(tempo) > 0 else 0.0
@@ -165,4 +174,5 @@ def load_audio_features(
         tempo=tempo,
         beat_frames=beat_frames,
         duration=duration,
+        onset_env=onset_env,
     )

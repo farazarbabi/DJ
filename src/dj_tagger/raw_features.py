@@ -23,7 +23,9 @@ def extract_raw_analysis(track_audio: TrackAudio) -> dict:
     """Extract raw intermediate features needed to re-derive tagger outputs."""
     raw: dict[str, float | list[float] | int] = {}
 
-    onset_env = librosa.onset.onset_strength(y=track_audio.y, sr=track_audio.sr)
+    onset_env = track_audio.onset_env
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=track_audio.y, sr=track_audio.sr)
     beat_frames = track_audio.beat_frames
     beat_energies = []
     for i in range(len(beat_frames) - 1):
@@ -64,7 +66,11 @@ def extract_raw_analysis(track_audio: TrackAudio) -> dict:
     else:
         raw["vocal_temporal_bonus"] = 0.0
 
-    onsets = librosa.onset.onset_detect(y=track_audio.y, sr=track_audio.sr)
+    # Reuse the shared envelope; onset_detect(onset_envelope=env) is identical to
+    # letting it recompute onset_strength(y, sr) internally with default params.
+    onsets = librosa.onset.onset_detect(
+        onset_envelope=onset_env, sr=track_audio.sr
+    )
     duration = len(track_audio.y) / track_audio.sr
     raw["onset_rate"] = len(onsets) / duration if duration > 0 else 0.0
 
@@ -113,6 +119,11 @@ def compute_tagger_artifacts(
         logger.warning("Key analysis failed", exc_info=True)
 
     bpm = round(float(raw_analysis.get("tempo", track_audio.tempo)), 1)
+    first_beat_sec = 0.0
+    if len(track_audio.beat_frames) > 0:
+        first_beat_sec = round(
+            float(librosa.frames_to_time(track_audio.beat_frames[0], sr=track_audio.sr)), 3
+        )
     tag = format_tag(
         energy=derived.get("energy"),
         camelot=key_result.camelot if key_result else None,
@@ -128,6 +139,7 @@ def compute_tagger_artifacts(
     tagger_result = {
         "tag": tag,
         "bpm": bpm,
+        "first_beat_sec": first_beat_sec,
         "energy": derived["energy"],
         "key": key_result.key_name if key_result else None,
         "camelot": key_result.camelot if key_result else None,

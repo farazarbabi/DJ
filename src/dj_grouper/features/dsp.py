@@ -21,7 +21,11 @@ def extract_dsp_features(track_audio: TrackAudio) -> dict[str, float]:
     features: dict[str, float] = {}
 
     # --- Rhythm / groove ---
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    # Reuse the precomputed full-track envelope when present (identical to a
+    # fresh onset_strength(y, sr)); section slices carry None and compute their own.
+    onset_env = getattr(track_audio, "onset_env", None)
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
     features["onset_density"] = float(np.mean(onset_env))
     features["onset_variance"] = float(np.var(onset_env))
 
@@ -36,19 +40,21 @@ def extract_dsp_features(track_audio: TrackAudio) -> dict[str, float]:
     features["percussive_energy"] = percussive_e
 
     # --- Timbre / texture ---
+    # One magnitude STFT (n_fft=2048, hop=512 — librosa's spectral_* defaults),
+    # shared by every spectral_* call below instead of each recomputing its own.
     S = np.abs(librosa.stft(y))
 
-    centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    centroid = librosa.feature.spectral_centroid(S=S, sr=sr)[0]
     features["centroid_mean"] = float(np.mean(centroid))
     features["centroid_var"] = float(np.var(centroid))
 
-    rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
+    rolloff = librosa.feature.spectral_rolloff(S=S, sr=sr)[0]
     features["rolloff_mean"] = float(np.mean(rolloff))
 
-    flatness = librosa.feature.spectral_flatness(y=y)[0]
+    flatness = librosa.feature.spectral_flatness(S=S)[0]
     features["flatness_mean"] = float(np.mean(flatness))
 
-    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+    bandwidth = librosa.feature.spectral_bandwidth(S=S, sr=sr)[0]
     features["bandwidth_mean"] = float(np.mean(bandwidth))
 
     # MFCCs (13 coefficients, mean + variance = 26 dims)
@@ -94,12 +100,15 @@ def extract_dsp_features(track_audio: TrackAudio) -> dict[str, float]:
         features["tonal_stability"] = 0.0
 
     # --- MFCCs 1-5 (timbral similarity — the single best feature for "sounds like") ---
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=6)
-    for i in range(1, 6):  # skip MFCC 0 (overall energy, redundant with RMS)
-        features[f"mfcc_{i}_mean"] = float(np.mean(mfcc[i]))
+    # mfcc_1..5_mean are already populated from the n_mfcc=13 block above: DCT
+    # coefficients are independent of n_mfcc (the DCT runs on the full mel
+    # spectrogram then slices), so the old second mfcc(n_mfcc=6) call produced
+    # identical values. Kept as a no-op comment to document the equivalence.
 
     # --- Tonnetz (harmonic network — captures harmonic quality) ---
-    tonnetz = librosa.feature.tonnetz(y=y_h, sr=sr)
+    # Reuse the chroma computed above; tonnetz(chroma=...) is identical to
+    # tonnetz(y=y_h, sr=sr) (which internally runs the same chroma_cqt(y_h, sr)).
+    tonnetz = librosa.feature.tonnetz(chroma=chroma, sr=sr)
     for i in range(6):
         features[f"tonnetz_{i}_mean"] = float(np.mean(tonnetz[i]))
 

@@ -31,6 +31,49 @@ from ..store.csv_store import CsvStore
 logger = logging.getLogger(__name__)
 
 
+def _default_analysis_workers() -> int:
+    """Pick a sensible default worker count for cache-miss analysis.
+
+    Each worker runs its own Demucs model (~90% of per-track cost) plus decoded
+    audio, so the limit is RAM, not just core count. Leave a couple of cores for
+    the OS/parent (cache writes) and budget ~2 GB per worker.
+    """
+    cpu = os.cpu_count() or 1
+    workers = max(1, cpu - 2)
+    try:
+        import psutil
+
+        avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+        ram_cap = max(1, int(avail_gb // 2.0))  # ~2 GB per Demucs worker
+        workers = min(workers, ram_cap)
+    except Exception:
+        workers = min(workers, 8)
+    # Hard cap — beyond this, per-track gains are eaten by the parent's serial
+    # cache-write/checkpoint cost and model-load overhead.
+    return max(1, min(workers, 12))
+
+
+def _pool_worker_init(threads: int) -> None:
+    """Pin per-worker CPU threads so N parallel processes don't oversubscribe.
+
+    Demucs/BLAS default to using every core for a single inference; with N
+    worker processes that means N×cores threads fighting over the CPU. We run N
+    independent tracks in parallel instead, each capped to a slice of the cores.
+    Env vars are set before torch is imported here so OMP/MKL pick them up.
+    """
+    import os as _os
+
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        _os.environ[var] = str(threads)
+    try:
+        import torch
+
+        torch.set_num_threads(max(1, threads))
+    except Exception:
+        pass
+
+
 def _lookup_audio_features(ucache, isrc: str) -> dict[str, float] | None:
     """Look up Songstats audio features from cache by ISRC.
 
@@ -209,6 +252,11 @@ def _extract_tagger_features(result: dict) -> dict:
     if bpm is not None:
         features["bpm"] = str(round(float(bpm)))
 
+    # Beatgrid anchor (first detected beat, seconds)
+    first_beat = result.get("first_beat_sec")
+    if first_beat is not None:
+        features["first_beat_sec"] = f"{float(first_beat):.3f}"
+
     # Key
     camelot = result.get("camelot")
     if camelot:
@@ -259,6 +307,8 @@ def _apply_tagger_to_track(track: LogicalTrack, features: dict) -> None:
         track.tagger_structure = features["structure"]
     if "bpm" in features:
         track.tagger_bpm = features["bpm"]
+    if "first_beat_sec" in features:
+        track.tagger_first_beat_sec = features["first_beat_sec"]
     if "vibe_scores" in features:
         track.tagger_vibe_scores = features["vibe_scores"]
     if "vocal_scores" in features and hasattr(track, "tagger_vocal_scores"):
@@ -512,7 +562,16 @@ def run_analysis(
                 logger.info("Checkpoint: saved cache after %d analyzed tracks", since_checkpoint)
                 since_checkpoint = 0
 
-        if config.analysis_workers <= 1:
+        # Resolve worker count: <= 0 means auto-detect (memory-aware). A single
+        # worker keeps the in-process serial path (torch may still use all cores
+        # for the one Demucs inference — no oversubscription there).
+        workers = config.analysis_workers
+        if workers is None or workers <= 0:
+            workers = _default_analysis_workers()
+        if workers > 1:
+            logger.info("Analysis: using %d parallel workers", workers)
+
+        if workers <= 1:
             analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
             for i, p in enumerate(paths_to_analyze):
                 track_id = cache_misses[i][0]
@@ -528,7 +587,12 @@ def run_analysis(
         else:
             done = 0
             analysis_progress = ProgressBar(n_total, label="Analyze audio", enabled=show_progress)
-            with ProcessPoolExecutor(max_workers=config.analysis_workers) as pool:
+            threads_per_worker = max(1, (os.cpu_count() or workers) // workers)
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_pool_worker_init,
+                initargs=(threads_per_worker,),
+            ) as pool:
                 futures = {
                     pool.submit(
                         _analyze_full,

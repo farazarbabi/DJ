@@ -88,6 +88,7 @@ class LogicalTrack:
     tagger_vocal: str = ""
     tagger_structure: str = ""
     tagger_bpm: str = ""
+    tagger_first_beat_sec: str = ""  # first detected beat, seconds — beatgrid anchor
     tagger_vibe_scores: str = ""
     tagger_vocal_scores: str = ""
     tagger_confidences: str = ""

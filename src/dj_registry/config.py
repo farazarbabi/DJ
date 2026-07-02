@@ -29,6 +29,9 @@ class RegistryConfig:
 
     # Analysis
     run_essentia: bool = True
+    # <= 0 means auto-detect (see local_analysis._default_analysis_workers).
+    # Kept at 1 (serial) as the programmatic default so library/test callers are
+    # deterministic; user-facing CLIs default to 0 (auto).
     analysis_workers: int = 1
 
     # Resolver weights

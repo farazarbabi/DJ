@@ -67,10 +67,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-grouping", action="store_true", help="Skip grouping phase")
     p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings in grouper")
     p_run.add_argument("--no-essentia", action="store_true", help="Skip essentia key analysis")
-    p_run.add_argument("-w", "--workers", type=int, default=1, help="Analysis workers (default: 1)")
+    p_run.add_argument("-w", "--workers", type=int, default=0,
+                       help="Analysis workers (default: 0 = auto — ~cores-2, RAM-capped; pass 1 for serial)")
     p_run.add_argument("--force-extract", action="store_true", help="Force re-extraction in grouper")
     p_run.add_argument("--fine-playlists", action="store_true",
                        help="Also write fine-grained playlists (by_key/, by_subgenre/, groups/) alongside the coarse, half-resolution ones written by default")
+    p_run.add_argument("--rekordbox-collection", dest="rekordbox_collection",
+                       default="", metavar="XML",
+                       help="Override the output path for the Rekordbox XML collection "
+                            "(tracks + playlist tree + key/BPM/beatgrid/cues) written by "
+                            "default for the rekordbox-xml import bridge "
+                            "(default: <playlists>/collection.xml)")
+    p_run.add_argument("--no-rekordbox-collection", dest="no_rekordbox_collection",
+                       action="store_true",
+                       help="Skip writing the Rekordbox XML collection (written by default)")
     p_run.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
     p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
     p_run.add_argument(
@@ -158,6 +168,22 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Reject YouTube results shorter than this many seconds (default: 30)")
     p_fetch.add_argument("--dry-run", action="store_true",
                          help="Only report matched/missing; do not download")
+
+    p_rbx = sub.add_parser(
+        "export-rekordbox",
+        help="Generate a Rekordbox XML collection (tracks + playlist tree + "
+             "key/BPM/beatgrid/cues) from an existing registry, for the "
+             "rekordbox-xml import bridge",
+    )
+    p_rbx.add_argument(
+        "paths", nargs="*", default=["./files"], metavar="PATH",
+        help="Library root(s) (default: ./files) — used to locate outputs/registry "
+             "and outputs/playlists",
+    )
+    p_rbx.add_argument("--output", default=None,
+                       help="Registry output dir (default: <library>/outputs/registry)")
+    p_rbx.add_argument("--out", dest="rekordbox_collection_out", default=None, metavar="XML",
+                       help="Output XML path (default: <playlists>/collection.xml)")
 
     return parser
 
@@ -868,6 +894,30 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     else:
         logger.info("Grouping: skipped (--no-grouping)")
 
+    # Phase 9: Rekordbox XML collection (on by default) — runs last so its
+    # playlist tree captures the categorical, grouper, and Spotify playlists
+    # together. Skip with --no-rekordbox-collection.
+    if not getattr(args, "no_rekordbox_collection", False):
+        try:
+            from dj_registry.sync.rekordbox_export import generate_rekordbox_collection
+            playlists_root = _playlists_dir(args.paths)
+            out_path = getattr(args, "rekordbox_collection", "") or os.path.join(
+                playlists_root, "collection.xml"
+            )
+            res = generate_rekordbox_collection(
+                store.load_tracks(),
+                store.load_files(),
+                store.load_cue_points(),
+                out_path,
+                playlists_root=playlists_root,
+            )
+            logger.info(
+                "Pipeline: rekordbox collection — %s tracks, %s playlists, %s entries -> %s",
+                res["tracks"], res["playlists"], res["entries"], res["out_path"],
+            )
+        except Exception:
+            logger.warning("Rekordbox collection: generation failed, continuing", exc_info=True)
+
     logger.info("Pipeline: total %s", _fmt_elapsed(time.perf_counter() - t_start))
     return 0
 
@@ -933,6 +983,32 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_export_rekordbox(args: argparse.Namespace) -> int:
+    """Generate a Rekordbox XML collection from an existing registry."""
+    from dj_registry.store.csv_store import CsvStore
+    from dj_registry.sync.rekordbox_export import generate_rekordbox_collection
+
+    paths = getattr(args, "paths", None) or ["./files"]
+    output_dir = args.output or os.path.join(paths[0], "outputs", "registry")
+    store = CsvStore(output_dir)
+    playlists_root = _playlists_dir(paths)
+    out_path = getattr(args, "rekordbox_collection_out", None) or os.path.join(
+        playlists_root, "collection.xml"
+    )
+    res = generate_rekordbox_collection(
+        store.load_tracks(),
+        store.load_files(),
+        store.load_cue_points(),
+        out_path,
+        playlists_root=playlists_root,
+    )
+    logger.info(
+        "Rekordbox collection: %s tracks, %s playlists, %s entries (%s unresolved) -> %s",
+        res["tracks"], res["playlists"], res["entries"], res["unresolved"], res["out_path"],
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
 
@@ -942,7 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(raw)
         return 0
     # Default to "run" when no subcommand is given
-    known_commands = {"run", "vibe-audit", "fetch-missing"}
+    known_commands = {"run", "vibe-audit", "fetch-missing", "export-rekordbox"}
     if not raw or raw[0] not in known_commands:
         raw = ["run"] + list(raw)
 
@@ -975,6 +1051,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "fetch-missing":
         try:
             return _run_fetch_missing(args)
+        except KeyboardInterrupt:
+            return 130
+        except Exception:
+            logger.error("Fatal error", exc_info=True)
+            return 1
+
+    if args.command == "export-rekordbox":
+        try:
+            return _run_export_rekordbox(args)
         except KeyboardInterrupt:
             return 130
         except Exception:
