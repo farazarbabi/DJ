@@ -34,17 +34,18 @@ logger = logging.getLogger(__name__)
 def _default_analysis_workers() -> int:
     """Pick a sensible default worker count for cache-miss analysis.
 
-    Demucs (~90% of per-track cost) already multi-threads a single inference, so
-    serial is not single-core. Measured per-core throughput peaks at ~2 threads
-    per worker and falls off sharply above that — so the win comes from running
-    ~cpu/2 independent tracks in parallel, each pinned to ~2 threads, which fills
-    all cores at their most efficient operating point (see _pool_worker_init).
+    Demucs (~90% of per-track cost) is memory-bandwidth-bound on CPU: measured
+    throughput plateaus around ~4 concurrent inferences (4 workers ≈ 1.85x,
+    10 workers ≈ 1.72x — more workers only inflate the startup spike and RAM).
+    So target a modest ~cpu/4 workers rather than saturating every core.
 
     Each worker holds its own Demucs model + decoded audio, so RAM (not cores) is
-    the real ceiling — budget ~2 GB per worker.
+    the real ceiling — budget ~2 GB per worker. Callers additionally cap this by
+    the number of cache-miss tracks so small/incremental runs stay on the fast
+    single-worker (all-threads, one model load) path.
     """
     cpu = os.cpu_count() or 1
-    workers = max(1, cpu // 2)  # ~2 threads/worker -> ~cpu total threads
+    workers = max(1, cpu // 4)  # bandwidth-bound: ~4 is the throughput sweet spot
     try:
         import psutil
 
@@ -53,9 +54,9 @@ def _default_analysis_workers() -> int:
         workers = min(workers, ram_cap)
     except Exception:
         workers = min(workers, 8)
-    # Hard cap — beyond this, per-track gains are eaten by the parent's serial
-    # cache-write/checkpoint cost and model-load overhead.
-    return max(1, min(workers, 16))
+    # Hard cap — beyond ~4 the bandwidth-bound Demucs sees no throughput gain,
+    # only more startup/model-load overhead and RAM.
+    return max(1, min(workers, 8))
 
 
 def _pool_worker_init(threads: int) -> None:
@@ -573,6 +574,12 @@ def run_analysis(
         workers = config.analysis_workers
         if workers is None or workers <= 0:
             workers = _default_analysis_workers()
+        # Never spawn more workers than there are tracks to analyze. With only a
+        # few cache misses (the common incremental case) this keeps us on the
+        # fast single-worker path — all threads, one model load — instead of
+        # paying N cold starts + N model loads + thread-pinned contention that
+        # would make a small run slower than serial.
+        workers = max(1, min(workers, n_total))
         if workers > 1:
             logger.info("Analysis: using %d parallel workers", workers)
 
