@@ -217,7 +217,14 @@ def collect_playlists(inputs: list[str]) -> list[str]:
 
 
 def load_unique_tracks(csv_paths: list[str]) -> list[PlaylistTrack]:
-    """Parse all CSVs and dedupe by Spotify URI (falling back to name+artist)."""
+    """Parse all CSVs and dedupe by Spotify URI (falling back to name+artist).
+
+    Returned **newest-added first**: sorted by the Exportify ``Added At`` column
+    descending (ISO-8601 sorts lexically as chronologically). This orders the
+    fetch work set so the most recently added tracks download first (and get
+    quota priority), and flows through to the match reports. The sort is stable,
+    so equal timestamps keep first-seen CSV order and undated rows sort last.
+    """
     seen: set[str] = set()
     out: list[PlaylistTrack] = []
     for cp in csv_paths:
@@ -227,6 +234,7 @@ def load_unique_tracks(csv_paths: list[str]) -> list[PlaylistTrack]:
                 continue
             seen.add(key)
             out.append(t)
+    out.sort(key=lambda t: t.added_at, reverse=True)
     return out
 
 

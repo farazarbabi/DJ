@@ -116,6 +116,19 @@ def test_load_unique_tracks_dedupes_by_uri(tmp_path):
     assert len(tracks) == 2
 
 
+def test_load_unique_tracks_orders_newest_added_first(tmp_path):
+    # Fetch order is "Added At" descending so the most recently added tracks
+    # download first (and get Soundeo quota priority); undated rows sort last.
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Old", "Artist", 200000, added_at="2019-01-01T00:00:00Z"),
+        _row("b", "New", "Artist", 200000, added_at="2024-05-01T00:00:00Z"),
+        _row("c", "Mid", "Artist", 200000, added_at="2021-09-01T00:00:00Z"),
+        _row("d", "Undated", "Artist", 200000, added_at=""),
+    ])
+    names = [t.name for t in load_unique_tracks([csv_path])]
+    assert names == ["New", "Mid", "Old", "Undated"]
+
+
 def test_collect_playlists_expands_directory(tmp_path):
     _write_csv(tmp_path / "one.csv", [_row("x", "X", "A", 1000)])
     _write_csv(tmp_path / "two.csv", [_row("y", "Y", "A", 1000)])
