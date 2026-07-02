@@ -420,7 +420,7 @@ Disable progress bars with `--no-progress`.
 6. resolve canonical key and BPM, then build the review queue
 7. classify the flat DJ taxonomy with the available XGB model for COMMENT category labels
 8. classify the 3-level genre taxonomy and export registry reports
-9. write categorical playlists under `outputs/playlists/by_key/` and `outputs/playlists/by_subgenre/`
+9. write categorical playlists under `outputs/playlists/by_key_coarse/`, `by_bpm_coarse/`, and `by_subgenre_coarse/` by default
 10. optionally generate Rekordbox cue rows, copied XML exports, cue reports, and XML validation
 11. run grouping and recommendations unless skipped
 12. sync COMMENT tags immediately when grouping is skipped, or after grouping when `G###` group IDs can be added

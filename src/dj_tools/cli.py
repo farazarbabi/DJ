@@ -808,7 +808,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     classify_all_taxonomies(store, show_progress=show_progress)
     generate_reports(store, config.reports_dir, show_progress=show_progress)
 
-    # Phase 7b: Categorical playlists (by key / sub-genre)
+    # Phase 7b: Categorical playlists (by key / BPM / sub-genre)
     try:
         from dj_registry.sync.playlists import generate_categorical_playlists
         playlists_root = _playlists_dir(args.paths)

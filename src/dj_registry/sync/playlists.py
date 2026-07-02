@@ -1,6 +1,7 @@
 """Categorical M3U8 playlist generation from the registry.
 
-Emits browsing playlists grouped by Camelot key and DJ taxonomy sub-genre.
+Emits browsing playlists grouped by Camelot key, BPM bracket, and DJ taxonomy
+sub-genre.
 Pure registry data — no clustering/grouper math.
 
 A popularity-tier writer used to live here too, but Spotify dropped the
@@ -23,16 +24,39 @@ logger = logging.getLogger(__name__)
 
 _ILLEGAL_CHARS = str.maketrans({c: "_" for c in r'<>:"/\|?*'})
 
+_BPM_COARSE_BUCKETS: tuple[tuple[float, float | None, str], ...] = (
+    (0, 90, "000-089_Downtempo_Halftime"),
+    (90, 105, "090-104_Slow_Groove"),
+    (105, 115, "105-114_Warmup_Chug"),
+    (115, 122, "115-121_Builder_Groove"),
+    (122, 128, "122-127_Club_Driver"),
+    (128, 135, "128-134_Peak"),
+    (135, 146, "135-145_Fast_140"),
+    (146, 160, "146-159_Hard_Dance"),
+    (160, 180, "160-179_DnB_Jungle"),
+    (180, None, "180-plus_High_Tempo"),
+)
+
 
 def _safe_filename(stem: str) -> str:
     return stem.replace(" ", "_").translate(_ILLEGAL_CHARS)
 
 
-def _bpm_value(track: LogicalTrack) -> float:
+def _parse_bpm(value: str) -> float | None:
     try:
-        return float(track.canonical_bpm)
+        bpm = float(value)
     except (ValueError, TypeError):
+        return None
+    if not math.isfinite(bpm) or bpm <= 0:
+        return None
+    return bpm
+
+
+def _bpm_value(track: LogicalTrack) -> float:
+    bpm = _parse_bpm(track.canonical_bpm)
+    if bpm is None:
         return math.inf
+    return bpm
 
 
 def _track_label(track: LogicalTrack, fallback_path: str) -> str:
@@ -192,6 +216,42 @@ def _write_by_key_coarse(
     return written
 
 
+def _coarse_bpm_bucket(bpm: str) -> str | None:
+    """Map a BPM value to a DJ-friendly browsing bracket."""
+    value = _parse_bpm(bpm)
+    if value is None:
+        return None
+    for lo, hi, label in _BPM_COARSE_BUCKETS:
+        if value >= lo and (hi is None or value < hi):
+            return label
+    return None
+
+
+def _write_by_bpm_coarse(
+    out_dir: Path,
+    tracks: list[LogicalTrack],
+    path_by_id: dict[str, str],
+) -> int:
+    """Bucket tracks into coarse BPM-only playlists for Rekordbox browsing."""
+    buckets: dict[str, list[LogicalTrack]] = {}
+    for t in tracks:
+        if t.track_id not in path_by_id:
+            continue
+        bucket = _coarse_bpm_bucket(t.canonical_bpm)
+        if bucket is None:
+            continue
+        buckets.setdefault(bucket, []).append(t)
+
+    written = 0
+    for bucket, members in buckets.items():
+        entries = _sorted_entries(members, path_by_id)
+        if not entries:
+            continue
+        _write_m3u8(out_dir / f"{bucket}.m3u8", entries)
+        written += 1
+    return written
+
+
 def _coarse_subgenre_bucket(label: str, family_first_words: set[str]) -> str:
     """Map a `dj_taxonomy_label` to a coarse bucket.
 
@@ -275,9 +335,9 @@ def generate_categorical_playlists(
 ) -> dict[str, int]:
     """Write categorical M3U8 playlists, gated independently by resolution.
 
-    ``fine`` writes by_key/ and by_subgenre/; ``coarse`` writes by_key_coarse/
-    and by_subgenre_coarse/. They are independent, so any combination
-    (fine-only, coarse-only, or both) is valid.
+    ``fine`` writes by_key/ and by_subgenre/; ``coarse`` writes by_key_coarse/,
+    by_bpm_coarse/, and by_subgenre_coarse/. They are independent, so any
+    combination (fine-only, coarse-only, or both) is valid.
 
     Returns counts of playlists written per category (only the keys actually
     generated are present).
@@ -294,6 +354,9 @@ def generate_categorical_playlists(
     if coarse:
         counts["by_key_coarse"] = _write_by_key_coarse(
             root / "by_key_coarse", tracks, path_by_id
+        )
+        counts["by_bpm_coarse"] = _write_by_bpm_coarse(
+            root / "by_bpm_coarse", tracks, path_by_id
         )
         counts["by_subgenre_coarse"] = _write_by_subgenre_coarse(
             root / "by_subgenre_coarse", tracks, path_by_id

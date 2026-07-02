@@ -990,7 +990,7 @@ def _cmd_run(args) -> int:
 
     if args.playlists:
         # Clean and recreate group playlists. Categorical playlists
-        # (by_key/by_subgenre/by_popularity) live under the same root but are
+        # (by_key/by_bpm/by_subgenre) live under the same root but are
         # written by the registry pipeline; leave them untouched here.
         # Coarse, half-resolution group playlists are the default; full-
         # resolution groups/ are opt-in via --fine-playlists.

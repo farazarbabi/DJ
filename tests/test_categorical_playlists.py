@@ -5,6 +5,7 @@ from __future__ import annotations
 from dj_registry.models import FileRecord, LogicalTrack
 from dj_registry.sync.playlists import (
     _camelot_padded,
+    _coarse_bpm_bucket,
     _coarse_key_bucket,
     _coarse_subgenre_bucket,
     _compute_family_first_words,
@@ -189,6 +190,29 @@ def test_coarse_key_bucket_rejects_invalid():
     assert _coarse_key_bucket("XX") is None
 
 
+# --- coarse BPM helpers ----------------------------------------------------
+
+
+def test_coarse_bpm_bucket_boundaries():
+    assert _coarse_bpm_bucket("89.9") == "000-089_Downtempo_Halftime"
+    assert _coarse_bpm_bucket("90") == "090-104_Slow_Groove"
+    assert _coarse_bpm_bucket("105") == "105-114_Warmup_Chug"
+    assert _coarse_bpm_bucket("115") == "115-121_Builder_Groove"
+    assert _coarse_bpm_bucket("122") == "122-127_Club_Driver"
+    assert _coarse_bpm_bucket("128") == "128-134_Peak"
+    assert _coarse_bpm_bucket("135") == "135-145_Fast_140"
+    assert _coarse_bpm_bucket("146") == "146-159_Hard_Dance"
+    assert _coarse_bpm_bucket("160") == "160-179_DnB_Jungle"
+    assert _coarse_bpm_bucket("180") == "180-plus_High_Tempo"
+
+
+def test_coarse_bpm_bucket_rejects_invalid():
+    assert _coarse_bpm_bucket("") is None
+    assert _coarse_bpm_bucket("0") is None
+    assert _coarse_bpm_bucket("nan") is None
+    assert _coarse_bpm_bucket("fast") is None
+
+
 def test_family_first_words_threshold():
     labels = [
         "Acid Breaks",
@@ -253,6 +277,11 @@ def test_coarse_flag_writes_parallel_dirs(tmp_path):
     assert (tmp_path / "by_key_coarse" / "07A-08B.m3u8").exists()
     assert counts["by_key_coarse"] == 2
 
+    # BPM-only coarse buckets: t1+t2 -> 115-121, t3 -> 122-127.
+    assert (tmp_path / "by_bpm_coarse" / "115-121_Builder_Groove.m3u8").exists()
+    assert (tmp_path / "by_bpm_coarse" / "122-127_Club_Driver.m3u8").exists()
+    assert counts["by_bpm_coarse"] == 2
+
     # Acid* (3 distinct heads) collapse to "Acid" — one coarse subgenre file.
     coarse_sg = sorted(p.name for p in (tmp_path / "by_subgenre_coarse").glob("*.m3u8"))
     assert coarse_sg == ["Acid.m3u8"]
@@ -271,11 +300,13 @@ def test_coarse_only_skips_fine_dirs(tmp_path):
 
     # Coarse dirs written, fine dirs skipped entirely.
     assert (tmp_path / "by_key_coarse" / "01A-02B.m3u8").exists()
+    assert (tmp_path / "by_bpm_coarse" / "115-121_Builder_Groove.m3u8").exists()
     assert not (tmp_path / "by_key").exists()
     assert not (tmp_path / "by_subgenre").exists()
     assert "by_key" not in counts
     assert "by_subgenre" not in counts
     assert counts["by_key_coarse"] == 1
+    assert counts["by_bpm_coarse"] == 1
 
 
 def test_coarse_flag_off_writes_no_coarse_dirs(tmp_path):
@@ -284,8 +315,10 @@ def test_coarse_flag_off_writes_no_coarse_dirs(tmp_path):
     counts = generate_categorical_playlists(tracks, files, str(tmp_path))
 
     assert "by_key_coarse" not in counts
+    assert "by_bpm_coarse" not in counts
     assert "by_subgenre_coarse" not in counts
     assert not (tmp_path / "by_key_coarse").exists()
+    assert not (tmp_path / "by_bpm_coarse").exists()
     assert not (tmp_path / "by_subgenre_coarse").exists()
 
 
@@ -313,6 +346,28 @@ def test_coarse_key_bucket_aggregates_all_keys_into_six(tmp_path):
     }
     written = {p.name for p in (tmp_path / "by_key_coarse").glob("*.m3u8")}
     assert written == expected
+
+
+def test_coarse_bpm_playlist_sorts_entries_by_bpm(tmp_path):
+    tracks = [
+        _track("t121", file_id="f121", artist="Art", title="121", bpm="121"),
+        _track("t115", file_id="f115", artist="Art", title="115", bpm="115"),
+        _track("t_bad", file_id="fbad", artist="Art", title="Bad", bpm=""),
+    ]
+    files = [
+        _file("f121", "/music/121.aiff"),
+        _file("f115", "/music/115.aiff"),
+        _file("fbad", "/music/bad.aiff"),
+    ]
+    counts = generate_categorical_playlists(
+        tracks, files, str(tmp_path), fine=False, coarse=True
+    )
+
+    assert counts["by_bpm_coarse"] == 1
+    lines = _read(tmp_path / "by_bpm_coarse" / "115-121_Builder_Groove.m3u8")
+    paths_in_order = [lines[i] for i in (2, 4)]
+    assert paths_in_order == ["/music/115.aiff", "/music/121.aiff"]
+    assert "/music/bad.aiff" not in lines
 
 
 def test_track_missing_path_is_skipped(tmp_path):

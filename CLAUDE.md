@@ -210,7 +210,7 @@ As built today:
 
 Playlist output resolution (both `dj run` and `dj-grouper run`):
 
-- coarse, half-resolution playlists (`groups_coarse/`, `by_key_coarse/`, `by_subgenre_coarse/`) are written by default
+- coarse, half-resolution playlists (`groups_coarse/`, `by_key_coarse/`, `by_bpm_coarse/`, `by_subgenre_coarse/`) are written by default
 - `--fine-playlists` additionally writes the full-resolution `groups/`, `by_key/`, `by_subgenre/`
 - `generate_categorical_playlists(..., fine=, coarse=)` gates the two resolutions independently (function defaults stay `fine=True, coarse=False`; the CLI passes `fine=<flag>, coarse=True`)
 
