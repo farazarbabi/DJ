@@ -649,6 +649,20 @@ def test_acquire_prefers_soundeo_unmarked(tmp_path, monkeypatch):
     assert not (tmp_path / "Artist - Tune[U].aiff").exists()
 
 
+def test_acquire_soundeo_keeps_soundeo_filename(tmp_path, monkeypatch):
+    # Spotify titles the track "- Radio Edit"; Soundeo lists "(Original Mix)".
+    # The downloaded file must keep Soundeo's own name, not the Spotify one.
+    _yt_stub(monkeypatch)
+    track = PlaylistTrack(name="Diclofél - Radio Edit", artists=["Julian Schraven"],
+                          duration_sec=200)
+    fake = _FakeSoundeo(so.SoundeoResult(
+        "1", "Julian Schraven", "Diclofél (Original Mix)", 420, formats=["aiff"]))
+    out = sf.acquire_track(track, str(tmp_path), soundeo=fake, quota=sf._QuotaState())
+    assert out.status == "ok" and out.source == "soundeo"
+    assert (tmp_path / "Julian Schraven - Diclofél (Original Mix).aiff").exists()
+    assert not (tmp_path / "Julian Schraven - Diclofél (Radio Edit).aiff").exists()
+
+
 def test_acquire_falls_back_to_youtube_when_absent(tmp_path, monkeypatch):
     _yt_stub(monkeypatch)
     track = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
@@ -953,3 +967,107 @@ def test_cli_forget_cached_removes_entry(tmp_path):
         ["fetch-missing", "--library", str(tmp_path / "lib"), "--forget-cached", "Lose My Mind"])
     assert _run_fetch_missing(args) == 0
     assert sf.load_not_found_cache(rd) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Soundeo tag storage (store as-is) + tag repair
+# --------------------------------------------------------------------------- #
+def _write_tagged_aiff(path, *, title="", artist=""):
+    import numpy as np
+    import soundfile as sf_
+    sf_.write(str(path), np.zeros(2205, dtype="float32"), 22050)
+    if title or artist:
+        from dj_tagger.metadata import write_track_metadata
+        write_track_metadata(str(path), title=title, artist=artist)
+
+
+def test_read_descriptive_tags_roundtrip(tmp_path):
+    from dj_tagger.metadata import read_descriptive_tags
+    p = tmp_path / "x.aiff"
+    _write_tagged_aiff(p, title="Madama Firefly (Original Mix)", artist="Gab Rhome")
+    tags = read_descriptive_tags(str(p))
+    assert tags["title"] == "Madama Firefly (Original Mix)"
+    assert tags["artist"] == "Gab Rhome"
+
+
+def test_acquire_soundeo_stores_as_is_no_embed(tmp_path, monkeypatch):
+    # Soundeo path must NOT overwrite the file's native tags with Spotify ones.
+    _yt_stub(monkeypatch)
+    calls = []
+    monkeypatch.setattr(sf, "_embed_metadata", lambda *a, **k: calls.append(a))
+    track = PlaylistTrack(name="Tune", artists=["Artist"], album="SpotifyAlbum")
+    fake = _FakeSoundeo(so.SoundeoResult("1", "Artist", "Tune", 200, formats=["aiff"]))
+    out = sf.acquire_track(track, str(tmp_path), soundeo=fake, quota=sf._QuotaState())
+    assert out.source == "soundeo" and out.status == "ok"
+    assert calls == []  # never embedded on the Soundeo path
+
+
+class _RefixFake:
+    """Fake Soundeo client for refix: serves owned/not-owned results per title."""
+    audio_format = "aiff"
+
+    def __init__(self, owned_titles):
+        self.owned_titles = set(owned_titles)  # titles the account "owns"
+        self.downloaded_ids = []
+
+    def login(self): pass
+    def close(self): pass
+
+    def search(self, track):
+        owned = track.name in self.owned_titles
+        return [so.SoundeoResult("sid-" + track.name, track.primary_artist, track.name,
+                                 200, formats=["aiff"], downloaded=owned)]
+
+    def pick_owned(self, track, results, *, target_duration=None):
+        cand = [r for r in results if r.downloaded and "aiff" in r.formats]
+        return cand[0] if cand else None
+
+    def download(self, result, dest, *, assume_free=False):
+        self.downloaded_ids.append((result.id, assume_free))
+        _write_tagged_aiff(dest, title="NATIVE " + result.title, artist=result.artist)
+
+
+def test_refix_fixes_owned_skips_curated(tmp_path, monkeypatch):
+    lib = tmp_path
+    owned = lib / "Gab Rhome - Madama Firefly.aiff"
+    curated = lib / "Some Artist - My Own Master.aiff"
+    _write_tagged_aiff(owned, title="Spotify Title", artist="Gab Rhome")
+    _write_tagged_aiff(curated, title="Curated", artist="Some Artist")
+
+    fake = _RefixFake(owned_titles=["Madama Firefly"])
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: fake))
+
+    summary = sf.refix_soundeo_tags(str(lib))
+    assert summary["fixed"] == 1 and summary["not_owned"] == 1
+    # Owned file re-downloaded (assume_free) with native tags; curated untouched.
+    assert fake.downloaded_ids == [("sid-Madama Firefly", True)]
+    from dj_tagger.metadata import read_descriptive_tags
+    assert read_descriptive_tags(str(owned))["title"] == "NATIVE Madama Firefly"
+    assert read_descriptive_tags(str(curated))["title"] == "Curated"  # not touched
+    # Logged so a second pass skips it.
+    log = sf.load_soundeo_tags_log(str(lib / "outputs" / "fetch"))
+    assert sf._soundeo_log_key(str(owned)) in log
+
+
+def test_refix_skips_already_logged(tmp_path, monkeypatch):
+    lib = tmp_path
+    owned = lib / "Gab Rhome - Madama Firefly.aiff"
+    _write_tagged_aiff(owned, title="X", artist="Gab Rhome")
+    rd = lib / "outputs" / "fetch"
+    rd.mkdir(parents=True)
+    sf.save_soundeo_tags_log(str(rd), {sf._soundeo_log_key(str(owned)):
+                                       {"soundeo_id": "old", "tags": {}}})
+    fake = _RefixFake(owned_titles=["Madama Firefly"])
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: fake))
+    summary = sf.refix_soundeo_tags(str(lib))
+    assert summary["candidates"] == 0 and fake.downloaded_ids == []
+
+
+def test_refix_ignores_marked_youtube_files(tmp_path, monkeypatch):
+    lib = tmp_path
+    yt = lib / "Artist - Tune[U].aiff"
+    _write_tagged_aiff(yt, title="Spotify", artist="Artist")
+    fake = _RefixFake(owned_titles=["Tune"])
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: fake))
+    summary = sf.refix_soundeo_tags(str(lib))
+    assert summary["candidates"] == 0 and fake.downloaded_ids == []

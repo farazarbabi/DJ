@@ -276,6 +276,60 @@ def write_track_metadata(
         raise
 
 
+def read_descriptive_tags(path: str) -> dict[str, str]:
+    """Read the descriptive tags this module writes, as a plain dict.
+
+    Returns keys ``title/artist/album_artist/album/genre/year/label`` with the
+    values found in the file (missing frames omitted). Used to log a Soundeo
+    file's genuine release tags. Best-effort: any read error yields ``{}``.
+    """
+    ext = Path(path).suffix.lower()
+    try:
+        if ext in (".aiff", ".aif", ".wav", ".mp3"):
+            return _read_meta_id3(path, ext)
+        if ext == ".flac":
+            from mutagen.flac import FLAC
+            a = FLAC(path)
+            vorbis = {"title": "title", "artist": "artist", "album": "album",
+                      "album_artist": "albumartist", "genre": "genre",
+                      "year": "date", "label": "label"}
+            return {k: a[v][0] for k, v in vorbis.items() if a.get(v)}
+        if ext == ".m4a":
+            from mutagen.mp4 import MP4
+            a = MP4(path)
+            atom = {"title": "\xa9nam", "artist": "\xa9ART", "album": "\xa9alb",
+                    "album_artist": "aART", "genre": "\xa9gen", "year": "\xa9day"}
+            return {k: str(a[v][0]) for k, v in atom.items() if a.get(v)}
+    except Exception:
+        logger.debug("Could not read descriptive tags from %s", path, exc_info=True)
+    return {}
+
+
+def _read_meta_id3(path: str, ext: str) -> dict[str, str]:
+    if ext == ".mp3":
+        from mutagen.mp3 import MP3
+        audio = MP3(path)
+    elif ext in (".aiff", ".aif"):
+        from mutagen.aiff import AIFF
+        audio = AIFF(path)
+    else:  # .wav
+        from mutagen.wave import WAVE
+        audio = WAVE(path)
+    tags = audio.tags
+    if tags is None:
+        return {}
+    frame_key = {"title": "TIT2", "artist": "TPE1", "album_artist": "TPE2",
+                 "album": "TALB", "genre": "TCON", "year": "TDRC", "label": "TPUB"}
+    out: dict[str, str] = {}
+    for name, key in frame_key.items():
+        frame = tags.get(key)
+        if frame is not None:
+            text = "".join(str(t) for t in getattr(frame, "text", [])).strip()
+            if text:
+                out[name] = text
+    return out
+
+
 def _write_meta_id3(path: str, ext: str, fields: dict[str, str]) -> None:
     from mutagen.id3 import TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPUB
 

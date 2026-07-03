@@ -669,11 +669,19 @@ def acquire_track(
                 return DownloadOutcome(
                     "quota_skip", "", "on Soundeo; daily quota exhausted", "soundeo",
                     soundeo_listed=True)
-            # Unmarked path: treat a Soundeo original like a curated original.
-            dest = os.path.join(dest_dir, track.target_basename() + ".aiff")
+            # Unmarked path: treat a Soundeo original like a curated original,
+            # and keep Soundeo's own "Artist - Title" naming (which carries the
+            # real cut, e.g. "(Original Mix)") rather than the Spotify title,
+            # which may name a different cut ("- Radio Edit"). Only YouTube
+            # fallbacks use the Spotify name (with the [U] marker). The
+            # stopword-tolerant matcher still sees this as the same track.
+            dest = os.path.join(dest_dir, sanitize_filename(pick.label) + ".aiff")
             try:
                 soundeo.download(pick, dest)
-                _embed_metadata(dest, track)
+                # Store the Soundeo AIFF **as is**: it ships genuine release tags
+                # (title/artist/album/label/…), so we do NOT overwrite them with
+                # Spotify-row values the way the YouTube fallback does. Only the
+                # ``[U]`` YouTube path calls _embed_metadata.
                 return DownloadOutcome("ok", dest, f"soundeo:{pick.id}", "soundeo",
                                        soundeo_listed=True)
             except SoundeoQuotaExceeded as exc:
@@ -948,6 +956,167 @@ def forget_not_found(
     return removed
 
 
+# --------------------------------------------------------------------------- #
+# Persistent Soundeo-tags log
+# --------------------------------------------------------------------------- #
+# Records which library files came from Soundeo and are stored with their
+# genuine release tags (never overwritten with Spotify-row values). Keyed by the
+# file's normcased absolute path. Its purpose is twofold: it's the durable
+# record of Soundeo provenance (download_log.csv is overwritten every run), and
+# it lets the tag-repair pass skip files already carrying native Soundeo tags.
+_SOUNDEO_TAGS_LOG_NAME = "soundeo_tags.json"
+
+
+def _soundeo_log_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def load_soundeo_tags_log(report_dir: str) -> dict:
+    path = os.path.join(report_dir, _SOUNDEO_TAGS_LOG_NAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_soundeo_tags_log(report_dir: str, log: dict) -> None:
+    path = os.path.join(report_dir, _SOUNDEO_TAGS_LOG_NAME)
+    try:
+        os.makedirs(report_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            json.dump(log, f, indent=2, ensure_ascii=False)
+    except OSError:
+        logger.warning("fetch-missing: could not write %s", path)
+
+
+def _record_soundeo_tags(log: dict, path: str, soundeo_id: str) -> None:
+    """Read a Soundeo file's native tags off disk and record them in ``log``."""
+    tags = {}
+    try:
+        from dj_tagger.metadata import read_descriptive_tags
+        tags = read_descriptive_tags(path)
+    except Exception:
+        logger.debug("could not read Soundeo tags from %s", path, exc_info=True)
+    log[_soundeo_log_key(path)] = {"soundeo_id": soundeo_id, "basename": os.path.basename(path),
+                                   "tags": tags}
+
+
+def _parse_stem_artist_title(stem: str) -> tuple[str, str]:
+    """'Artist - Title (Mix)' -> ('Artist', 'Title (Mix)'); no dash -> ('', stem)."""
+    if " - " in stem:
+        head, tail = stem.split(" - ", 1)
+        return head.strip(), tail.strip()
+    return "", stem.strip()
+
+
+def refix_soundeo_tags(
+    library: str, *, dry_run: bool = False, report_dir: str | None = None,
+    audio_format: str = "aiff", limit: int | None = None,
+) -> dict:
+    """Restore genuine Soundeo tags on library files that came from Soundeo.
+
+    Older downloads had Spotify-row tags written over their native ones (and the
+    Soundeo AIFF is now stored *as is*). This pass identifies Soundeo-sourced
+    files with a **quota-free** signal — Soundeo flags a search result the
+    account already owns as ``downloaded`` — and re-downloads the matching cut to
+    recover its native tags. Selection matches the on-disk file's **duration**,
+    so the same cut is restored (same duration -> same analysis cache key -> no
+    re-analysis). Curated originals (never downloaded from Soundeo) don't carry
+    the flag and are left untouched. Files already in the Soundeo-tags log are
+    skipped.
+
+    Returns a summary dict: ``candidates/fixed/skipped_logged/not_owned/errors``.
+    """
+    if not os.path.isdir(library):
+        raise FileNotFoundError(f"library dir not found: {library}")
+    report_dir = report_dir or os.path.join(library, "outputs", "fetch")
+    os.makedirs(report_dir, exist_ok=True)
+    log = load_soundeo_tags_log(report_dir)
+
+    # Candidate = unmarked audio file (Soundeo files and curated originals both
+    # look like this; [U] YouTube files are excluded — they keep Spotify tags).
+    candidates: list[os.DirEntry] = []
+    for entry in os.scandir(library):
+        if not entry.is_file():
+            continue
+        stem, ext = os.path.splitext(entry.name)
+        if ext.lower() not in AUDIO_EXTS or stem.endswith(SOURCE_MARKER):
+            continue
+        if _soundeo_log_key(entry.path) in log:
+            continue  # already carries native Soundeo tags
+        candidates.append(entry)
+
+    summary = {"candidates": len(candidates), "fixed": 0, "skipped_logged": 0,
+               "not_owned": 0, "errors": 0, "report_dir": report_dir}
+    logger.info("refix-soundeo-tags: %d unmarked candidate file(s) (not yet logged)",
+                len(candidates))
+    if not candidates:
+        return summary
+
+    from .soundeo import SoundeoAuthError, SoundeoClient, SoundeoError
+
+    soundeo = SoundeoClient.from_env(audio_format=audio_format)
+    if soundeo is None:
+        raise RuntimeError("Soundeo credentials not set (SOUNDEO_USER/SOUNDEO_PASS)")
+    try:
+        soundeo.login()
+    except SoundeoAuthError as exc:
+        soundeo.close()
+        raise RuntimeError(f"Soundeo login failed: {exc}") from exc
+
+    # Files already analysed keep their on-disk name (rename would orphan the
+    # cache key and force re-analysis); unanalysed files may take the Soundeo
+    # name. We can't read the tagger cache here, so we play safe: always
+    # re-download in place (never rename), so no cache key ever changes.
+    processed = 0
+    try:
+        for entry in candidates:
+            if limit is not None and processed >= limit:
+                break
+            processed += 1
+            stem, _ext = os.path.splitext(entry.name)
+            artist, title = _parse_stem_artist_title(stem)
+            track = PlaylistTrack(name=title, artists=[artist] if artist else [])
+            on_disk = probe_duration(entry.path)
+            try:
+                results = soundeo.search(track)
+                owned = soundeo.pick_owned(track, results, target_duration=on_disk)
+            except SoundeoError as exc:
+                logger.warning("refix: search error for %s — %s", entry.name, exc)
+                summary["errors"] += 1
+                continue
+            if owned is None:
+                summary["not_owned"] += 1
+                continue
+            if dry_run:
+                logger.info("refix: WOULD fix %s  (soundeo:%s '%s')",
+                            entry.name, owned.id, owned.label)
+                summary["fixed"] += 1
+                continue
+            try:
+                soundeo.download(owned, entry.path, assume_free=True)  # overwrite in place
+            except SoundeoError as exc:
+                logger.warning("refix: re-download failed for %s — %s", entry.name, exc)
+                summary["errors"] += 1
+                continue
+            _record_soundeo_tags(log, entry.path, owned.id)
+            save_soundeo_tags_log(report_dir, log)  # persist incrementally
+            summary["fixed"] += 1
+            logger.info("refix: fixed %s  (soundeo:%s)", entry.name, owned.id)
+    finally:
+        soundeo.close()
+        if not dry_run:
+            save_soundeo_tags_log(report_dir, log)
+
+    logger.info(
+        "refix-soundeo-tags: done — fixed=%d not_owned=%d errors=%d (of %d candidate(s))",
+        summary["fixed"], summary["not_owned"], summary["errors"], len(candidates),
+    )
+    return summary
+
+
 def fetch_missing(
     playlists: list[str],
     library: str,
@@ -1026,6 +1195,7 @@ def fetch_missing(
     # runs don't re-search them every time. --force-lookup retries them. `missing`
     # itself (and missing_report.csv) stays complete; only the work set is trimmed.
     not_found = load_not_found_cache(report_dir)
+    soundeo_log = load_soundeo_tags_log(report_dir)  # provenance of as-is Soundeo files
     for r in present:  # a now-present track is no longer "not found"
         not_found.pop(_track_identity(r.track), None)
     to_download = [r for r in missing
@@ -1168,6 +1338,11 @@ def fetch_missing(
                     summary["downloaded"] += 1
                     summary[outcome.source] = summary.get(outcome.source, 0) + 1
                     not_found.pop(key, None)  # found now — clear any stale mark
+                    # A Soundeo file is stored as-is; log its native tags and
+                    # provenance so the tag-repair pass never re-touches it.
+                    if outcome.source == "soundeo" and outcome.outfile:
+                        sid = outcome.detail.split("soundeo:", 1)[-1] if outcome.detail else ""
+                        _record_soundeo_tags(soundeo_log, outcome.outfile, sid)
                     src = "SOUNDEO " if outcome.source == "soundeo" else "YOUTUBE "
                     logger.info("%s %s -> %s", prefix, src,
                                 os.path.basename(outcome.outfile))
@@ -1176,6 +1351,7 @@ def fetch_missing(
             soundeo.close()
 
     save_not_found_cache(report_dir, not_found)
+    save_soundeo_tags_log(report_dir, soundeo_log)
 
     # A Soundeo original lands unmarked, so it may now supersede a [U] YouTube
     # copy fetched on an earlier run — prune those before regenerating playlists.

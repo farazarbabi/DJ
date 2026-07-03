@@ -128,6 +128,11 @@ class SoundeoResult:
     key: str = ""
     bpm: str = ""
     formats: list[str] = field(default_factory=list)
+    # True when Soundeo marks this track as already downloaded by this account
+    # (the result's download container carries a ``downloaded`` class). Such a
+    # re-download does not spend the daily quota, and the flag is the reliable
+    # signal that a library file originated from Soundeo (vs. a curated original).
+    downloaded: bool = False
 
     @property
     def label(self) -> str:
@@ -342,12 +347,49 @@ class SoundeoClient:
         Extended Mix > Original Mix > suffix-less/other > Radio Edit (see
         :func:`_version_rank`), breaking ties by the longest duration.
         """
+        matches = self._title_artist_matches(track, results)
+        if not matches:
+            return None
+        matches.sort(key=lambda r: (_version_rank(r.title), -(r.duration_sec or 0.0)))
+        return matches[0]
+
+    def pick_owned(
+        self, track: PlaylistTrack, results: list[SoundeoResult],
+        *, target_duration: float | None = None,
+    ) -> SoundeoResult | None:
+        """Best **already-downloaded** AIFF result for ``track`` (repair mode).
+
+        Only results Soundeo flags as ``downloaded`` (re-download is free and
+        proves the track came from Soundeo) are considered. When
+        ``target_duration`` is given (the on-disk file's length), the cut whose
+        duration matches it wins, so a re-download restores native tags on the
+        **same cut** the library already holds — same duration → same analysis
+        cache key, no re-analysis. Returns None if no owned AIFF result matches.
+        """
+        owned = [r for r in self._title_artist_matches(track, results) if r.downloaded]
+        if not owned:
+            return None
+        if target_duration is not None:
+            owned.sort(key=lambda r: abs((r.duration_sec or 0.0) - target_duration))
+        else:
+            owned.sort(key=lambda r: (_version_rank(r.title), -(r.duration_sec or 0.0)))
+        return owned[0]
+
+    def _title_artist_matches(
+        self, track: PlaylistTrack, results: list[SoundeoResult],
+    ) -> list[SoundeoResult]:
+        """Results whose title/artist tokens match ``track`` and offer the AIFF.
+
+        Shared by :meth:`pick` and :meth:`pick_owned`: all title tokens present,
+        no extra remixer tokens (unless the query itself names the remix), and
+        artist agreement (or a distinctive >=3-token title).
+        """
         from .spotify_fetch import tokens  # lazy: avoid import cycle
 
         want = tokens(track.name)
         want_artist = tokens(track.artist_display)
         if not want:
-            return None
+            return []
         fmt = self.audio_format
         matches: list[SoundeoResult] = []
         for r in results:
@@ -369,25 +411,31 @@ class SoundeoClient:
             if not artist_ok and len(want) < 3:  # allow artistless match only for distinctive titles
                 continue
             matches.append(r)
-        if not matches:
-            return None
-        matches.sort(key=lambda r: (_version_rank(r.title), -(r.duration_sec or 0.0)))
-        return matches[0]
+        return matches
 
     # -- download ----------------------------------------------------------- #
-    def download(self, result: SoundeoResult, dest_path: str) -> None:
+    def download(self, result: SoundeoResult, dest_path: str,
+                 *, assume_free: bool = False) -> None:
         """Download ``result`` to ``dest_path`` in the client's audio format.
 
         Two-step: ``GET /download/<id>/<fmt>`` yields a tokenized CDN URL, then
         that URL streams the file. Raises :class:`SoundeoQuotaExceeded` when the
         daily quota is spent (no CDN URL + a limit message) and
         :class:`SoundeoError` on other failures, leaving no partial file.
+
+        ``assume_free`` skips the pre-flight "0 credits left" guard: a track the
+        account already owns (``result.downloaded``) re-downloads without
+        spending quota, so a repair pass can run even when today's credit is 0.
+        A genuinely metered download with no credit still fails safely (Soundeo
+        returns no URL -> :class:`SoundeoQuotaExceeded`).
         """
         if not self._logged_in:
             self.login()
         # Out of credit (counter known to be 0): stop before spending a request,
-        # so the caller defers rather than falling back to YouTube.
-        if self._remaining is not None and self._remaining <= 0:
+        # so the caller defers rather than falling back to YouTube. An
+        # already-owned re-download (assume_free) bypasses this — it costs no
+        # credit — but still fails safely below if Soundeo withholds the URL.
+        if not assume_free and self._remaining is not None and self._remaining <= 0:
             raise SoundeoQuotaExceeded(
                 "Soundeo daily download limit reached (0 downloads left)")
         fmt = FORMAT_CODE.get(self.audio_format, self.audio_format)
@@ -509,9 +557,14 @@ def _parse_results(content_html: str) -> list[SoundeoResult]:
         duration = _parse_mmss(time_nodes[0]) if time_nodes else None
         codes = item.xpath('.//a[contains(@class,"track-download-lnk")]/@data-track-format')
         formats = [_CODE_TO_FORMAT.get(c, c) for c in codes]
+        # The download container gets a `downloaded` class once this account has
+        # grabbed the track (a free re-download, and proof it came from Soundeo).
+        dl_div = item.xpath(
+            './/div[contains(concat(" ", normalize-space(@class), " "), " download ")]')
+        downloaded = bool(dl_div) and "downloaded" in (dl_div[0].get("class") or "")
         out.append(SoundeoResult(
             id=tid, artist=artist.strip(), title=title.strip(),
-            duration_sec=duration, formats=formats,
+            duration_sec=duration, formats=formats, downloaded=downloaded,
         ))
     return out
 

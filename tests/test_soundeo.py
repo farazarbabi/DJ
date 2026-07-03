@@ -44,6 +44,25 @@ SEARCH_HTML = """
 </div>
 """
 
+# Same shape, but the account already owns this track: `download downloaded`.
+SEARCH_HTML_OWNED = """
+<div class="folder">
+  <div class="trackitem" data-track-id="10217876">
+    <div class="info">
+      <strong><a href="/track/gab-rhome-madama-firefly-original-mix-10217876.html">
+        Gab Rhome - Madama Firefly (Original Mix)</a></strong>
+      <time>7:13</time>
+    </div>
+    <div class="download downloaded">
+      <a href="javascript:void(0);" class="track-download-lnk"
+         data-track-id="10217876" data-track-format="1"><span>MP3</span></a>
+      <a href="javascript:void(0);" class="track-download-lnk"
+         data-track-id="10217876" data-track-format="3"><span>AIFF</span></a>
+    </div>
+  </div>
+</div>
+"""
+
 _LOGGED_IN_HEADER = '<ul class="top-menu"><a href="/account/logout">logout</a></ul>'
 _CDN_URL = "https://dl1.sndstatic.com/cdownload/2019-08-24/11858310.aiff?downloadToken=tok"
 
@@ -102,6 +121,37 @@ def test_parse_results_extracts_row():
 
 def test_parse_results_empty():
     assert _parse_results("") == []
+
+
+def test_parse_results_sets_downloaded_flag():
+    assert _parse_results(SEARCH_HTML)[0].downloaded is False
+    owned = _parse_results(SEARCH_HTML_OWNED)[0]
+    assert owned.downloaded is True and owned.id == "10217876"
+
+
+def test_pick_owned_requires_downloaded_flag():
+    track = _track("Magna Terram", ["Township Rebellion"])
+    not_owned = SoundeoResult("1", "Township Rebellion", "Magna Terram (Original Mix)",
+                              505, formats=["aiff"], downloaded=False)
+    owned = SoundeoResult("2", "Township Rebellion", "Magna Terram (Original Mix)",
+                          505, formats=["aiff"], downloaded=True)
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick_owned(track, [not_owned]) is None      # not owned -> skip
+    assert c.pick_owned(track, [not_owned, owned]).id == "2"
+    c.close()
+
+
+def test_pick_owned_matches_on_disk_duration():
+    # Two owned cuts; pick_owned restores the one matching the on-disk length.
+    track = _track("Magna Terram", ["Township Rebellion"])
+    radio = SoundeoResult("r", "Township Rebellion", "Magna Terram (Radio Edit)",
+                          190, formats=["aiff"], downloaded=True)
+    ext = SoundeoResult("e", "Township Rebellion", "Magna Terram (Extended Mix)",
+                        505, formats=["aiff"], downloaded=True)
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick_owned(track, [radio, ext], target_duration=500).id == "e"
+    assert c.pick_owned(track, [radio, ext], target_duration=195).id == "r"
+    c.close()
 
 
 def test_looks_like_quota_and_flash_text():
@@ -436,4 +486,30 @@ def test_download_short_circuits_when_credit_zero(tmp_path):
     with pytest.raises(SoundeoQuotaExceeded):
         c.download(SoundeoResult("1", "A", "B", formats=["aiff"]), str(tmp_path / "x.aiff"))
     assert calls == []  # no download request was attempted
+    c.close()
+
+
+def test_download_assume_free_bypasses_zero_credit(tmp_path):
+    # An owned re-download proceeds even at 0 credit (it costs nothing).
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "sndstatic.com" in request.url.host:
+            return httpx.Response(200, headers={"content-type": "audio/x-aiff"},
+                                  content=b"FORM\x00\x00AIFF")
+        path = request.url.path
+        if path == "/account/logoreg":
+            hdr = _HEADER_N.format(n=0)
+            return (httpx.Response(200, json={"success": True, "header": hdr})
+                    if request.method == "POST" else httpx.Response(200, json={"success": False}))
+        if path.startswith("/download/"):
+            return httpx.Response(200, json={"success": True,
+                                             "jsActions": {"redirect": {"url": _CDN_URL}}})
+        return httpx.Response(404)
+
+    c = _client(handler)
+    c.login()
+    assert c._remaining == 0
+    dest = tmp_path / "owned.aiff"
+    c.download(SoundeoResult("1", "A", "B", formats=["aiff"], downloaded=True),
+               str(dest), assume_free=True)
+    assert dest.exists() and dest.read_bytes().startswith(b"FORM")
     c.close()

@@ -142,6 +142,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "exists in the library, then exit. No matching, downloads, or "
              "playlists. Honors --dry-run (report without deleting).",
     )
+    p_fetch.add_argument(
+        "--refix-soundeo-tags", dest="refix_soundeo_tags", action="store_true",
+        help="Restore genuine Soundeo tags on library files that came from Soundeo "
+             "(re-downloads the owned cut — free, no quota — matching each file's "
+             "duration so no re-analysis is triggered), then exit. Leaves curated "
+             "originals and [U] YouTube files untouched. Honors --dry-run.",
+    )
     p_fetch.add_argument("--format", dest="audio_format", choices=["aiff", "wav"],
                          default="aiff", help="Download format (default: aiff)")
     p_fetch.add_argument("--no-soundeo", dest="no_soundeo", action="store_true",
@@ -937,6 +944,16 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
         else:
             logger.info("fetch-missing: no cached not-found entries matched %s",
                         args.forget_cached)
+        return 0
+
+    if getattr(args, "refix_soundeo_tags", False):
+        from .spotify_fetch import refix_soundeo_tags
+        try:
+            refix_soundeo_tags(args.library, dry_run=args.dry_run,
+                               audio_format=args.audio_format)
+        except (FileNotFoundError, RuntimeError) as exc:
+            logger.error("fetch-missing: %s", exc)
+            return 1
         return 0
 
     if args.prune_only:
