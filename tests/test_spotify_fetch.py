@@ -1049,6 +1049,24 @@ def test_refix_fixes_owned_skips_curated(tmp_path, monkeypatch):
     assert sf._soundeo_log_key(str(owned)) in log
 
 
+def test_refix_upgrades_nonaiff_owned_to_aiff(tmp_path, monkeypatch):
+    # A curated .mp3 the account owns on Soundeo is upgraded to AIFF; the
+    # inferior .mp3 is removed (AIFF is superior).
+    lib = tmp_path
+    mp3 = lib / "Bob Moses - Winter's Song (Original Mix).mp3"
+    tmp_aiff = lib / "Bob Moses - Winter's Song (Original Mix).aiff"
+    _write_tagged_aiff(tmp_aiff, title="tmp")  # valid audio, then move to .mp3 name
+    tmp_aiff.replace(mp3)
+    fake = _RefixFake(owned_titles=["Winter's Song (Original Mix)"])
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: fake))
+
+    summary = sf.refix_soundeo_tags(str(lib))
+    assert summary["fixed"] == 1 and summary["upgraded"] == 1
+    assert (lib / "Bob Moses - Winter's Song (Original Mix).aiff").exists()
+    assert not mp3.exists()  # inferior lossy original removed
+    assert fake.downloaded_ids == [("sid-Winter's Song (Original Mix)", True)]
+
+
 def test_refix_skips_already_logged(tmp_path, monkeypatch):
     lib = tmp_path
     owned = lib / "Gab Rhome - Madama Firefly.aiff"

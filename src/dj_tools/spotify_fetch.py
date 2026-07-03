@@ -1022,12 +1022,18 @@ def refix_soundeo_tags(
     files with a **quota-free** signal — Soundeo flags a search result the
     account already owns as ``downloaded`` — and re-downloads the matching cut to
     recover its native tags. Selection matches the on-disk file's **duration**,
-    so the same cut is restored (same duration -> same analysis cache key -> no
-    re-analysis). Curated originals (never downloaded from Soundeo) don't carry
-    the flag and are left untouched. Files already in the Soundeo-tags log are
-    skipped.
+    so the same cut is restored. Curated originals (never downloaded from
+    Soundeo) don't carry the flag and are left untouched. Files already in the
+    Soundeo-tags log are skipped.
 
-    Returns a summary dict: ``candidates/fixed/skipped_logged/not_owned/errors``.
+    An AIFF file is overwritten in place (same name + same cut => same duration
+    => same analysis cache key => no re-analysis). A non-AIFF owned file (e.g. a
+    curated ``.mp3``) is **upgraded** — the AIFF is written to the ``.aiff``
+    sibling and the inferior original removed — since AIFF beats any lossy
+    format; that changes the cache key, but the audio genuinely changed format,
+    so re-analysis is warranted.
+
+    Returns a summary dict: ``candidates/fixed/upgraded/not_owned/errors``.
     """
     if not os.path.isdir(library):
         raise FileNotFoundError(f"library dir not found: {library}")
@@ -1035,8 +1041,11 @@ def refix_soundeo_tags(
     os.makedirs(report_dir, exist_ok=True)
     log = load_soundeo_tags_log(report_dir)
 
-    # Candidate = unmarked audio file (Soundeo files and curated originals both
-    # look like this; [U] YouTube files are excluded — they keep Spotify tags).
+    # Candidate = any unmarked audio file (Soundeo files and curated originals
+    # both look like this; [U] YouTube files are excluded — they keep Spotify
+    # tags). A non-AIFF owned file (e.g. a curated .mp3) is *upgraded* to the
+    # genuine Soundeo AIFF, since AIFF is superior to any lossy format.
+    fmt_exts = {".aiff", ".aif"} if audio_format == "aiff" else {"." + audio_format}
     candidates: list[os.DirEntry] = []
     for entry in os.scandir(library):
         if not entry.is_file():
@@ -1048,7 +1057,7 @@ def refix_soundeo_tags(
             continue  # already carries native Soundeo tags
         candidates.append(entry)
 
-    summary = {"candidates": len(candidates), "fixed": 0, "skipped_logged": 0,
+    summary = {"candidates": len(candidates), "fixed": 0, "upgraded": 0,
                "not_owned": 0, "errors": 0, "report_dir": report_dir}
     logger.info("refix-soundeo-tags: %d unmarked candidate file(s) (not yet logged)",
                 len(candidates))
@@ -1066,17 +1075,19 @@ def refix_soundeo_tags(
         soundeo.close()
         raise RuntimeError(f"Soundeo login failed: {exc}") from exc
 
-    # Files already analysed keep their on-disk name (rename would orphan the
-    # cache key and force re-analysis); unanalysed files may take the Soundeo
-    # name. We can't read the tagger cache here, so we play safe: always
-    # re-download in place (never rename), so no cache key ever changes.
+    # An AIFF file is overwritten **in place** (same name + same cut => same
+    # duration => same tagger cache key => no re-analysis). A non-AIFF owned
+    # file is upgraded: the AIFF is written to the ``.aiff`` sibling path and the
+    # inferior original removed (this one does change the cache key, but the
+    # audio genuinely changed format, so re-analysis is warranted and the set is
+    # tiny). ``summary["upgraded"]`` counts the format upgrades.
     processed = 0
     try:
         for entry in candidates:
             if limit is not None and processed >= limit:
                 break
             processed += 1
-            stem, _ext = os.path.splitext(entry.name)
+            stem, ext = os.path.splitext(entry.name)
             artist, title = _parse_stem_artist_title(stem)
             track = PlaylistTrack(name=title, artists=[artist] if artist else [])
             on_disk = probe_duration(entry.path)
@@ -1090,29 +1101,39 @@ def refix_soundeo_tags(
             if owned is None:
                 summary["not_owned"] += 1
                 continue
+            is_upgrade = ext.lower() not in fmt_exts
+            dest = (os.path.join(library, stem + "." + audio_format)
+                    if is_upgrade else entry.path)
             if dry_run:
-                logger.info("refix: WOULD fix %s  (soundeo:%s '%s')",
-                            entry.name, owned.id, owned.label)
+                verb = "WOULD upgrade" if is_upgrade else "WOULD fix"
+                logger.info("refix: %s %s  (soundeo:%s '%s')",
+                            verb, entry.name, owned.id, owned.label)
                 summary["fixed"] += 1
+                summary["upgraded"] += int(is_upgrade)
                 continue
             try:
-                soundeo.download(owned, entry.path, assume_free=True)  # overwrite in place
+                soundeo.download(owned, dest, assume_free=True)
             except SoundeoError as exc:
                 logger.warning("refix: re-download failed for %s — %s", entry.name, exc)
                 summary["errors"] += 1
                 continue
-            _record_soundeo_tags(log, entry.path, owned.id)
+            if is_upgrade and os.path.normcase(dest) != os.path.normcase(entry.path):
+                _remove_quiet(entry.path)  # drop the inferior lossy original
+            _record_soundeo_tags(log, dest, owned.id)
             save_soundeo_tags_log(report_dir, log)  # persist incrementally
             summary["fixed"] += 1
-            logger.info("refix: fixed %s  (soundeo:%s)", entry.name, owned.id)
+            summary["upgraded"] += int(is_upgrade)
+            logger.info("refix: %s %s  (soundeo:%s)",
+                        "upgraded" if is_upgrade else "fixed", entry.name, owned.id)
     finally:
         soundeo.close()
         if not dry_run:
             save_soundeo_tags_log(report_dir, log)
 
     logger.info(
-        "refix-soundeo-tags: done — fixed=%d not_owned=%d errors=%d (of %d candidate(s))",
-        summary["fixed"], summary["not_owned"], summary["errors"], len(candidates),
+        "refix-soundeo-tags: done — fixed=%d (upgraded=%d) not_owned=%d errors=%d "
+        "(of %d candidate(s))", summary["fixed"], summary["upgraded"],
+        summary["not_owned"], summary["errors"], len(candidates),
     )
     return summary
 
