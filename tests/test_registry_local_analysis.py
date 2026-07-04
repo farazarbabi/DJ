@@ -142,6 +142,33 @@ class TestRunAnalysis:
         assert track.tagger_derived_signature
         assert track.tagger_key_signature
 
+    def test_cache_only_skips_uncached(self, tmp_path, monkeypatch):
+        """cache_only must NOT analyze a cache-miss track (no audio decode)."""
+        wav_path = str(tmp_path / "track.wav")
+        _make_wav(wav_path, duration_sec=5.0)
+
+        monkeypatch.chdir(tmp_path)
+        os.makedirs("cache", exist_ok=True)
+        get_cache(os.path.join("cache", "raw_cache.pkl"))
+        self.config.output_dir = str(tmp_path / "registry")
+
+        store = CsvStore(self.config.output_dir)
+        store.save_tracks([LogicalTrack(track_id="T-001", primary_file_id="F-001")])
+        store.save_files([
+            FileRecord(file_id="F-001", track_id="T-001", path_abs=wav_path,
+                       is_primary_file=True, audio_duration_sec=5.0),
+        ])
+        store.save_observations([])
+
+        stats = run_analysis(self.config, store, no_essentia=True, cache_only=True)
+
+        assert stats["analyzed"] == 0        # nothing decoded
+        assert stats["skipped"] == 1         # the miss was skipped
+        assert stats["cached"] == 0          # it had no usable cached analysis
+        # No analysis observation was created for the un-cached track.
+        obs = store.load_observations()
+        assert [o for o in obs if o.source_system == "analysis_librosa"] == []
+
     def test_rerun_uses_cache(self, tmp_path, monkeypatch):
         """Running analysis twice should use cache on second run."""
         wav_path = str(tmp_path / "track.wav")

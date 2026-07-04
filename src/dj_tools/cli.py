@@ -65,6 +65,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--write-key-tag", action="store_true",
                        help="Also write canonical key to TKEY/InitialKey field (off by default)")
     p_run.add_argument("--no-grouping", action="store_true", help="Skip grouping phase")
+    p_run.add_argument("--cache-only", dest="cache_only", action="store_true",
+                       help="Tag and group only tracks already analyzed (in the cache); "
+                            "skip analysis of un-cached tracks entirely (never decodes "
+                            "audio). Un-analyzed tracks are left out of tags/grouping.")
     p_run.add_argument("--no-clap", action="store_true", help="Disable CLAP embeddings in grouper")
     p_run.add_argument("--no-essentia", action="store_true", help="Skip essentia key analysis")
     p_run.add_argument("-w", "--workers", type=int, default=0,
@@ -806,9 +810,14 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     obs_cache.save()
     logger.info("Pipeline: ingest done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
-    # Phase 3: Analyze (full tagger pipeline)
+    # Phase 3: Analyze (full tagger pipeline). --cache-only reuses cached
+    # analysis only and skips decoding audio for un-cached tracks.
     t0 = time.perf_counter()
-    run_analysis(config, store, no_essentia=args.no_essentia, show_progress=show_progress)
+    cache_only = getattr(args, "cache_only", False)
+    if cache_only:
+        logger.info("Pipeline: --cache-only — tagging/grouping the already-analyzed subset only")
+    run_analysis(config, store, no_essentia=args.no_essentia,
+                 show_progress=show_progress, cache_only=cache_only)
     logger.info("Pipeline: analysis done in %s", _fmt_elapsed(time.perf_counter() - t0))
 
     # Phase 4: Resolve canonical key + BPM
@@ -877,6 +886,8 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             grouper_argv.extend(["--csv", groups_csv])
             if args.no_clap:
                 grouper_argv.append("--no-clap")
+            if cache_only:
+                grouper_argv.append("--cache-only")
             if args.force_extract:
                 grouper_argv.append("--force-extract")
             if args.workers > 1:

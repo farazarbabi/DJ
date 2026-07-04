@@ -388,6 +388,7 @@ def run_analysis(
     track_ids: list[str] | None = None,
     no_essentia: bool = False,
     show_progress: bool = False,
+    cache_only: bool = False,
 ) -> dict:
     """Run full tagger analysis on tracks (energy, vibe, vocal, structure, key).
 
@@ -395,9 +396,14 @@ def run_analysis(
     are read from cache instantly — no audio loading needed.
     New analysis results are written back so all modules can reuse them.
 
+    When ``cache_only`` is set, cache misses are **not** analyzed (no audio is
+    decoded): only tracks with usable cached analysis get features, and the
+    misses are reported as ``skipped``. Use it to tag/group just the
+    already-analyzed subset without triggering new analysis.
+
     Stores results as SourceObservations and writes tagger features to LogicalTrack.
 
-    Returns stats dict: {"total", "cached", "analyzed", "failed"}.
+    Returns stats dict: {"total", "cached", "analyzed", "failed", "skipped"}.
     """
     use_essentia = config.run_essentia and not no_essentia and _essentia_available()
     if config.run_essentia and not no_essentia and not _essentia_available():
@@ -426,7 +432,7 @@ def run_analysis(
 
     if not candidates:
         logger.info("Analysis: no candidates to process")
-        return {"total": 0, "cached": 0, "analyzed": 0, "failed": 0}
+        return {"total": 0, "cached": 0, "analyzed": 0, "failed": 0, "skipped": 0}
 
     # Load shared caches
     from dj_tagger.universal_cache import get_cache as get_ucache
@@ -505,7 +511,15 @@ def run_analysis(
         cache_progress.update(index, os.path.basename(path), cached=len(cache_hits), analyze=len(cache_misses))
     cache_progress.finish()
 
-    if cache_misses:
+    n_skipped = 0
+    if cache_only and cache_misses:
+        # Cache-only: never decode audio. Drop the misses (leaving them
+        # un-analyzed this run) so only the already-analyzed subset flows on.
+        n_skipped = len(cache_misses)
+        logger.info("Analysis: %d tracks (%d cached, %d skipped — cache-only, not analyzed)",
+                    len(candidates), len(cache_hits), n_skipped)
+        cache_misses = []
+    elif cache_misses:
         logger.info("Analysis: %d tracks (%d cached, %d to analyze)", len(candidates), len(cache_hits), len(cache_misses))
     else:
         logger.info("Analysis: %d tracks (all cached)", len(candidates))
@@ -753,4 +767,5 @@ def run_analysis(
         "cached": len(cache_hits),
         "analyzed": len(fresh_results),
         "failed": n_failed,
+        "skipped": n_skipped,
     }

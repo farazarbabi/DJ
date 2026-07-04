@@ -29,6 +29,7 @@ dj run
 dj run "E:\\Music" -w 4
 dj run --no-grouping
 dj run --no-tags
+dj run --cache-only   # tag+group only already-analyzed tracks; never analyze/decode audio
 dj run --no-songstats
 dj run --force-extract
 dj vibe-audit
@@ -225,6 +226,7 @@ Playlist output resolution (both `dj run` and `dj-grouper run`):
 - `--fine-playlists` additionally writes the full-resolution `groups/`, `by_key/`, `by_subgenre/`
 - `generate_categorical_playlists(..., fine=, coarse=)` gates the two resolutions independently (function defaults stay `fine=True, coarse=False`; the CLI passes `fine=<flag>, coarse=True`)
 - `dj-grouper run --cache-only` groups **only tracks already analyzed** (in the cache): `_run_extraction(..., cache_only=True)` routes any un-cached track to skip (`stats.n_skipped_uncached`) instead of extracting it, the run command then drops skipped paths from `tracks` before CLAP/feature-build/clustering, and the CLAP step loads cached embeddings only (zero-filling the rest) — so no audio is ever decoded. It never re-analyzes cached tracks either (same filename+duration cache key).
+- `dj run --cache-only` is the unified equivalent: it **tags and groups only the already-analyzed tracks and never decodes audio**. Phase 3 `run_analysis(..., cache_only=True)` reports cache misses as `skipped` instead of analyzing them (no audio load), and Phase 8 forwards `--cache-only` to the grouper. Resolve/taxonomy/tag phases run as usual over registry data (no audio); un-analyzed tracks simply have no tagger features to tag or group.
 
 Rekordbox XML collection (Spec 1, `specs/rekordbox_xml_collection_export.md`):
 
