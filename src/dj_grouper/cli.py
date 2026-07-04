@@ -68,6 +68,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--cache-dir", default=_DEFAULTS.cache_dir, help="Cache directory")
     p_run.add_argument("--feedback", default=_DEFAULTS.feedback_file)
     p_run.add_argument("--force-extract", action="store_true", help="Clear cache + outputs, re-extract")
+    p_run.add_argument("--cache-only", dest="cache_only", action="store_true",
+                       help="Group only tracks that are already analyzed (in the cache); "
+                            "skip any un-analyzed track instead of decoding/extracting it "
+                            "(never loads audio, incl. CLAP)")
     p_run.add_argument("--force-clap", action="store_true", help="Re-extract CLAP embeddings")
     p_run.add_argument("--rebuild", action="store_true", help="Force full re-clustering (ignore existing groups)")
     p_run.add_argument("--fine-playlists", action="store_true", help="Also write full-resolution group playlists to groups/ (groups_coarse/ is written by default)")
@@ -230,7 +234,8 @@ def _raw_layer_schema_matches(layer: str, data) -> bool:
 
 
 class _ExtractionStats:
-    __slots__ = ("n_cached", "n_extracted", "n_analyzed", "n_failed", "n_removed")
+    __slots__ = ("n_cached", "n_extracted", "n_analyzed", "n_failed", "n_removed",
+                 "n_skipped_uncached")
 
     def __init__(self) -> None:
         self.n_cached = 0
@@ -238,6 +243,7 @@ class _ExtractionStats:
         self.n_analyzed = 0
         self.n_failed = 0
         self.n_removed = 0
+        self.n_skipped_uncached = 0
 
     def summary_parts(self) -> list[str]:
         parts = []
@@ -247,6 +253,8 @@ class _ExtractionStats:
             parts.append(f"{self.n_analyzed} analyzed")
         if self.n_extracted:
             parts.append(f"{self.n_extracted} extracted")
+        if self.n_skipped_uncached:
+            parts.append(f"{self.n_skipped_uncached} skipped (uncached)")
         if self.n_failed:
             parts.append(f"{self.n_failed} failed")
         if self.n_removed:
@@ -262,12 +270,18 @@ def _run_extraction(
     workers: int = 1,
     analyze_untagged: bool = False,
     write_tags: bool = False,
+    cache_only: bool = False,
 ) -> tuple[dict, _ExtractionStats]:
     """Shared extraction logic for run and extract commands.
 
     Uses raw + derived cache so that tracks analyzed by dj-tagger or
     dj-registry are never re-analyzed. Only extracts DSP features when
     the tagger analysis is already cached.
+
+    When ``cache_only`` is set, tracks without complete cached analysis are
+    **skipped** (counted in ``stats.n_skipped_uncached``) instead of extracted —
+    so grouping runs over just the already-analyzed subset and never decodes
+    audio. Mutually exclusive in spirit with ``force`` (which re-extracts all).
 
     Returns (raw_cache, stats).
     """
@@ -310,8 +324,12 @@ def _run_extraction(
         filename = Path(t.path).name
         dur = _durations.get(t.path)
 
-        # When force=True, skip cache and re-extract everything
+        # When force=True, skip cache and re-extract everything (unless
+        # cache_only, which never decodes audio — an un-cached track is skipped).
         if force:
+            if cache_only:
+                stats.n_skipped_uncached += 1
+                continue
             needs_analysis = analyze_untagged and (t.energy is None or is_unknown_key(t.key))
             to_extract.append((i, t, mtime, needs_analysis, None))
             continue
@@ -377,7 +395,12 @@ def _run_extraction(
             stats.n_cached += 1
             continue
 
-        # Need extraction — at least DSP, possibly full analysis
+        # Need extraction — at least DSP, possibly full analysis. Under
+        # cache_only we never decode audio, so an incompletely-cached track is
+        # dropped from this run instead (grouping the already-analyzed subset).
+        if cache_only:
+            stats.n_skipped_uncached += 1
+            continue
         needs_analysis = analyze_untagged and (t.energy is None or is_unknown_key(t.key))
         if usable_tagger is not None:
             to_dsp_only.append((i, t, mtime))
@@ -388,6 +411,9 @@ def _run_extraction(
 
     if stats.n_cached:
         logger.info("  %d tracks loaded from cache", stats.n_cached)
+    if stats.n_skipped_uncached:
+        logger.info("  %d tracks skipped (not yet analyzed; --cache-only)",
+                    stats.n_skipped_uncached)
     if to_dsp_only:
         logger.info("  %d tracks need DSP extraction only (analysis cached)", len(to_dsp_only))
 
@@ -805,15 +831,32 @@ def _cmd_run(args) -> int:
     print(f" {total_tracks} tracks found ({n_tagged} tagged, {total_tracks - n_tagged} untagged) ({_fmt_elapsed(_time.perf_counter() - t_step)})")
 
     print("  Analyzing and extracting features...")
+    cache_only = getattr(args, "cache_only", False)
     raw_cache, ext_stats = _run_extraction(
         tracks, cpaths["features"],
         force=args.force_extract,
         workers=getattr(args, "workers", 1) or 1,
         analyze_untagged=True,
         write_tags=args.write_tags,
+        cache_only=cache_only,
     )
     elapsed_step = _time.perf_counter() - t_step
     print(f"  Done: {', '.join(ext_stats.summary_parts())} ({_fmt_elapsed(elapsed_step)})")
+
+    if cache_only:
+        # Drop tracks that had no cached analysis so downstream steps (CLAP,
+        # feature build, clustering) run only over the already-analyzed subset
+        # and never decode audio. build_features_from_raw indexes raw_cache by
+        # path, so track_order must not contain a skipped path.
+        kept = [t for t in tracks if t.path in raw_cache]
+        if len(kept) != len(tracks):
+            print(f"  --cache-only: grouping {len(kept)} analyzed track(s), "
+                  f"skipping {len(tracks) - len(kept)} not yet analyzed")
+        tracks = kept
+        total_tracks = len(tracks)
+        if not tracks:
+            print("  No analyzed tracks to group.")
+            return 0
 
     # ── Step 1b: CLAP audio embeddings ──
     track_order = [t.path for t in tracks]
@@ -828,9 +871,15 @@ def _cmd_run(args) -> int:
             for p in track_order
         )
 
-        if all_clap_cached:
-            # Load cached embeddings without importing CLAP/torch
-            print(f"\n  CLAP embeddings: all {total_tracks} cached")
+        if all_clap_cached or cache_only:
+            # Load cached embeddings without importing CLAP/torch. Under
+            # --cache-only we never decode audio, so any track lacking a cached
+            # embedding is simply zero-filled (same as build_unified_vector's
+            # missing-CLAP handling) rather than extracted.
+            n_have = sum(1 for p in track_order
+                         if _uc.get_track(Path(p).name, _qd(p), "clap") is not None)
+            print(f"\n  CLAP embeddings: {n_have}/{total_tracks} cached"
+                  + ("" if all_clap_cached else " (zero-filling the rest, --cache-only)"))
             import numpy as _np
             raw_clap = _np.zeros((len(track_order), 512), dtype=_np.float32)
             for i, p in enumerate(track_order):

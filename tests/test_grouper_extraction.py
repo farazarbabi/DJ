@@ -61,6 +61,27 @@ class TestRunExtraction:
         assert stats2.n_extracted == 0
         assert stats2.n_cached == 1
 
+    def test_cache_only_skips_uncached_track(self, tmp_path):
+        """--cache-only groups the cached track and skips the un-analyzed one."""
+        cached_wav = str(tmp_path / "cached.wav")
+        fresh_wav = str(tmp_path / "fresh.wav")
+        _make_wav(cached_wav)
+        _make_wav(fresh_wav)
+        cache_path = str(tmp_path / "cache.pkl")
+
+        # Analyze only the first track so it is in the cache.
+        _run_extraction([TrackInfo(path=cached_wav)], cache_path, workers=1)
+
+        # cache_only over both: cached one kept, fresh one skipped (never extracted).
+        raw_cache, stats = _run_extraction(
+            [TrackInfo(path=cached_wav), TrackInfo(path=fresh_wav)],
+            cache_path, workers=1, cache_only=True,
+        )
+        assert stats.n_extracted == 0          # nothing decoded
+        assert stats.n_skipped_uncached == 1
+        assert cached_wav in raw_cache
+        assert fresh_wav not in raw_cache      # excluded from the run
+
     def test_identity_keyed_dsp_cache_ignores_version_stamp(self, tmp_path, monkeypatch):
         """DSP cache survives unrelated raw signature churn by identity."""
         wav = str(tmp_path / "track.wav")

@@ -71,6 +71,8 @@ dj-registry export
 
 dj-grouper --dry-run
 dj-grouper --force-extract
+# Group only already-analyzed tracks; skip (don't extract/decode) un-cached ones
+dj-grouper run "D:\\Music" --cache-only
 ```
 
 ## Current Tag Format
@@ -222,6 +224,7 @@ Playlist output resolution (both `dj run` and `dj-grouper run`):
 - coarse, half-resolution playlists (`groups_coarse/`, `by_key_coarse/`, `by_bpm_coarse/`, `by_subgenre_coarse/`) are written by default
 - `--fine-playlists` additionally writes the full-resolution `groups/`, `by_key/`, `by_subgenre/`
 - `generate_categorical_playlists(..., fine=, coarse=)` gates the two resolutions independently (function defaults stay `fine=True, coarse=False`; the CLI passes `fine=<flag>, coarse=True`)
+- `dj-grouper run --cache-only` groups **only tracks already analyzed** (in the cache): `_run_extraction(..., cache_only=True)` routes any un-cached track to skip (`stats.n_skipped_uncached`) instead of extracting it, the run command then drops skipped paths from `tracks` before CLAP/feature-build/clustering, and the CLAP step loads cached embeddings only (zero-filling the rest) — so no audio is ever decoded. It never re-analyzes cached tracks either (same filename+duration cache key).
 
 Rekordbox XML collection (Spec 1, `specs/rekordbox_xml_collection_export.md`):
 
