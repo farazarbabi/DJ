@@ -75,6 +75,21 @@ def test_by_key_zero_padded_filenames(tmp_path):
     assert not (tmp_path / "by_key" / "3A.m3u8").exists()
 
 
+def test_dedup_two_tracks_sharing_one_file(tmp_path):
+    # Two logical tracks resolving to the same file (duplicate registry entries
+    # sharing a primary_file_id) must appear only ONCE per playlist.
+    tracks = [
+        _track("t1", file_id="f1", key="6A", bpm="120"),
+        _track("t2", file_id="f1", key="6A", bpm="120"),  # same file
+    ]
+    files = [_file("f1", "/music/a.aiff")]
+    generate_categorical_playlists(tracks, files, str(tmp_path), coarse=True)
+    for rel in ("by_key/06A.m3u8", "by_key_coarse/05A-06B.m3u8"):
+        lines = _read(tmp_path / rel)
+        paths = [ln for ln in lines if ln and not ln.startswith("#")]
+        assert paths == ["/music/a.aiff"], f"{rel}: {paths}"
+
+
 def test_by_key_skips_missing_key(tmp_path):
     tracks = [_track("t1", file_id="f1", key="", bpm="120")]
     files = [_file("f1", "/music/a.aiff")]

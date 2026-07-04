@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 
 from ..models import FileRecord, LogicalTrack
@@ -98,10 +99,18 @@ def _sorted_entries(
 ) -> list[tuple[str, str]]:
     sorted_tracks = sorted(bucket, key=_bpm_value)
     entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for t in sorted_tracks:
         path = path_by_id.get(t.track_id)
         if not path:
             continue
+        # Dedupe by absolute path: several logical tracks can resolve to the
+        # same file (e.g. a duplicate registry entry sharing a primary_file_id),
+        # and a file must appear at most once per playlist.
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in seen:
+            continue
+        seen.add(norm)
         entries.append((_track_label(t, path), path))
     return entries
 
