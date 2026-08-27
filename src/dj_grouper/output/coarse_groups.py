@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from dj_tools.playlist_sorting import sort_tracks_by_bpm_and_key
 from ..config import GrouperConfig
 from ..features.builder import TrackFeatures
 from ..grouping.assignment import (
@@ -176,7 +177,7 @@ def generate_coarse_group_playlists(
     config: GrouperConfig,
     output_dir: str,
 ) -> int:
-    """Write half-resolution group playlists to `{output_dir}/groups_coarse/`.
+    """Write half-resolution group playlists to `{output_dir}/groups_coarse/`, sorted by BPM+key.
 
     Returns the number of coarse playlists written.
     """
@@ -186,8 +187,12 @@ def generate_coarse_group_playlists(
     for group in coarse.groups:
         playlist_path = out / f"{group.folder_name.translate(_WIN_ILLEGAL)}.m3u8"
         lines = ["#EXTM3U"]
-        for idx in group.member_indices:
-            tf = tracks[idx]
+
+        # Sort group members by BPM (low→high), key as tiebreaker (Camelot wheel order)
+        member_tracks = [tracks[idx] for idx in group.member_indices]
+        sorted_tracks = sort_tracks_by_bpm_and_key(member_tracks)
+
+        for tf in sorted_tracks:
             lines.append(f"#EXTINF:-1,{Path(tf.path).stem}")
             lines.append(playlist_abs_path(tf.path))
         write_m3u8(playlist_path, lines)

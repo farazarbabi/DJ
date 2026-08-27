@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 
+from dj_tools.playlist_sorting import sort_tracks_by_bpm_and_key
 from ..features.builder import TrackFeatures
 from ..grouping.assignment import GroupAssignment
 
@@ -42,7 +43,7 @@ def generate_group_playlists(
     assignment: GroupAssignment,
     output_dir: str,
 ) -> None:
-    """Generate one .m3u8 playlist per group."""
+    """Generate one .m3u8 playlist per group, sorted by BPM (ascending) with key as tiebreaker."""
     out = Path(output_dir) / "groups"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -50,8 +51,12 @@ def generate_group_playlists(
     for group in assignment.groups:
         playlist_path = out / f"{group.folder_name.translate(_illegal)}.m3u8"
         lines = ["#EXTM3U"]
-        for idx in group.member_indices:
-            tf = tracks[idx]
+
+        # Sort group members by BPM (low→high), key as tiebreaker (Camelot wheel order)
+        member_tracks = [tracks[idx] for idx in group.member_indices]
+        sorted_tracks = sort_tracks_by_bpm_and_key(member_tracks)
+
+        for tf in sorted_tracks:
             lines.append(f"#EXTINF:-1,{Path(tf.path).stem}")
             lines.append(playlist_abs_path(tf.path))
 

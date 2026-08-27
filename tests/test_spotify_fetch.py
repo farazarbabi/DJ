@@ -516,8 +516,9 @@ def test_generate_spotify_playlists_dedupes_repeated_tracks(tmp_path):
     assert len(paths) == 1
 
 
-def test_generate_spotify_playlists_orders_newest_added_first(tmp_path):
-    # Playlists list tracks by "Added At" descending (most recently added first).
+def test_generate_spotify_playlists_sorts_by_bpm_with_key_tiebreaker(tmp_path):
+    # Playlists sort by BPM (ascending), with Camelot key as tiebreaker.
+    # Files without tags sort by infinity, maintaining CSV order within that tier.
     library = tmp_path / "lib"
     library.mkdir()
     (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
@@ -525,8 +526,8 @@ def test_generate_spotify_playlists_orders_newest_added_first(tmp_path):
     (library / "Baime - Satara (Original Mix).aiff").write_bytes(b"\x00")
     csv_path = _write_csv(tmp_path / "p.csv", [
         _row("a", "Skyfall", "Adele", 286000, added_at="2021-06-01T00:00:00Z"),
-        _row("b", "Satara", "Baime", 300000, added_at="2023-01-15T00:00:00Z"),  # newest
-        _row("c", "Matter of Fact", "Iorie", 357000, added_at="2019-03-10T00:00:00Z"),  # oldest
+        _row("b", "Satara", "Baime", 300000, added_at="2023-01-15T00:00:00Z"),
+        _row("c", "Matter of Fact", "Iorie", 357000, added_at="2019-03-10T00:00:00Z"),
     ])
 
     generate_spotify_playlists([csv_path], str(library))
@@ -534,8 +535,9 @@ def test_generate_spotify_playlists_orders_newest_added_first(tmp_path):
     paths = [ln for ln in _read_playlist(
         library / "outputs" / "playlists" / "spotify" / "p.m3u8"
     ) if not ln.startswith("#")]
-    assert paths[0].endswith("Baime - Satara (Original Mix).aiff")
-    assert paths[1].endswith("Adele - Skyfall (Original Mix).aiff")
+    # No tags on test files, so all sort by BPM=infinity; CSV order preserved
+    assert paths[0].endswith("Adele - Skyfall (Original Mix).aiff")
+    assert paths[1].endswith("Baime - Satara (Original Mix).aiff")
     assert paths[2].endswith("Iorie - Matter of Fact (Extended Mix).aiff")
 
 

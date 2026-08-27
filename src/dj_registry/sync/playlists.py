@@ -1,7 +1,8 @@
 """Categorical M3U8 playlist generation from the registry.
 
 Emits browsing playlists grouped by Camelot key, BPM bracket, and DJ taxonomy
-sub-genre.
+sub-genre. Tracks are sorted by BPM (ascending) within each category, with key
+as tiebreaker (Camelot wheel order).
 Pure registry data — no clustering/grouper math.
 
 A popularity-tier writer used to live here too, but Spotify dropped the
@@ -18,6 +19,7 @@ import math
 import os
 from pathlib import Path
 
+from dj_tools.playlist_sorting import sort_tracks_by_bpm_and_key
 from ..models import FileRecord, LogicalTrack
 
 logger = logging.getLogger(__name__)
@@ -43,7 +45,10 @@ def _safe_filename(stem: str) -> str:
     return stem.replace(" ", "_").translate(_ILLEGAL_CHARS)
 
 
-def _parse_bpm(value: str) -> float | None:
+def _parse_bpm(value: str | int | float | None) -> float | None:
+    """Parse BPM value to float, returning None if invalid."""
+    if value is None:
+        return None
     try:
         bpm = float(value)
     except (ValueError, TypeError):
@@ -97,7 +102,12 @@ def _sorted_entries(
     bucket: list[LogicalTrack],
     path_by_id: dict[str, str],
 ) -> list[tuple[str, str]]:
-    sorted_tracks = sorted(bucket, key=_bpm_value)
+    # Sort by BPM (ascending), key as tiebreaker (Camelot wheel order)
+    sorted_tracks = sort_tracks_by_bpm_and_key(
+        bucket,
+        bpm_getter=lambda t: _parse_bpm(t.canonical_bpm),
+        key_getter=lambda t: t.canonical_key_camelot,
+    )
     entries: list[tuple[str, str]] = []
     seen: set[str] = set()
     for t in sorted_tracks:

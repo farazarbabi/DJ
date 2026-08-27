@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -734,17 +735,21 @@ def generate_spotify_playlists(
     threshold: float = 0.62,
     playlists_dir: str | None = None,
 ) -> dict[str, int]:
-    """Write one Rekordbox-ready ``.m3u8`` per Spotify CSV.
+    """Write one Rekordbox-ready ``.m3u8`` per Spotify CSV, sorted by BPM+key.
 
     Each playlist mirrors its CSV: the library tracks (already-present, an
     Original/Extended variant, or just downloaded as ``[U]``) that resolve to
-    that CSV's tracks, listed in CSV order. Tracks with no library match are
-    skipped. Unlike :func:`load_unique_tracks`, this parses each CSV separately
-    so per-playlist membership and order are preserved.
+    that CSV's tracks. Tracks are sorted by BPM (ascending) with key as
+    tiebreaker (Camelot wheel order). Tracks with no library match are skipped.
+    Unlike :func:`load_unique_tracks`, this parses each CSV separately so
+    per-playlist membership is preserved.
 
     Re-scans ``library`` so files downloaded earlier in this run are included.
     Returns counts: ``playlists_written``, ``tracks_added``, ``tracks_skipped``.
     """
+    from dj_registry.adapters.tag_extractor import extract_tags
+    from .playlist_sorting import bpm_sort_key, camelot_sort_key
+
     out_dir = Path(playlists_dir or os.path.join(library, "outputs", "playlists")) / "spotify"
     index = scan_library(library)
 
@@ -753,41 +758,47 @@ def generate_spotify_playlists(
         playlist_tracks = parse_playlist_csv(csv_path)
         if not playlist_tracks:
             continue
-        # Newest-first: the Exportify "Added At" column is ISO-8601 UTC, which
-        # sorts lexically as chronologically. reverse=True puts the most
-        # recently added track at the top; the stable sort keeps CSV order
-        # among equal timestamps, and rows with no "Added At" sort last.
-        playlist_tracks.sort(key=lambda t: t.added_at, reverse=True)
-        lines = ["#EXTM3U"]
+
+        # Match playlist tracks to library files, extracting BPM+key for sorting
+        resolved_entries: list[tuple[str, str, float, int]] = []  # (label, abs_path, bpm, key_pos)
         seen: set[str] = set()
-        resolved = 0
         duplicates = 0
+
         for t in playlist_tracks:
             path, score = best_match(t, index)
             if not (path and score >= threshold):
                 continue
             abs_path = os.path.abspath(path)
-            # A Spotify export can list the same track twice, and two distinct
-            # rows (e.g. an alternate title/version) can resolve to the same
-            # library file — either way, emit each file at most once per
-            # playlist so Rekordbox doesn't import duplicate entries. normcase
-            # so Windows' case-insensitive paths dedupe correctly.
-            key = os.path.normcase(abs_path)
-            if key in seen:
+            norm_key = os.path.normcase(abs_path)
+            if norm_key in seen:
                 duplicates += 1
                 continue
-            seen.add(key)
-            lines.append(f"#EXTINF:-1,{Path(path).stem}")
+            seen.add(norm_key)
+
+            # Extract BPM and key from file tags for sorting
+            tags = extract_tags(path)
+            bpm = _parse_bpm(tags.get("bpm", ""))
+            key = tags.get("key_camelot", "")
+
+            label = Path(path).stem
+            resolved_entries.append((label, abs_path, bpm, camelot_sort_key(key)))
+
+        # Sort by BPM (ascending), then by Camelot key position
+        resolved_entries.sort(key=lambda e: (bpm_sort_key(e[2]), e[3]))
+
+        lines = ["#EXTM3U"]
+        for label, abs_path, _, _ in resolved_entries:
+            lines.append(f"#EXTINF:-1,{label}")
             lines.append(abs_path)
-            resolved += 1
+
         name = _playlist_stem(playlist_tracks[0].playlist or os.path.basename(csv_path))
         out_dir.mkdir(parents=True, exist_ok=True)
         # utf-8-sig: Rekordbox requires a UTF-8 BOM on .m3u8 files, else entries
         # with non-ASCII path characters fail to match and the playlist imports
         # empty.
         (out_dir / f"{name}.m3u8").write_text("\n".join(lines), encoding="utf-8-sig")
-        missed = len(playlist_tracks) - resolved - duplicates
-        added += resolved
+        missed = len(playlist_tracks) - len(resolved_entries) - duplicates
+        added += len(resolved_entries)
         skipped += missed
         written += 1
         notes = []
@@ -798,7 +809,7 @@ def generate_spotify_playlists(
         suffix = f" ({', '.join(notes)})" if notes else ""
         logger.info(
             "fetch-missing: playlist %s.m3u8 -> %d/%d track(s) resolved%s",
-            name, resolved, len(playlist_tracks), suffix,
+            name, len(resolved_entries), len(playlist_tracks), suffix,
         )
 
     if written:
@@ -807,6 +818,19 @@ def generate_spotify_playlists(
             written, out_dir,
         )
     return {"playlists_written": written, "tracks_added": added, "tracks_skipped": skipped}
+
+
+def _parse_bpm(bpm_str: str) -> float | None:
+    """Parse BPM string to float, returning None if invalid."""
+    if not bpm_str or not isinstance(bpm_str, str):
+        return None
+    try:
+        bpm = float(bpm_str)
+        if math.isfinite(bpm) and bpm > 0:
+            return bpm
+    except (ValueError, TypeError):
+        pass
+    return None
 
 
 # --------------------------------------------------------------------------- #
