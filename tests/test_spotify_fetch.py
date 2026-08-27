@@ -541,6 +541,45 @@ def test_generate_spotify_playlists_sorts_by_bpm_with_key_tiebreaker(tmp_path):
     assert paths[2].endswith("Iorie - Matter of Fact (Extended Mix).aiff")
 
 
+def test_generate_spotify_playlists_removes_tracks_when_csv_updated(tmp_path):
+    # When a track is removed from the CSV, it must be removed from the playlist.
+    # CSV v1: Tracks A, B, C → Playlist has A, B, C
+    # CSV v2: Tracks A, B (C removed) → Playlist must have only A, B
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    (library / "Iorie - Matter of Fact (Extended Mix).aiff").write_bytes(b"\x00")
+    (library / "Baime - Satara (Original Mix).aiff").write_bytes(b"\x00")
+
+    # Initial CSV with 3 tracks
+    csv_path = tmp_path / "p.csv"
+    _write_csv(csv_path, [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Matter of Fact", "Iorie", 357000),
+        _row("c", "Satara", "Baime", 300000),
+    ])
+
+    generate_spotify_playlists([csv_path], str(library))
+    playlist_path = library / "outputs" / "playlists" / "spotify" / "p.m3u8"
+    initial_paths = [ln for ln in _read_playlist(playlist_path) if not ln.startswith("#")]
+    assert len(initial_paths) == 3
+
+    # Updated CSV: remove Satara (Baime track)
+    _write_csv(csv_path, [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Matter of Fact", "Iorie", 357000),
+    ])
+
+    generate_spotify_playlists([csv_path], str(library))
+    updated_paths = [ln for ln in _read_playlist(playlist_path) if not ln.startswith("#")]
+
+    # Playlist must now have only 2 tracks; Satara removed
+    assert len(updated_paths) == 2
+    assert all(not p.endswith("Baime - Satara (Original Mix).aiff") for p in updated_paths)
+    assert any(p.endswith("Adele - Skyfall (Original Mix).aiff") for p in updated_paths)
+    assert any(p.endswith("Iorie - Matter of Fact (Extended Mix).aiff") for p in updated_paths)
+
+
 def test_playlist_stem_drops_csv_and_sanitizes():
     from dj_tools.spotify_fetch import _playlist_stem
 
