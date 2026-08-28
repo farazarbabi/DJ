@@ -138,21 +138,24 @@ dj run "D:\\Music" --rekordbox-xml "D:\\Music\\rekordbox.xml" --cues --cue-expor
 ```
 
 Find and download tracks from Spotify playlist exports that aren't in your
-library yet. This works as a standalone command, or as an opt-in phase of
-`dj run` that downloads into the library being processed *before* analysis, so
-new tracks are tagged and grouped in the same run:
+library yet. This works as a standalone command and now runs by default as
+Phase 0 of `dj run`, using `<library>/spotify-playlists` unless you override
+it. New tracks are downloaded before analysis, so they are tagged and grouped
+in the same run:
 
 ```powershell
-# Standalone: match against / download into --library
-dj fetch-missing playlist.csv --library "D:\\Music"
-dj fetch-missing ./playlists --library "D:\\Music"     # a directory of CSVs
-dj fetch-missing playlist.csv --library "D:\\Music" --dry-run
-dj fetch-missing playlist.csv --library "D:\\Music" --format wav
-dj fetch-missing playlist.csv --library "D:\\Music" --no-soundeo   # YouTube only
+# Standalone: defaults to D:\Music; pass --library to override
+dj fetch-missing playlist.csv
+dj fetch-missing ./playlists     # a directory of CSVs
+dj fetch-missing playlist.csv --dry-run
+dj fetch-missing playlist.csv --format wav
+dj fetch-missing playlist.csv --no-soundeo   # YouTube only
 
-# As part of the pipeline: download into the library being run, then analyze
-dj run "D:\\Music" --fetch-missing ./playlists
+# As part of the pipeline: default uses D:\Music\spotify-playlists
+dj run "D:\\Music"
+dj run "D:\\Music" --fetch-missing ./playlists      # override playlist source
 dj run "D:\\Music" --fetch-missing playlist.csv --fetch-format wav
+dj run "D:\\Music" --no-fetch-missing               # skip fetching
 ```
 
 Lower-level commands:
@@ -188,7 +191,7 @@ dj-grouper --force-extract
 
 The unified pipeline orchestrates:
 
-1. optional Spotify playlist gap fill via `--fetch-missing`
+1. Spotify playlist gap fill via `<library>/spotify-playlists` unless `--no-fetch-missing` is passed
 2. registry scan and file linking
 3. Rekordbox ingest plus optional Spotify ISRC and Songstats enrichment
 4. local tagger analysis and cache refresh
@@ -325,11 +328,12 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
    requiring artist agreement so unrelated same-title tracks and alternate
    remixes of a track you only own the original of count as missing
 3. downloads the missing tracks from **Soundeo first, YouTube as fallback**:
-   - **Soundeo** (your music-pool subscription, original AIFF) is used when
+   - **Soundeo** (your music-pool subscription) is used when
      `SOUNDEO_USER`/`SOUNDEO_PASS` are set in `.env` and `--format aiff` (the
      default). Per track: search (free); if found and the daily quota (resets
-     midnight CET) isn't spent, download the original AIFF **unmarked**; if the
-     quota is spent, defer to tomorrow (status `quota_skip`, not YouTubed).
+     midnight CET) isn't spent, download the best available Soundeo format in
+     AIFF > WAV > MP3 order, converting WAV/MP3 to final AIFF; if the quota is
+     spent, defer to tomorrow (status `quota_skip`, not YouTubed).
      `--no-soundeo` forces YouTube-only.
    - **YouTube** via `yt-dlp` is used when a track isn't on Soundeo (or Soundeo
      is off/login fails), **verifying duration**: only results within
@@ -337,18 +341,19 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
      accepted, trying the closest candidate first and up to `--max-attempts`
      (default 3). Audio is extracted to WAV and converted losslessly to AIFF
      by default (`--format wav` to keep WAV).
-4. names YouTube downloads `Artist - Track[U]` so they're distinguishable from
-   curated originals; Soundeo downloads are unmarked (`Artist - Track`) and
-   treated as curated originals — so a Soundeo download supersedes and prunes
-   any prior `[U]` copy, and present `[U]` tracks are upgraded to Soundeo AIFF
-   when available. Embedded Title/Artist/Album/Genre/Year/Label metadata comes
+4. marks non-original downloads by source quality: YouTube uses `[U]`, Soundeo
+   WAV uses `[W]`, and Soundeo MP3 uses `[M]`; only Soundeo AIFF downloads stay
+   unmarked like curated originals. An unmarked Soundeo AIFF supersedes and
+   prunes any prior marked copy. Present marked tracks are not rechecked against
+   Soundeo on every run; use `--check-marked-upgrades` when you want to look for
+   new Soundeo AIFF upgrades. Embedded Title/Artist/Album/Genre/Year/Label metadata comes
    from the playlist row.
 5. treats curated Original/Extended variants as present for unversioned Spotify
    titles, while true remixes stay distinct
-6. prunes `[U]` downloads once a curated unmarked original or Original/Extended
-   equivalent appears in the library. A previously downloaded `[U]` file is
-   kept only while its duration remains within tolerance; otherwise it is
-   re-downloaded.
+6. prunes marked downloads once a curated unmarked original or Original/Extended
+   equivalent appears in the library. A previously downloaded marked file is
+   only duration-checked/re-downloaded during an explicit `--check-marked-upgrades`
+   run.
 
 Reports and a download log are written to `<library>/outputs/fetch/`
 (`matched_report.csv`, `missing_report.csv`, `download_log.csv` with a `source`
@@ -357,8 +362,9 @@ column, and `unmatched_report.csv` for tracks with no in-tolerance result).
 requires `yt-dlp` and `ffmpeg` on `PATH`; the Soundeo source requires
 `SOUNDEO_USER`/`SOUNDEO_PASS` in `.env` (alongside the Spotify/Songstats keys).
 
-The same logic is available inside the pipeline via `dj run --fetch-missing
-CSV...`, which runs as Phase 0 and downloads into the first `dj run` path
+The same logic runs inside the pipeline by default via `dj run`, as Phase 0,
+downloading into the first `dj run` path. Use `--fetch-missing CSV...` to
+override the playlist CSV source
 (`--fetch-format` chooses aiff/wav). If `yt-dlp`/`ffmpeg` are missing the
 pipeline logs the problem and continues without the fetch step.
 
@@ -609,7 +615,9 @@ See [docs/dj_grouping_recommendation_system_spec.md](docs/dj_grouping_recommenda
 - `outputs/recommendations.csv`: directional recommendations
 - `outputs/playlists/*_coarse/`: half-resolution playlist sets (groups_coarse/, by_key_coarse/, by_bpm_coarse/, by_subgenre_coarse/), written by default
 - `outputs/playlists/groups/`, `by_key/`, `by_subgenre/`: full-resolution playlists, optional with `--fine-playlists`
-- `outputs/playlists/spotify/`: one M3U8 mirroring each fetched Spotify CSV (from `dj fetch-missing` / `--fetch-missing`)
+- `outputs/playlists/spotify/`: one M3U8 mirroring each fetched Spotify CSV (from standalone `dj fetch-missing` or the default `dj run` fetch phase)
+
+Generated categorical and group playlists are ordered by BPM ascending with Camelot key as the tiebreaker. The registry link step repairs stale `primary_file_id` pointers before playlist generation, and the playlist/XML exporters resolve paths from current `files_master.csv` track links so a stale primary pointer cannot put the wrong audio file into a sorted playlist.
 
 ## Testing
 

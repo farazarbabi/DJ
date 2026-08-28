@@ -1,9 +1,10 @@
 """Soundeo download source — authenticated music-pool client (primary source).
 
 Soundeo (https://soundeo.com) is a DJ music pool the user subscribes to. It
-serves the genuine original **AIFF** releases, far superior to a YouTube rip, so
-``fetch-missing`` prefers it and falls back to YouTube only when a track is not
-on Soundeo. This automates the user's own paid account.
+serves music-pool downloads that are superior to a YouTube rip, so
+``fetch-missing`` prefers Soundeo formats in AIFF > WAV > MP3 order and falls
+back to YouTube only when a usable Soundeo source is not available. This
+automates the user's own paid account.
 
 Soundeo has **no public API**; this client logs in and drives the site's
 AJAX-JSON endpoints with ``httpx`` (one persistent session for cookie
@@ -55,6 +56,7 @@ DOWNLOAD_INFO_TEMPLATE = "/download/{id}/{fmt}"   # JSON -> jsActions.redirect.u
 # Soundeo numeric format codes (data-track-format on the download links).
 FORMAT_CODE = {"mp3": "1", "wav": "2", "aiff": "3"}
 _CODE_TO_FORMAT = {v: k for k, v in FORMAT_CODE.items()}
+SOUNDEO_FORMAT_PRIORITY = ("aiff", "wav", "mp3")
 # Substrings in a failed download's flash message that mean "out of quota"
 # rather than a one-off error (so we defer vs. fall back to YouTube). Refine if
 # a real exhausted-quota response surfaces a different wording.
@@ -103,6 +105,30 @@ def _version_rank(title: str) -> int:
     if "original" in t:
         return 1
     return 2
+
+
+def acceptable_source_formats(target_format: str) -> tuple[str, ...]:
+    """Soundeo source formats to accept for a requested output format."""
+    if target_format == "aiff":
+        return SOUNDEO_FORMAT_PRIORITY
+    if target_format == "wav":
+        return ("wav", "mp3")
+    return (target_format,)
+
+
+def preferred_download_format(result: "SoundeoResult", target_format: str = "aiff") -> str | None:
+    """Best Soundeo source format for ``result`` and requested output format."""
+    available = set(result.formats)
+    for fmt in acceptable_source_formats(target_format):
+        if fmt in available:
+            return fmt
+    return None
+
+
+def _format_rank(result: "SoundeoResult", target_format: str) -> int:
+    fmt = preferred_download_format(result, target_format)
+    formats = acceptable_source_formats(target_format)
+    return formats.index(fmt) if fmt in formats else len(formats) + 1
 
 
 class SoundeoError(Exception):
@@ -350,7 +376,10 @@ class SoundeoClient:
         matches = self._title_artist_matches(track, results)
         if not matches:
             return None
-        matches.sort(key=lambda r: (_version_rank(r.title), -(r.duration_sec or 0.0)))
+        matches.sort(key=lambda r: (
+            _format_rank(r, self.audio_format), _version_rank(r.title),
+            -(r.duration_sec or 0.0),
+        ))
         return matches[0]
 
     def pick_owned(
@@ -366,7 +395,10 @@ class SoundeoClient:
         **same cut** the library already holds — same duration → same analysis
         cache key, no re-analysis. Returns None if no owned AIFF result matches.
         """
-        owned = [r for r in self._title_artist_matches(track, results) if r.downloaded]
+        owned = [
+            r for r in self._title_artist_matches(track, results)
+            if r.downloaded and self.audio_format in r.formats
+        ]
         if not owned:
             return None
         if target_duration is not None:
@@ -378,7 +410,7 @@ class SoundeoClient:
     def _title_artist_matches(
         self, track: PlaylistTrack, results: list[SoundeoResult],
     ) -> list[SoundeoResult]:
-        """Results whose title/artist tokens match ``track`` and offer the AIFF.
+        """Results whose title/artist tokens match ``track`` and offer a usable format.
 
         Shared by :meth:`pick` and :meth:`pick_owned`: all title tokens present,
         no extra remixer tokens (unless the query itself names the remix), and
@@ -393,10 +425,10 @@ class SoundeoClient:
         fmt = self.audio_format
         matches: list[SoundeoResult] = []
         for r in results:
-            # Require the AIFF link to be present (skip mp3-only or
-            # vote-required/upcoming entries) so the caller backfalls to YouTube
-            # instead of hitting a 404 on the download endpoint.
-            if fmt not in r.formats:
+            # Require a usable Soundeo source format. For AIFF output,
+            # WAV/MP3 Soundeo sources are still preferred over YouTube and
+            # converted by the caller.
+            if preferred_download_format(r, fmt) is None:
                 continue
             have_title = tokens(r.title)
             have_artist = tokens(r.artist)
@@ -415,7 +447,7 @@ class SoundeoClient:
 
     # -- download ----------------------------------------------------------- #
     def download(self, result: SoundeoResult, dest_path: str,
-                 *, assume_free: bool = False) -> None:
+                 *, assume_free: bool = False, audio_format: str | None = None) -> None:
         """Download ``result`` to ``dest_path`` in the client's audio format.
 
         Two-step: ``GET /download/<id>/<fmt>`` yields a tokenized CDN URL, then
@@ -438,7 +470,10 @@ class SoundeoClient:
         if not assume_free and self._remaining is not None and self._remaining <= 0:
             raise SoundeoQuotaExceeded(
                 "Soundeo daily download limit reached (0 downloads left)")
-        fmt = FORMAT_CODE.get(self.audio_format, self.audio_format)
+        requested_format = audio_format or self.audio_format
+        if requested_format not in result.formats:
+            raise SoundeoError(f"format {requested_format!r} not available on Soundeo")
+        fmt = FORMAT_CODE.get(requested_format, requested_format)
         try:
             info = self._get_json(DOWNLOAD_INFO_TEMPLATE.format(id=result.id, fmt=fmt))
         except httpx.HTTPStatusError as exc:

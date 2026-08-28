@@ -197,3 +197,28 @@ def test_tracks_without_primary_file_are_skipped(tmp_path):
     assert res["tracks"] == 1
     root = etree.parse(str(out)).getroot()
     assert len(root.find("COLLECTION").findall("TRACK")) == 1
+
+
+def test_collection_resolves_stale_primary_file_id_by_file_track_id(tmp_path):
+    slow = tmp_path / "slow.aiff"
+    fast = tmp_path / "fast.aiff"
+    slow.write_bytes(b"slow")
+    fast.write_bytes(b"fast")
+    tracks = [
+        _track("Tslow", "Ffast", title_canonical="Slow", canonical_bpm="100"),
+        _track("Tfast", "Ffast", title_canonical="Fast", canonical_bpm="130"),
+    ]
+    files = [
+        _file("Fslow", "Tslow", slow),
+        _file("Ffast", "Tfast", fast),
+    ]
+    out = tmp_path / "collection.xml"
+
+    res = generate_rekordbox_collection(tracks, files, [], str(out))
+
+    assert res["tracks"] == 2
+    root = etree.parse(str(out)).getroot()
+    track_els = root.find("COLLECTION").findall("TRACK")
+    by_name = {el.get("Name"): el for el in track_els}
+    assert by_name["Slow"].get("Location").endswith("slow.aiff")
+    assert by_name["Fast"].get("Location").endswith("fast.aiff")

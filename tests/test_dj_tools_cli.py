@@ -71,16 +71,29 @@ def test_run_parser_fine_playlists_defaults_off():
     assert parser.parse_args(["run", "files", "--fine-playlists"]).fine_playlists is True
 
 
-def test_run_fetch_missing_flag_nargs_distinguishes_absent_bare_explicit():
+def test_run_fetch_missing_flag_nargs_distinguishes_default_bare_explicit():
     parser = _build_parser()
-    # Absent -> None (Phase 0 skipped).
+    # Absent -> None; the pipeline treats that as default <library>/spotify-playlists.
     assert parser.parse_args(["run", "files"]).fetch_missing is None
-    # Bare flag -> [] (Phase 0 uses default <library>/spotify-playlists).
+    assert parser.parse_args(["run", "files"]).no_fetch_missing is False
+    # Bare flag -> [] (also default <library>/spotify-playlists).
     assert parser.parse_args(["run", "files", "--fetch-missing"]).fetch_missing == []
-    # Explicit -> list.
+    # Explicit -> list, overriding the default playlist directory.
     assert parser.parse_args(
         ["run", "files", "--fetch-missing", "a.csv", "b.csv"]
     ).fetch_missing == ["a.csv", "b.csv"]
+    assert parser.parse_args(["run", "files", "--no-fetch-missing"]).no_fetch_missing is True
+
+
+def test_fetch_missing_parser_accepts_check_marked_upgrades():
+    parser = _build_parser()
+    args = parser.parse_args(["fetch-missing", "p.csv", "--check-marked-upgrades"])
+    assert args.check_marked_upgrades is True
+
+    run_args = parser.parse_args([
+        "run", "files", "--fetch-missing", "p.csv", "--check-marked-upgrades",
+    ])
+    assert run_args.check_marked_upgrades is True
 
 
 def test_run_fetch_missing_defaults_to_library_playlists_dir(tmp_path, monkeypatch):
@@ -91,6 +104,7 @@ def test_run_fetch_missing_defaults_to_library_playlists_dir(tmp_path, monkeypat
     def fake_fetch_missing(playlists, library, **kwargs):
         captured["playlists"] = playlists
         captured["library"] = library
+        captured["kwargs"] = kwargs
 
     # _run_fetch_missing does `from .spotify_fetch import fetch_missing` at call
     # time, so patching the source attribute is what takes effect.
@@ -102,6 +116,8 @@ def test_run_fetch_missing_defaults_to_library_playlists_dir(tmp_path, monkeypat
 
     assert rc == 0
     assert captured["playlists"] == [str(lib / "spotify-playlists")]
+    assert captured["kwargs"]["check_marked_upgrades"] is False
+
 
 
 def test_run_fetch_missing_errors_when_default_dir_absent(tmp_path):

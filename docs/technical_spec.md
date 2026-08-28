@@ -17,7 +17,7 @@ All four entry points are installed from one `pyproject.toml`.
 
 ```text
 audio files
-  -> optional Spotify playlist gap fill (`dj fetch-missing` / `dj run --fetch-missing`)
+  -> Spotify playlist gap fill (`dj fetch-missing` / default `dj run`, skipped with `--no-fetch-missing`)
   -> dj_registry scan/link/ingest
   -> dj_tagger canonical analysis and shared cache refresh
   -> registry key/BPM resolution, taxonomy classification, and exports
@@ -412,7 +412,7 @@ Disable progress bars with `--no-progress`.
 
 `dj run` orchestrates:
 
-1. optionally fetch missing Spotify playlist tracks into the target library
+1. fetch missing Spotify playlist tracks into the target library unless skipped with `--no-fetch-missing`
 2. scan files and link them to logical tracks
 3. ingest Rekordbox when an XML is configured or auto-detected
 4. enrich ISRCs and ingest Songstats unless skipped or unavailable
@@ -420,7 +420,7 @@ Disable progress bars with `--no-progress`.
 6. resolve canonical key and BPM, then build the review queue
 7. classify the flat DJ taxonomy with the available XGB model for COMMENT category labels
 8. classify the 3-level genre taxonomy and export registry reports
-9. write categorical playlists under `outputs/playlists/by_key_coarse/`, `by_bpm_coarse/`, and `by_subgenre_coarse/` by default
+9. repair stale primary-file links and write categorical playlists under `outputs/playlists/by_key_coarse/`, `by_bpm_coarse/`, and `by_subgenre_coarse/` by default, ordered by BPM then Camelot key
 10. optionally generate Rekordbox cue rows, copied XML exports, cue reports, and XML validation
 11. run grouping and recommendations unless skipped
 12. sync COMMENT tags immediately when grouping is skipped, or after grouping when `G###` group IDs can be added

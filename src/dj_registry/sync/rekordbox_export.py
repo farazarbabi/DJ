@@ -122,6 +122,29 @@ def _append_track(
         _append_position_mark(el, cue, num=_cue_num(cue))
 
 
+def _primary_files_by_track(files: list[FileRecord]) -> dict[str, FileRecord]:
+    by_track: dict[str, FileRecord] = {}
+    for frec in files:
+        if not frec.track_id or not frec.path_abs:
+            continue
+        current = by_track.get(frec.track_id)
+        if current is None or (frec.is_primary_file and not current.is_primary_file):
+            by_track[frec.track_id] = frec
+    return by_track
+
+
+def _primary_file_for_track(
+    track: LogicalTrack,
+    file_by_id: dict[str, FileRecord],
+    file_by_track: dict[str, FileRecord],
+) -> FileRecord | None:
+    if track.primary_file_id:
+        candidate = file_by_id.get(track.primary_file_id)
+        if candidate and candidate.path_abs and candidate.track_id in ("", track.track_id):
+            return candidate
+    return file_by_track.get(track.track_id)
+
+
 def _playlist_node(
     m3u8_path: Path,
     path_index: dict[str, int],
@@ -222,6 +245,7 @@ def generate_rekordbox_collection(
     ``entries``, ``unresolved``, and ``out_path``.
     """
     file_by_id = {f.file_id: f for f in files}
+    file_by_track = _primary_files_by_track(files)
     cues_by_file: dict[str, list[CuePoint]] = {}
     for cue in cue_points:
         cues_by_file.setdefault(cue.file_id, []).append(cue)
@@ -233,14 +257,14 @@ def generate_rekordbox_collection(
     track_id_by_track: dict[str, int] = {}
     next_id = 1
     for track in tracks:
-        primary = file_by_id.get(track.primary_file_id)
+        primary = _primary_file_for_track(track, file_by_id, file_by_track)
         if primary is None or not primary.path_abs:
             continue
         track_id = next_id
         next_id += 1
         track_id_by_track[track.track_id] = track_id
         _append_track(
-            collection, track, primary, track_id, cues_by_file.get(track.primary_file_id, [])
+            collection, track, primary, track_id, cues_by_file.get(primary.file_id, [])
         )
     included = len(track_id_by_track)
     collection.set("Entries", str(included))

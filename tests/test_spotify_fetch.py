@@ -85,8 +85,9 @@ def test_parse_playlist_csv(tmp_path):
 def test_target_basename_and_query():
     t = PlaylistTrack(name="Starlings - Henry Saiz Remix", artists=["NTO"])
     assert t.target_basename() == "NTO - Starlings (Henry Saiz Remix)"
-    # The [U] source marker is appended verbatim after the clean stem.
+    # Source markers are appended verbatim after the clean stem.
     assert t.target_basename("[U]") == "NTO - Starlings (Henry Saiz Remix)[U]"
+    assert t.target_basename("[W]") == "NTO - Starlings (Henry Saiz Remix)[W]"
     assert t.search_query() == "NTO Starlings - Henry Saiz Remix"
 
 
@@ -322,8 +323,8 @@ def test_tool_file_for_matches_only_marked_naming(tmp_path):
     # re-verify would re-download it to the [U] path and leave a duplicate.
     (tmp_path / "NTO - Starlings (Henry Saiz Remix).aiff").write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) is None
-    # Only the [U]-marked name counts as a tool download.
-    tool = tmp_path / "NTO - Starlings (Henry Saiz Remix)[U].aiff"
+    # Marked names count as tool downloads.
+    tool = tmp_path / "NTO - Starlings (Henry Saiz Remix)[W].aiff"
     tool.write_bytes(b"\x00")
     assert tool_file_for(track, str(tmp_path)) == str(tool)
 
@@ -344,6 +345,15 @@ def test_prune_superseded_downloads_removes_marked_when_original_exists(tmp_path
     assert removed == [str(marked)]
     assert not marked.exists()
     assert orig.exists()  # the curated original is kept
+
+
+def test_prune_superseded_downloads_removes_soundeo_wav_marker(tmp_path):
+    orig = tmp_path / "Artist - Song.aiff"
+    marked = tmp_path / "Artist - Song[W].aiff"
+    orig.write_bytes(b"\x00")
+    marked.write_bytes(b"\x00")
+    assert prune_superseded_downloads(str(tmp_path)) == [str(marked)]
+    assert not marked.exists()
 
 
 def test_prune_superseded_downloads_matches_across_formats(tmp_path):
@@ -386,6 +396,33 @@ def test_prune_superseded_downloads_ignores_unrelated_remix(tmp_path):
     marked.write_bytes(b"\x00")
     remix.write_bytes(b"\x00")
     # A remix is a different track, so the [U] copy is NOT superseded.
+    assert prune_superseded_downloads(str(tmp_path)) == []
+    assert marked.exists()
+
+
+def test_prune_superseded_downloads_removes_extra_remixer_artist_credit(tmp_path):
+    marked = tmp_path / (
+        "Elias Dor" + "\u00e9" + ", Sarah Mon" + "\u00ed"
+        + ", Sydka - Disappear (Sydka Remix)[U].aiff"
+    )
+    original = tmp_path / (
+        "Elias Dore, Sarah Mon" + "\u00ed"
+        + " - Disappear (Sydka Remix).aiff"
+    )
+    marked.write_bytes(b"\x00")
+    original.write_bytes(b"\x00")
+
+    assert prune_superseded_downloads(str(tmp_path)) == [str(marked)]
+    assert not marked.exists()
+    assert original.exists()
+
+
+def test_prune_superseded_downloads_keeps_extra_artist_not_in_remix_title(tmp_path):
+    marked = tmp_path / "Artist, Different Artist - Song (Known Remix)[U].aiff"
+    original = tmp_path / "Artist - Song (Known Remix).aiff"
+    marked.write_bytes(b"\x00")
+    original.write_bytes(b"\x00")
+
     assert prune_superseded_downloads(str(tmp_path)) == []
     assert marked.exists()
 
@@ -663,7 +700,7 @@ class _FakeSoundeo:
     def pick(self, track, results):
         return results[0] if results else None
 
-    def download(self, result, dest):
+    def download(self, result, dest, **kw):
         self.download_calls += 1
         if self.quota_exhausted:
             raise so.SoundeoQuotaExceeded("quota")
@@ -702,6 +739,28 @@ def test_acquire_soundeo_keeps_soundeo_filename(tmp_path, monkeypatch):
     assert out.status == "ok" and out.source == "soundeo"
     assert (tmp_path / "Julian Schraven - Diclofél (Original Mix).aiff").exists()
     assert not (tmp_path / "Julian Schraven - Diclofél (Radio Edit).aiff").exists()
+
+
+def test_acquire_uses_soundeo_wav_before_youtube(tmp_path, monkeypatch):
+    yt_calls = []
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: yt_calls.append(a))
+
+    def fake_convert(src, dest):
+        with open(dest, "wb") as f:
+            f.write(b"AIFF-from-wav")
+        return True
+
+    monkeypatch.setattr(sf, "_audio_to_aiff", fake_convert)
+    track = PlaylistTrack(name="NahNah - Remix", artists=["Ka:lu", "Sydka"], duration_sec=470)
+    fake = _FakeSoundeo(so.SoundeoResult("1", "Ka:lu", "NahNah (Remix)", 469,
+                                         formats=["mp3", "wav"]))
+    out = sf.acquire_track(track, str(tmp_path), soundeo=fake, quota=sf._QuotaState())
+
+    assert out.status == "ok" and out.source == "soundeo"
+    assert out.detail == "soundeo:1:wav"
+    assert (tmp_path / "Kalu - NahNah (Remix)[W].aiff").exists()
+    assert not (tmp_path / "Kalu - NahNah (Remix)[W].__soundeo__.wav").exists()
+    assert yt_calls == []
 
 
 def test_acquire_falls_back_to_youtube_when_absent(tmp_path, monkeypatch):
@@ -861,6 +920,63 @@ def _no_match_yt(monkeypatch):
                             "no_match", "", "no result", "youtube"))
 
 
+def test_fetch_missing_logs_work_queue_composition(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    monkeypatch.setattr(sf, "tools_available", lambda: (True, True))
+    library = tmp_path / "lib"
+    library.mkdir()
+    (library / "Adele - Skyfall (Original Mix).aiff").write_bytes(b"\x00")
+    youtube_file = library / "UNKLE - Hold My Hand[U].aiff"
+    youtube_file.write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Skyfall", "Adele", 286000),
+        _row("b", "Hold My Hand", "UNKLE", 300000),
+        _row("c", "Ghost", "Nobody", 200000),
+    ])
+    _seed_cache(str(library / "outputs" / "fetch"), {
+        "spotify:track:c": {"artists": "Nobody", "name": "Ghost"},
+    })
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("present marked tracks are not checked by default")))
+
+    caplog.set_level("INFO", logger="dj_tools.spotify_fetch")
+    summary = fetch_missing([csv_path], str(library), audio_format="aiff")
+
+    assert summary["missing"] == 1
+    assert summary["cached_skipped"] == 1
+    assert summary["reverify"] == 0
+    log_text = caplog.text
+    assert "fetch queue: 0 to fetch, 1 existing marked download(s) not checked" in log_text
+    assert "use --check-marked-upgrades" in log_text
+    assert "1 cached not-found skipped, 1 already present as originals/curated" in log_text
+    assert "CHECK marked download" not in log_text
+
+
+def test_fetch_missing_check_marked_upgrades_reverifies_marked_files(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    monkeypatch.setattr(sf, "tools_available", lambda: (True, True))
+    library = tmp_path / "lib"
+    library.mkdir()
+    youtube_file = library / "UNKLE - Hold My Hand[U].aiff"
+    youtube_file.write_bytes(b"\x00")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("b", "Hold My Hand", "UNKLE", 300000),
+    ])
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: sf.DownloadOutcome(
+        "skip", str(youtube_file), "already exists, duration ok (300s)", "youtube"))
+
+    caplog.set_level("INFO", logger="dj_tools.spotify_fetch")
+    summary = fetch_missing(
+        [csv_path], str(library), audio_format="aiff", check_marked_upgrades=True,
+    )
+
+    assert summary["reverify"] == 1
+    log_text = caplog.text
+    assert "fetch queue: 0 to fetch, 1 existing marked download(s) queued" in log_text
+    assert "CHECK marked download for Soundeo upgrade/duration: UNKLE - Hold My Hand" in log_text
+    assert "YOUTUBE OK (existing marked download; duration ok): UNKLE - Hold My Hand" in log_text
+
+
 def test_fetch_missing_caches_not_found_and_skips_next_run(tmp_path, monkeypatch):
     _no_match_yt(monkeypatch)  # YouTube-only (no Soundeo creds), nothing found
     monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
@@ -940,6 +1056,32 @@ def test_fetch_missing_does_not_cache_when_soundeo_had_match(tmp_path, monkeypat
     assert "spotify:track:a" not in cache  # on Soundeo -> not cached as not-found
 
 
+def test_download_track_keeps_existing_file_when_replacement_not_found(tmp_path, monkeypatch):
+    existing = tmp_path / "Artist - Tune[U].aiff"
+    existing.write_bytes(b"old-copy")
+
+    def fake_probe(path):
+        return 250.0 if str(path) == str(existing) else None
+
+    def fake_run(cmd, **kw):
+        class R:
+            pass
+        r = R()
+        r.stdout = "vid1\t210\tWrong Duration\n"
+        r.stderr = ""
+        return r
+
+    monkeypatch.setattr(sf, "probe_duration", fake_probe)
+    monkeypatch.setattr(sf.subprocess, "run", fake_run)
+    t = PlaylistTrack(name="Tune", artists=["Artist"], duration_sec=200)
+
+    out = sf.download_track(t, str(tmp_path), tolerance=3)
+
+    assert out.status == "no_match"
+    assert existing.exists()
+    assert existing.read_bytes() == b"old-copy"
+
+
 def test_download_track_transient_403_is_fail_not_no_match(tmp_path, monkeypatch):
     # A YouTube download that 403s on every attempt is transient -> "fail"
     # (retried next run, never cached as not-found), not "no_match".
@@ -998,6 +1140,12 @@ def test_forget_not_found_dry_run_keeps_entries(tmp_path):
     removed = sf.forget_not_found(str(tmp_path), ["X - Y"], dry_run=True)
     assert removed == ["X - Y"]
     assert "spotify:track:a" in sf.load_not_found_cache(rd)  # dry run leaves it
+
+
+def test_cli_fetch_missing_default_library():
+    from dj_tools.cli import DEFAULT_FETCH_LIBRARY, _build_parser
+    args = _build_parser().parse_args(["fetch-missing", "playlist.csv"])
+    assert args.library == DEFAULT_FETCH_LIBRARY == r"D:\Music"
 
 
 def test_cli_forget_cached_removes_entry(tmp_path):

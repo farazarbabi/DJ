@@ -20,6 +20,7 @@ from dj_tools.soundeo import (
     _parse_mmss,
     _parse_results,
     _score,
+    preferred_download_format,
     _search_title,
     _version_rank,
 )
@@ -316,11 +317,28 @@ def test_pick_matches_requested_remix():
     c.close()
 
 
-def test_pick_skips_when_aiff_unavailable():
+def test_pick_accepts_wav_or_mp3_when_aiff_unavailable():
     track = _track("Some Tune", ["Artist"], duration=200)
     results = [SoundeoResult("9", "Artist", "Some Tune", 200, formats=["mp3", "wav"])]
     c = _client(lambda r: httpx.Response(200, json={}))
-    assert c.pick(track, results) is None
+    picked = c.pick(track, results)
+    assert picked is not None and picked.id == "9"
+    assert preferred_download_format(picked, "aiff") == "wav"
+    c.close()
+
+
+def test_pick_prioritizes_soundeo_format_before_version():
+    track = _track("Some Tune", ["Artist"], duration=200)
+    results = [
+        SoundeoResult("mp3_ext", "Artist", "Some Tune (Extended Mix)", 500,
+                      formats=["mp3"]),
+        SoundeoResult("wav_orig", "Artist", "Some Tune (Original Mix)", 300,
+                      formats=["wav"]),
+        SoundeoResult("aiff_plain", "Artist", "Some Tune", 200,
+                      formats=["aiff"]),
+    ]
+    c = _client(lambda r: httpx.Response(200, json={}))
+    assert c.pick(track, results).id == "aiff_plain"
     c.close()
 
 
@@ -370,6 +388,31 @@ def test_download_two_step_writes_file(tmp_path):
     c.close()
     assert dest.exists() and dest.read_bytes().startswith(b"FORM")
     assert not (tmp_path / (dest.name + ".part")).exists()
+
+
+def test_download_uses_requested_source_format(tmp_path):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "sndstatic.com" in request.url.host:
+            return httpx.Response(200, headers={"content-type": "audio/wav"}, content=b"RIFFwav")
+        path = request.url.path
+        if path == "/account/logoreg":
+            return (httpx.Response(200, json={"success": True, "header": _LOGGED_IN_HEADER})
+                    if request.method == "POST" else httpx.Response(200, json={"success": False}))
+        if path.startswith("/download/"):
+            seen["path"] = path
+            return httpx.Response(200, json={"success": True,
+                                             "jsActions": {"redirect": {"url": _CDN_URL}}})
+        return httpx.Response(404)
+
+    c = _client(handler)
+    dest = tmp_path / "source.wav"
+    c.download(SoundeoResult("11858310", "A", "B", formats=["mp3", "wav"]),
+               str(dest), audio_format="wav")
+    c.close()
+    assert seen["path"].endswith("/download/11858310/2")
+    assert dest.exists() and dest.read_bytes().startswith(b"RIFF")
 
 
 def test_download_raises_quota_when_limit_message(tmp_path):

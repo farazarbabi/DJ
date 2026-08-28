@@ -83,15 +83,31 @@ def _write_m3u8(path: Path, entries: list[tuple[str, str]]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8-sig")
 
 
+def _primary_files_by_track(files: list[FileRecord]) -> dict[str, FileRecord]:
+    by_track: dict[str, FileRecord] = {}
+    for frec in files:
+        if not frec.track_id or not frec.path_abs:
+            continue
+        current = by_track.get(frec.track_id)
+        if current is None or (frec.is_primary_file and not current.is_primary_file):
+            by_track[frec.track_id] = frec
+    return by_track
+
+
 def _resolve_paths(
     tracks: list[LogicalTrack], files: list[FileRecord]
 ) -> dict[str, str]:
     file_by_id = {f.file_id: f for f in files}
+    file_by_track = _primary_files_by_track(files)
     out: dict[str, str] = {}
     for t in tracks:
-        if not t.primary_file_id:
-            continue
-        f = file_by_id.get(t.primary_file_id)
+        f = None
+        if t.primary_file_id:
+            candidate = file_by_id.get(t.primary_file_id)
+            if candidate and candidate.path_abs and candidate.track_id in ("", t.track_id):
+                f = candidate
+        if f is None:
+            f = file_by_track.get(t.track_id)
         if not f or not f.path_abs:
             continue
         out[t.track_id] = f.path_abs

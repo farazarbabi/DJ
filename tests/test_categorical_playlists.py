@@ -145,6 +145,23 @@ def test_bpm_sort_order_within_playlist(tmp_path):
     ]
 
 
+def test_playlist_resolves_stale_primary_file_id_by_file_track_id(tmp_path):
+    tracks = [
+        _track("t_slow", file_id="f_fast", key="7A", bpm="100", title="Slow"),
+        _track("t_fast", file_id="f_fast", key="7A", bpm="130", title="Fast"),
+    ]
+    files = [
+        FileRecord(file_id="f_slow", track_id="t_slow", is_primary_file=True, path_abs="/music/slow.aiff"),
+        FileRecord(file_id="f_fast", track_id="t_fast", is_primary_file=True, path_abs="/music/fast.aiff"),
+    ]
+
+    generate_categorical_playlists(tracks, files, str(tmp_path))
+
+    lines = _read(tmp_path / "by_key" / "07A.m3u8")
+    paths_in_order = [ln for ln in lines if ln and not ln.startswith("#")]
+    assert paths_in_order == ["/music/slow.aiff", "/music/fast.aiff"]
+
+
 def test_m3u8_format_uses_artist_title_label(tmp_path):
     tracks = [
         _track(

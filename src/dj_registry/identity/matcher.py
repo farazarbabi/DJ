@@ -6,7 +6,7 @@ import logging
 import uuid
 
 from ..config import RegistryConfig
-from ..models import LogicalTrack
+from ..models import FileRecord, LogicalTrack
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
 from .normalize import normalize_artist, normalize_title, normalize_mix, extract_mix_from_title
@@ -28,6 +28,35 @@ def _make_track_id() -> str:
 def _identity_key(artist: str, title: str, mix: str) -> str:
     """Create a normalized identity key for exact matching."""
     return f"{artist}|||{title}|||{mix}"
+
+
+def _repair_primary_file_links(tracks: list[LogicalTrack], files: list[FileRecord]) -> int:
+    """Rebuild track primary-file pointers from the current file->track links."""
+    files_by_track: dict[str, list[FileRecord]] = {}
+    for frec in files:
+        if frec.track_id:
+            files_by_track.setdefault(frec.track_id, []).append(frec)
+
+    changed = 0
+    for track in tracks:
+        linked = files_by_track.get(track.track_id, [])
+        primary = next((f for f in linked if f.is_primary_file), None) or (linked[0] if linked else None)
+        new_primary_id = primary.file_id if primary else ""
+        new_count = len(linked)
+        if track.primary_file_id != new_primary_id or track.linked_file_count != new_count:
+            changed += 1
+        track.primary_file_id = new_primary_id
+        track.linked_file_count = new_count
+
+    for frec in files:
+        should_be_primary = bool(
+            frec.track_id
+            and any(t.track_id == frec.track_id and t.primary_file_id == frec.file_id for t in tracks)
+        )
+        if frec.is_primary_file != should_be_primary:
+            changed += 1
+            frec.is_primary_file = should_be_primary
+    return changed
 
 
 def link_files_to_tracks(
@@ -171,6 +200,7 @@ def link_files_to_tracks(
                 changed = True
 
     already_linked = sum(1 for f in files if f.track_id) - linked_count - new_track_count
+    repaired = _repair_primary_file_links(tracks, files)
 
     store.save_files(files)
     store.save_tracks(tracks)
@@ -178,4 +208,7 @@ def link_files_to_tracks(
         store.save_observations(obs)
 
     progress.finish()
-    logger.info("Link: %d tracks (%d new, %d matched, %d existing)", len(tracks), new_track_count, linked_count, already_linked)
+    logger.info(
+        "Link: %d tracks (%d new, %d matched, %d existing, %d primary repaired)",
+        len(tracks), new_track_count, linked_count, already_linked, repaired,
+    )

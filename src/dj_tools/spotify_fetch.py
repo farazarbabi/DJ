@@ -8,12 +8,12 @@ Given one or more Exportify-style Spotify playlist CSVs, this:
   3. downloads anything missing via ``yt-dlp`` YouTube search, extracting to
      WAV and converting losslessly to AIFF (configurable),
   4. embeds descriptive metadata (Title/Artist/Album/Genre/Year/Label) from the
-     playlist row into each download, and marks the filename with ``[U]`` so
-     tool-downloaded files can be told apart from originally-AIFF library tracks,
+     playlist row into each download, and marks fallback filenames with source
+     quality markers so tool-downloaded files can be told apart from original files,
   5. flags downloads whose duration differs sharply from Spotify's — a strong
      signal that the search returned the wrong video, and
-  6. prunes any previously-downloaded ``[U]`` file once the user has added a
-     properly-named, unmarked curated original of that track to the library.
+  6. prunes any previously-downloaded marked fallback file once the user has
+     added a properly-named, unmarked curated original of that track to the library.
 
 The matcher works off files on disk, so it does not require a populated
 registry. ``yt-dlp`` and ``ffmpeg`` must be on PATH for the download step.
@@ -51,7 +51,10 @@ _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # (e.g. "Artist - Title[U].aiff"). It is filename-only — embedded Title/Artist
 # tags stay clean — and the matcher's tokenizer ignores brackets, so it does not
 # affect missing-track detection.
-SOURCE_MARKER = "[U]"
+SOURCE_MARKER = "[U]"  # YouTube fallback
+SOUNDEO_WAV_MARKER = "[W]"
+SOUNDEO_MP3_MARKER = "[M]"
+TOOL_SOURCE_MARKERS = (SOURCE_MARKER, SOUNDEO_WAV_MARKER, SOUNDEO_MP3_MARKER)
 
 # Trailing version descriptors that denote the *same* track as an untagged
 # Spotify title and should be ignored when matching. Spotify usually omits
@@ -67,6 +70,22 @@ _EQUIV_VERSION_RE = re.compile(
 )
 
 
+
+
+def marker_for_soundeo_format(source_format: str) -> str:
+    if source_format == "wav":
+        return SOUNDEO_WAV_MARKER
+    if source_format == "mp3":
+        return SOUNDEO_MP3_MARKER
+    return ""
+
+
+def strip_tool_marker(stem: str) -> tuple[str, str]:
+    for marker in TOOL_SOURCE_MARKERS:
+        if stem.endswith(marker):
+            return stem[: -len(marker)], marker
+    return stem, ""
+
 def version_key(stem: str) -> str:
     """Normalize a filename stem so Original/Extended variants share a key.
 
@@ -79,6 +98,51 @@ def version_key(stem: str) -> str:
     """
     key = _EQUIV_VERSION_RE.sub("", stem.strip())
     return re.sub(r"\s+", " ", key).strip().lower()
+
+
+def _prune_text_key(text: str) -> str:
+    """Accent-insensitive normalized text for conservative duplicate pruning."""
+    text = strip_accents(text).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _artist_names_key(artists: str) -> set[str]:
+    names: set[str] = set()
+    for part in re.split(r"\s*(?:,|;|&|\band\b)\s*", artists):
+        key = _prune_text_key(part)
+        if key:
+            names.add(key)
+    return names
+
+
+def _remixer_credit_prune_key(stem: str) -> tuple[frozenset[str], str, frozenset[str]]:
+    """Return artist/title/remixer-credit identity for marked-download pruning.
+
+    Some sources disagree on whether the remixer is a primary artist:
+    ``A, Remixer - Track (Remixer Remix)`` vs ``A - Track (Remixer Remix)``.
+    Keep true remixes distinct by requiring the full title/version text to
+    match, and only allow extra marked artists when their name appears in the
+    title/version text.
+    """
+    artists, title = _parse_stem_artist_title(stem)
+    artist_set = _artist_names_key(artists)
+    title_key = _prune_text_key(title)
+    title_tokens = frozenset(tokens(title, drop_stop=False))
+    return frozenset(artist_set), title_key, title_tokens
+
+
+def _marked_is_superseded_by_unmarked(marked_stem: str, unmarked_stem: str) -> bool:
+    marked_artists, marked_title, marked_title_tokens = _remixer_credit_prune_key(marked_stem)
+    unmarked_artists, unmarked_title, _ = _remixer_credit_prune_key(unmarked_stem)
+    if not marked_artists or not unmarked_artists:
+        return False
+    if marked_title != unmarked_title:
+        return False
+    if not unmarked_artists.issubset(marked_artists):
+        return False
+    extra_marked = marked_artists - unmarked_artists
+    return all(set(name.split()).issubset(marked_title_tokens) for name in extra_marked)
 
 
 # --------------------------------------------------------------------------- #
@@ -455,14 +519,19 @@ def duration_mismatch(
     return None
 
 
-def _wav_to_aiff(wav_path: str, aiff_path: str) -> bool:
-    """Losslessly convert WAV -> AIFF (PCM). Returns True on success."""
+def _audio_to_aiff(src_path: str, aiff_path: str) -> bool:
+    """Convert an audio file to AIFF PCM. Returns True on success."""
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", wav_path,
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", src_path,
          "-c:a", "pcm_s16be", aiff_path],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return os.path.exists(aiff_path) and os.path.getsize(aiff_path) > 0
+
+
+def _wav_to_aiff(wav_path: str, aiff_path: str) -> bool:
+    """Losslessly convert WAV -> AIFF (PCM). Returns True on success."""
+    return _audio_to_aiff(wav_path, aiff_path)
 
 
 @dataclass
@@ -543,7 +612,10 @@ def download_track(
     final_path = aiff_path if audio_format == "aiff" else wav_path
     expected = track.duration_sec
 
-    # Skip or re-verify an existing (tool-downloaded) file.
+    # Skip or re-verify an existing (tool-downloaded) file. If it is out of
+    # bounds, keep it until a verified replacement is ready; a failed lookup
+    # must not delete the user's only copy.
+    replacing_existing = False
     if os.path.exists(final_path):
         if expected is None:
             return DownloadOutcome("skip", final_path,
@@ -553,9 +625,9 @@ def download_track(
             return DownloadOutcome("skip", final_path,
                                    f"already exists, duration ok ({actual:.0f}s)")
         # Out of bounds — drop it and try to fetch a correct version.
+        replacing_existing = True
         logger.info("fetch-missing: re-downloading out-of-bounds file %s (%s vs %ss)",
                     base, f"{actual:.0f}" if actual else "?", f"{expected:.0f}")
-        _remove_quiet(final_path)
 
     # List candidates and keep those within tolerance, closest first.
     list_cmd = build_candidate_command(
@@ -581,28 +653,34 @@ def download_track(
         order = order[:1]  # unverifiable: take the top hit only
     attempts = order[:max_attempts]
 
-    out_template = os.path.join(dest_dir, base + ".%(ext)s")
+    download_base = base + ".__candidate__" if replacing_existing and audio_format == "wav" else base
+    download_wav_path = os.path.join(dest_dir, download_base + ".wav")
+    out_template = os.path.join(dest_dir, download_base + ".%(ext)s")
     last_detail = ""
     last_was_download_error = False
     for vid in attempts:
-        _remove_quiet(wav_path)
+        _remove_quiet(download_wav_path)
         dl = subprocess.run(build_download_command(vid, out_template),
                             capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
-        if not os.path.exists(wav_path):
+        if not os.path.exists(download_wav_path):
             lines = (dl.stderr or dl.stdout or "").strip().splitlines()
             last_detail = lines[-1] if lines else "download produced no file"
             last_was_download_error = True  # transient (e.g. HTTP 403), not "absent"
             continue
         if expected is not None:
-            actual = probe_duration(wav_path)
+            actual = probe_duration(download_wav_path)
             if actual is None or abs(actual - expected) > tolerance + _SANITY_SLACK_SEC:
                 last_detail = (f"got {actual:.0f}s vs {expected:.0f}s"
                                if actual is not None else "could not probe download")
                 last_was_download_error = False  # a real (wrong-duration) result
-                _remove_quiet(wav_path)
+                _remove_quiet(download_wav_path)
                 continue
-        outcome = _finalize_wav(wav_path, aiff_path, audio_format)
+        if audio_format == "wav" and download_wav_path != wav_path:
+            os.replace(download_wav_path, wav_path)
+            outcome = DownloadOutcome("ok", wav_path)
+        else:
+            outcome = _finalize_wav(download_wav_path, aiff_path, audio_format)
         if outcome.status in ("ok", "ok_wav") and outcome.outfile:
             _embed_metadata(outcome.outfile, track)
         return outcome
@@ -618,7 +696,7 @@ def download_track(
 
 
 # --------------------------------------------------------------------------- #
-# Source routing: Soundeo (primary, original AIFF) -> YouTube (fallback)
+# Source routing: Soundeo (AIFF > WAV > MP3) -> YouTube fallback
 # --------------------------------------------------------------------------- #
 class _QuotaState:
     """Tracks whether Soundeo's daily download quota has been hit this run."""
@@ -639,22 +717,23 @@ def acquire_track(
     min_duration: int = 30,
     max_duration: int = 900,
 ) -> DownloadOutcome:
-    """Acquire one track, preferring Soundeo's original AIFF over YouTube.
+    """Acquire one track, preferring Soundeo sources over YouTube.
 
     Per-track routing (search never costs quota, only a download does):
 
-    * on Soundeo + quota available -> download the **unmarked** original AIFF;
+    * on Soundeo + quota available -> download unmarked, preferring AIFF > WAV > MP3;
     * on Soundeo + quota exhausted  -> ``quota_skip`` (retry after midnight CET),
       *not* downloaded from YouTube;
     * not on Soundeo (or Soundeo errored/disabled) -> fall back to
       :func:`download_track` (YouTube, ``[U]``-marked).
 
-    A successful Soundeo download lands at the unmarked ``Artist - Title`` path,
-    so any pre-existing ``[U]`` YouTube copy is superseded and gets pruned.
+    A successful Soundeo AIFF lands at the unmarked ``Artist - Title`` path;
+    Soundeo WAV/MP3 land as converted ``[W]``/``[M]`` AIFFs so they can be
+    upgraded later when the real AIFF appears.
     """
     soundeo_listed = False
     if soundeo is not None:
-        from .soundeo import SoundeoError, SoundeoQuotaExceeded
+        from .soundeo import SoundeoError, SoundeoQuotaExceeded, preferred_download_format
 
         try:
             results = soundeo.search(track)
@@ -676,14 +755,25 @@ def acquire_track(
             # which may name a different cut ("- Radio Edit"). Only YouTube
             # fallbacks use the Spotify name (with the [U] marker). The
             # stopword-tolerant matcher still sees this as the same track.
-            dest = os.path.join(dest_dir, sanitize_filename(pick.label) + ".aiff")
+            source_format = preferred_download_format(pick, audio_format) or audio_format
+            stem = sanitize_filename(pick.label) + marker_for_soundeo_format(source_format)
+            dest = os.path.join(dest_dir, stem + "." + audio_format)
+            source_path = dest if source_format == audio_format else os.path.join(
+                dest_dir, stem + ".__soundeo__." + source_format
+            )
             try:
-                soundeo.download(pick, dest)
-                # Store the Soundeo AIFF **as is**: it ships genuine release tags
-                # (title/artist/album/label/…), so we do NOT overwrite them with
-                # Spotify-row values the way the YouTube fallback does. Only the
-                # ``[U]`` YouTube path calls _embed_metadata.
-                return DownloadOutcome("ok", dest, f"soundeo:{pick.id}", "soundeo",
+                try:
+                    soundeo.download(pick, source_path, audio_format=source_format)
+                except TypeError:
+                    soundeo.download(pick, source_path)
+                if source_path != dest:
+                    if audio_format == "aiff":
+                        if not _audio_to_aiff(source_path, dest):
+                            raise SoundeoError(f"could not convert Soundeo {source_format} to AIFF")
+                        _remove_quiet(source_path)
+                    else:
+                        os.replace(source_path, dest)
+                return DownloadOutcome("ok", dest, f"soundeo:{pick.id}:{source_format}", "soundeo",
                                        soundeo_listed=True)
             except SoundeoQuotaExceeded as exc:
                 if quota is not None:
@@ -691,8 +781,9 @@ def acquire_track(
                 return DownloadOutcome("quota_skip", "", str(exc), "soundeo",
                                        soundeo_listed=True)
             except SoundeoError as exc:
-                logger.warning("soundeo: download error for %s — %s; trying YouTube",
+                logger.warning("soundeo: download error for %s - %s; trying YouTube",
                                track.name, exc)
+                _remove_quiet(source_path)
                 # fall through to YouTube
 
     outcome = download_track(
@@ -856,20 +947,18 @@ def default_playlists_dir(library: str) -> str:
 
 
 def tool_file_for(track: PlaylistTrack, library: str) -> str | None:
-    """Return the path of an existing ``[U]``-marked file this tool produced.
+    """Return an existing marked tool-download for ``track``.
 
-    Only the marked ``Artist - Title[U]`` naming counts as a tool download.
-    The unmarked ``Artist - Title`` form is *not* recognized: it is the
-    standard library naming for the user's curated originals, so matching it
-    would sweep a genuinely-present original into the re-verify set — and since
-    a re-download always targets the ``[U]`` path, that just leaves a duplicate
-    ``[U]`` copy alongside the original. Checks ``.aiff`` then ``.wav``.
+    Marked downloads are YouTube ``[U]`` plus non-AIFF Soundeo ``[W]``/``[M]``
+    files. Unmarked files are treated as curated originals or real Soundeo AIFFs
+    and are not part of the recheck/upgrade queue.
     """
-    base = track.target_basename(SOURCE_MARKER)
-    for ext in (".aiff", ".wav"):
-        cand = os.path.join(library, base + ext)
-        if os.path.exists(cand):
-            return cand
+    for marker in TOOL_SOURCE_MARKERS:
+        base = track.target_basename(marker)
+        for ext in (".aiff", ".wav"):
+            cand = os.path.join(library, base + ext)
+            if os.path.exists(cand):
+                return cand
     return None
 
 
@@ -887,16 +976,16 @@ def unmarked_version_keys(library: str) -> set[str]:
         stem, ext = os.path.splitext(entry.name)
         if ext.lower() not in AUDIO_EXTS:
             continue
-        if not stem.endswith(SOURCE_MARKER):
+        if not strip_tool_marker(stem)[1]:
             keys.add(version_key(stem))
     return keys
 
 
 def prune_superseded_downloads(library: str, *, dry_run: bool = False) -> list[str]:
-    """Delete tool-downloaded ``[U]`` files whose curated original now exists.
+    """Delete marked tool downloads whose curated original now exists.
 
     Once the user adds a properly-named, unmarked original for a track
-    previously fetched as ``Artist - Title[U]``, the marked copy is a
+    previously fetched with ``[U]``, ``[W]``, or ``[M]``, the marked copy is a
     redundant, lower-quality duplicate. The original counts whether it is named
     exactly ``Artist - Title`` or carries an equivalent-version suffix the AIFF
     source adds (``(Original Mix)``, ``(Extended Mix)``, …) — matched via
@@ -904,21 +993,28 @@ def prune_superseded_downloads(library: str, *, dry_run: bool = False) -> list[s
     under ``dry_run``, the paths that would be removed.
     """
     unmarked_keys: set[str] = set()
-    marked: list[tuple[str, str]] = []  # (path, version-key of stem sans marker)
+    unmarked_stems: list[str] = []
+    marked: list[tuple[str, str, str]] = []  # (path, clean stem, version-key)
     for entry in os.scandir(library):
         if not entry.is_file():
             continue
         stem, ext = os.path.splitext(entry.name)
         if ext.lower() not in AUDIO_EXTS:
             continue
-        if stem.endswith(SOURCE_MARKER):
-            marked.append((entry.path, version_key(stem[: -len(SOURCE_MARKER)])))
+        clean_stem, marker = strip_tool_marker(stem)
+        if marker:
+            marked.append((entry.path, clean_stem, version_key(clean_stem)))
         else:
             unmarked_keys.add(version_key(stem))
+            unmarked_stems.append(stem)
 
     removed: list[str] = []
-    for path, key in marked:
-        if key in unmarked_keys:
+    for path, stem, key in marked:
+        superseded = key in unmarked_keys or any(
+            _marked_is_superseded_by_unmarked(stem, original)
+            for original in unmarked_stems
+        )
+        if superseded:
             removed.append(path)
             if not dry_run:
                 _remove_quiet(path)
@@ -1075,7 +1171,7 @@ def refix_soundeo_tags(
         if not entry.is_file():
             continue
         stem, ext = os.path.splitext(entry.name)
-        if ext.lower() not in AUDIO_EXTS or stem.endswith(SOURCE_MARKER):
+        if ext.lower() not in AUDIO_EXTS or strip_tool_marker(stem)[1]:
             continue
         if _soundeo_log_key(entry.path) in log:
             continue  # already carries native Soundeo tags
@@ -1176,18 +1272,20 @@ def fetch_missing(
     report_dir: str | None = None,
     use_soundeo: bool = True,
     force_lookup: bool = False,
+    check_marked_upgrades: bool = False,
 ) -> dict:
     """Match playlist CSVs against ``library`` and download what's missing.
 
     When Soundeo credentials are present (``SOUNDEO_USER``/``SOUNDEO_PASS`` in
     ``.env``) and ``use_soundeo`` is True, each track is sourced from Soundeo's
-    original AIFF first and from YouTube only as a fallback; pass
+    source first (AIFF > WAV > MP3) and from YouTube only as a fallback; pass
     ``use_soundeo=False`` to force YouTube-only.
 
     Downloads are duration-verified: only YouTube results within ``tolerance``
     seconds of the Spotify track are accepted, retrying up to ``max_attempts``
     times before reporting the track as unmatched. Previously tool-downloaded
-    files whose duration drifts outside tolerance are re-downloaded.
+    files are only rechecked for Soundeo upgrades/duration when
+    ``check_marked_upgrades`` is enabled.
 
     Returns a summary dict with counts, the missing :class:`MatchResult` list,
     a list of unmatched ``(track, detail)`` tuples, and the report directory.
@@ -1197,12 +1295,12 @@ def fetch_missing(
     if not os.path.isdir(library):
         raise FileNotFoundError(f"library dir not found: {library}")
 
-    # Drop any [U] download the user has since replaced with a curated original.
+    # Drop any marked fallback download the user has since replaced with a curated original.
     pruned = prune_superseded_downloads(library, dry_run=dry_run)
     if pruned:
         verb = "would remove" if dry_run else "removed"
         logger.info(
-            "fetch-missing: %s %d superseded [U] download(s) replaced by curated originals",
+            "fetch-missing: %s %d superseded marked download(s) replaced by curated originals",
             verb, len(pruned),
         )
         for p in pruned:
@@ -1219,7 +1317,7 @@ def fetch_missing(
     # An untagged Spotify title is satisfied by a curated Original/Extended
     # variant on disk (the AIFF source tags "Original", and an "Extended" cut is
     # the preferred DJ version). Treat any such variant as present so we never
-    # download a [U] copy of a track the user already owns in a preferred form.
+    # download a marked fallback copy of a track the user already owns in a preferred form.
     lib_keys = unmarked_version_keys(library)
     variant_present = [r for r in missing if version_key(r.track.target_basename()) in lib_keys]
     if variant_present:
@@ -1252,11 +1350,25 @@ def fetch_missing(
             "or YouTube (use --force-lookup to retry)", cached_skipped,
         )
 
-    # Work set: genuinely-missing tracks (download) plus already tool-downloaded
-    # tracks (re-verify duration, re-download if it has drifted out of bounds).
+    # Work set: genuinely-missing tracks (download) plus, when explicitly
+    # requested, already tool-downloaded tracks (check for Soundeo upgrade and
+    # re-verify duration).
     work = list(to_download)
-    reverify = [r for r in present if tool_file_for(r.track, library)]
+    marked_present = [r for r in present if tool_file_for(r.track, library)]
+    reverify = marked_present if check_marked_upgrades else []
     work.extend(reverify)
+    fully_present = len(present) - len(marked_present)
+
+    logger.info(
+        "fetch-missing: fetch queue: %d to fetch, %d existing marked "
+        "download(s)%s, %d cached not-found skipped, %d already present as "
+        "originals/curated",
+        len(to_download), len(marked_present),
+        " queued for Soundeo upgrade/duration check"
+        if check_marked_upgrades else
+        " not checked (use --check-marked-upgrades)",
+        cached_skipped, fully_present,
+    )
 
     summary = {
         "total": len(tracks), "playlists": len(csv_paths),
@@ -1306,7 +1418,7 @@ def fetch_missing(
         logger.info("Soundeo: skipped (only used for --format aiff) — using YouTube only")
 
     if soundeo is not None:
-        logger.info("Source order: Soundeo (original AIFF) first, YouTube fallback")
+        logger.info("Source order: Soundeo (AIFF > WAV > MP3) first, YouTube fallback")
     elif not use_soundeo:
         logger.info("Source: YouTube only (--no-soundeo)")
     elif audio_format == "aiff":
@@ -1343,6 +1455,13 @@ def fetch_missing(
                         len(deferred),
                     )
                     break
+                prefix = f"[{i}/{len(work)}]"
+                label = f"{t.artist_display} - {t.name}"
+                is_reverify = i > len(to_download)
+                if is_reverify:
+                    logger.info("%s CHECK marked download for Soundeo upgrade/duration: %s", prefix, label)
+                else:
+                    logger.info("%s FETCH missing: %s", prefix, label)
                 outcome = acquire_track(
                     t, library, soundeo=soundeo, quota=quota,
                     audio_format=audio_format, tolerance=tolerance,
@@ -1352,14 +1471,16 @@ def fetch_missing(
                 log.writerow([outcome.status, outcome.source, t.artist_display, t.name,
                               t.search_query(), outcome.outfile, outcome.detail])
                 lf.flush()
-                prefix = f"[{i}/{len(work)}]"
-                label = f"{t.artist_display} - {t.name}"
                 key = _track_identity(t)
                 if outcome.status == "skip":
                     summary["skipped"] += 1
                     not_found.pop(key, None)
-                    logger.info("%s PRESENT  (already downloaded, duration ok): %s",
-                                prefix, label)
+                    reason = (
+                        "existing marked download; checked Soundeo for upgrade, duration ok"
+                        if soundeo is not None else
+                        "existing marked download; duration ok"
+                    )
+                    logger.info("%s YOUTUBE OK (%s): %s", prefix, reason, label)
                 elif outcome.status == "quota_skip":
                     summary["quota_skipped"] += 1
                     logger.info("%s DEFERRED (Soundeo quota reached, retry after midnight CET): %s",
@@ -1385,7 +1506,8 @@ def fetch_missing(
                     not_found.pop(key, None)  # found now — clear any stale mark
                     # A Soundeo file is stored as-is; log its native tags and
                     # provenance so the tag-repair pass never re-touches it.
-                    if outcome.source == "soundeo" and outcome.outfile:
+                    if (outcome.source == "soundeo" and outcome.outfile
+                            and not strip_tool_marker(os.path.splitext(os.path.basename(outcome.outfile))[0])[1]):
                         sid = outcome.detail.split("soundeo:", 1)[-1] if outcome.detail else ""
                         _record_soundeo_tags(soundeo_log, outcome.outfile, sid)
                     src = "SOUNDEO " if outcome.source == "soundeo" else "YOUTUBE "
@@ -1402,7 +1524,7 @@ def fetch_missing(
     # copy fetched on an earlier run — prune those before regenerating playlists.
     superseded = prune_superseded_downloads(library)
     if superseded:
-        logger.info("fetch-missing: pruned %d [U] copy(ies) superseded by Soundeo originals",
+        logger.info("fetch-missing: pruned %d marked copy(ies) superseded by Soundeo originals",
                     len(superseded))
 
     if summary["unmatched_results"]:

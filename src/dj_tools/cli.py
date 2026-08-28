@@ -15,6 +15,8 @@ from . import __version__
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FETCH_LIBRARY = r"D:\Music"
+
 
 def _setup_logging(verbose: bool, quiet: bool) -> None:
     level = logging.ERROR if quiet else (logging.DEBUG if verbose else logging.INFO)
@@ -89,10 +91,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-progress", action="store_true", help="Disable registry progress bars")
     p_run.add_argument(
         "--fetch-missing", dest="fetch_missing", nargs="*", default=None, metavar="CSV",
-        help="Before analysis, download tracks from these Spotify playlist CSV(s)/dir "
-             "that aren't already in the library being processed. Pass the flag with "
-             "no value to use <library>/spotify-playlists",
+        help="Before analysis, download tracks from these Spotify playlist CSV(s)/dir. "
+             "By default dj run uses <library>/spotify-playlists; pass CSV(s)/dir "
+             "here to override that default.",
     )
+    p_run.add_argument("--no-fetch-missing", dest="no_fetch_missing", action="store_true",
+                       help="Skip the default Spotify playlist gap-fill phase")
     p_run.add_argument("--fetch-format", dest="fetch_format", choices=["aiff", "wav"],
                        default="aiff", help="Format for --fetch-missing downloads (default: aiff)")
     p_run.add_argument("--no-soundeo", dest="no_soundeo", action="store_true",
@@ -100,6 +104,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--force-lookup", dest="force_lookup", action="store_true",
                        help="With --fetch-missing, re-search tracks previously cached as "
                             "not found on Soundeo or YouTube")
+    p_run.add_argument("--check-marked-upgrades", dest="check_marked_upgrades",
+                       action="store_true",
+                       help="With --fetch-missing, also check existing [U]/[W]/[M] "
+                            "downloads for Soundeo upgrades")
     p_run.add_argument("--cues", action="store_true",
                        help="Generate Rekordbox cue points during the run")
     p_run.add_argument("--cue-profile", choices=["v1", "v2", "v3-default"],
@@ -137,13 +145,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "(not required with --prune-only)",
     )
     p_fetch.add_argument(
-        "--library", default="./files", metavar="DIR",
-        help="Library dir to check for existing tracks and download into (default: ./files)",
+        "--library", default=DEFAULT_FETCH_LIBRARY, metavar="DIR",
+        help=f"Library dir to check for existing tracks and download into (default: {DEFAULT_FETCH_LIBRARY})",
     )
     p_fetch.add_argument(
         "--prune-only", action="store_true",
-        help="Only delete superseded [U] downloads whose curated original now "
-             "exists in the library, then exit. No matching, downloads, or "
+        help="Only delete superseded [U]/[W]/[M] downloads whose curated original "
+             "now exists in the library, then exit. No matching, downloads, or "
              "playlists. Honors --dry-run (report without deleting).",
     )
     p_fetch.add_argument(
@@ -151,7 +159,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restore genuine Soundeo tags on library files that came from Soundeo "
              "(re-downloads the owned cut — free, no quota — matching each file's "
              "duration so no re-analysis is triggered), then exit. Leaves curated "
-             "originals and [U] YouTube files untouched. Honors --dry-run.",
+             "originals and marked fallback files untouched. Honors --dry-run.",
     )
     p_fetch.add_argument("--format", dest="audio_format", choices=["aiff", "wav"],
                          default="aiff", help="Download format (default: aiff)")
@@ -161,6 +169,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--force-lookup", dest="force_lookup", action="store_true",
                          help="Re-search tracks previously cached as not found on "
                               "Soundeo or YouTube (default: skip them)")
+    p_fetch.add_argument("--check-marked-upgrades", dest="check_marked_upgrades",
+                         action="store_true",
+                         help="Also check existing [U]/[W]/[M] downloads for Soundeo "
+                              "upgrades (default: skip present marked files)")
     p_fetch.add_argument("--forget-cached", dest="forget_cached", nargs="+", metavar="QUERY",
                          help="Drop matching entries from the not-found cache and exit "
                               "(match a substring of 'Artist - Title', or 'all' to clear "
@@ -761,30 +773,39 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     store.save_observations([])
 
     # Phase 0: Fetch missing tracks from Spotify playlists into the library.
-    # `is not None` (not truthiness): an empty list means the flag was passed
-    # with no value, which requests the default <library>/spotify-playlists dir.
-    if getattr(args, "fetch_missing", None) is not None:
+    # Enabled by default for dj run; --fetch-missing CSV... overrides the
+    # default <library>/spotify-playlists input, and --no-fetch-missing skips it.
+    if not getattr(args, "no_fetch_missing", False):
         from .spotify_fetch import default_playlists_dir, fetch_missing, resolve_library_dir
 
         t0 = time.perf_counter()
         library_dir = resolve_library_dir(args.paths[0] if args.paths else "./files")
-        playlists = args.fetch_missing or [default_playlists_dir(library_dir)]
-        try:
-            summary = fetch_missing(
-                playlists,
-                library_dir,
-                audio_format=getattr(args, "fetch_format", "aiff"),
-                use_soundeo=not getattr(args, "no_soundeo", False),
-                force_lookup=getattr(args, "force_lookup", False),
-            )
+        explicit_playlists = getattr(args, "fetch_missing", None)
+        default_playlists = default_playlists_dir(library_dir)
+        playlists = explicit_playlists or [default_playlists]
+        if explicit_playlists is None and not os.path.isdir(default_playlists):
             logger.info(
-                "Pipeline: fetch-missing done in %s (downloaded=%d skipped=%d failed=%d pruned=%d)",
-                _fmt_elapsed(time.perf_counter() - t0),
-                summary["downloaded"], summary["skipped"], summary["failed"],
-                summary["pruned"],
+                "Pipeline: fetch-missing skipped (default playlists dir not found: %s)",
+                default_playlists,
             )
-        except (FileNotFoundError, RuntimeError) as exc:
-            logger.error("Pipeline: fetch-missing failed (%s); continuing without it", exc)
+        else:
+            try:
+                summary = fetch_missing(
+                    playlists,
+                    library_dir,
+                    audio_format=getattr(args, "fetch_format", "aiff"),
+                    use_soundeo=not getattr(args, "no_soundeo", False),
+                    force_lookup=getattr(args, "force_lookup", False),
+                    check_marked_upgrades=getattr(args, "check_marked_upgrades", False),
+                )
+                logger.info(
+                    "Pipeline: fetch-missing done in %s (downloaded=%d skipped=%d failed=%d pruned=%d)",
+                    _fmt_elapsed(time.perf_counter() - t0),
+                    summary["downloaded"], summary["skipped"], summary["failed"],
+                    summary["pruned"],
+                )
+            except (FileNotFoundError, RuntimeError) as exc:
+                logger.error("Pipeline: fetch-missing failed (%s); continuing without it", exc)
 
     # Phase 1: Scan + Link
     t0 = time.perf_counter()
@@ -973,7 +994,7 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             return 1
         removed = prune_superseded_downloads(args.library, dry_run=args.dry_run)
         verb = "would remove" if args.dry_run else "removed"
-        logger.info("fetch-missing: %s %d superseded [U] download(s)", verb, len(removed))
+        logger.info("fetch-missing: %s %d superseded marked download(s)", verb, len(removed))
         for p in removed:
             logger.info("  %s %s", verb, os.path.basename(p))
         return 0
@@ -1004,6 +1025,7 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             use_soundeo=not getattr(args, "no_soundeo", False),
             force_lookup=getattr(args, "force_lookup", False),
+            check_marked_upgrades=getattr(args, "check_marked_upgrades", False),
         )
     except (FileNotFoundError, RuntimeError) as exc:
         logger.error("fetch-missing: %s", exc)
