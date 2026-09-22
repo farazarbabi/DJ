@@ -361,21 +361,51 @@ class SoundeoClient:
     ) -> SoundeoResult | None:
         """Best Soundeo result for ``track``, preferring the Extended Mix.
 
-        Duration is intentionally **not** a filter: the Extended Mix is longer
-        than Spotify's (Original/radio) cut, so length-matching would reject the
-        very version we want. Instead we match on title/artist tokens, which
-        ignore the ``Original``/``Extended``/``Mix`` descriptors (stopwords) that
-        Spotify titles usually omit — so "Title", "Title (Original Mix)" and
-        "Title (Extended Mix)" of the same song all match a suffix-less Spotify
-        title. A genuine remix carries extra remixer-name tokens and is rejected
-        unless the Spotify title itself asked for that remix (then those tokens
-        are part of the query and match). Among the survivors, cuts are ranked
-        Extended Mix > Original Mix > suffix-less/other > Radio Edit (see
-        :func:`_version_rank`), breaking ties by the longest duration.
+        First matches by title/artist tokens (ignoring Original/Extended/Mix
+        descriptors which are stopwords). Among matches, picks by format
+        (AIFF > WAV > MP3), then version rank (Extended > Original > plain > Radio Edit),
+        then longest duration.
+
+        For Soundeo, if title/artist matches exist but none match the Spotify duration
+        within ±3s, check if there's an extended version (6:30-8:00 min / 390-480s) of
+        the same track. This handles cases where the library has an extended mix not
+        in Spotify (e.g., Spotify lists 3:59 original, but Soundeo has 7:19 extended).
         """
         matches = self._title_artist_matches(track, results)
         if not matches:
             return None
+
+        # Try to find a match within strict duration tolerance first
+        # (close to Spotify's duration)
+        expected_sec = track.duration_sec
+        if expected_sec is not None:
+            close_matches = [
+                r for r in matches
+                if r.duration_sec is not None and abs(r.duration_sec - expected_sec) <= 3.0
+            ]
+            if close_matches:
+                close_matches.sort(key=lambda r: (
+                    _format_rank(r, self.audio_format), _version_rank(r.title),
+                    -(r.duration_sec or 0.0),
+                ))
+                return close_matches[0]
+
+            # No close match by duration, but title/artist matched.
+            # Check if there's an extended version (6:30-8:00 min) of the same track
+            _DJ_MIN_SEC = 390.0  # 6:30
+            _DJ_MAX_SEC = 480.0  # 8:00
+            extended_matches = [
+                r for r in matches
+                if r.duration_sec is not None and _DJ_MIN_SEC <= r.duration_sec <= _DJ_MAX_SEC
+            ]
+            if extended_matches:
+                extended_matches.sort(key=lambda r: (
+                    _format_rank(r, self.audio_format), _version_rank(r.title),
+                    -(r.duration_sec or 0.0),
+                ))
+                return extended_matches[0]
+
+        # No duration constraint (Spotify duration unknown), or no extended version found
         matches.sort(key=lambda r: (
             _format_rank(r, self.audio_format), _version_rank(r.title),
             -(r.duration_sec or 0.0),
