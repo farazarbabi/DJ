@@ -99,7 +99,9 @@ source of truth is:
 
 ## Cache Architecture
 
-Shared cache lives in `./cache/`.
+Shared cache lives in `<library>/cache/` when the pipeline runs on a real
+library root (`RegistryConfig.cache_root`), and in `./cache/` for the default
+`./files` root or when `cache_dir` is set explicitly.
 
 ### Files
 

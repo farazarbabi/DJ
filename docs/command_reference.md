@@ -31,8 +31,8 @@ This file summarizes the current repo command surface and the options that matte
 | `outputs/playlists/by_key/` | Full-resolution key playlists written only with `--fine-playlists`. |
 | `outputs/playlists/by_subgenre/` | Full-resolution subgenre playlists written only with `--fine-playlists`. |
 | `outputs/playlists/spotify/` | One representative `.m3u8` playlist per fetched Spotify CSV from standalone `dj fetch-missing` or the default `dj run` fetch phase. |
-| `cache/raw_cache.pkl` | Shared expensive raw analysis cache used by tagger, registry, grouper, and cue analysis. |
-| `cache/derived_cache.pkl` | Shared derived analysis cache used to avoid repeated feature derivation. |
+| `cache/raw_cache.pkl` | Shared expensive raw analysis cache used by tagger, registry, grouper, and cue analysis. Lives under `<library>/cache/` when running on a real library root, under `./cache/` for the default `./files` root. |
+| `cache/derived_cache.pkl` | Shared derived analysis cache used to avoid repeated feature derivation; same location rule as `raw_cache.pkl`. |
 
 ## Main Workflow: `dj`
 
@@ -96,6 +96,7 @@ This file summarizes the current repo command surface and the options that matte
 | `--no-soundeo` | Forces YouTube-only downloads even when Soundeo credentials are configured. |
 | `--force-lookup` | Re-searches tracks that were previously cached as not found. |
 | `--check-marked-upgrades` | Also checks existing `[U]`/`[W]`/`[M]` downloads for Soundeo upgrades and duration drift; by default present marked files are skipped. |
+| `--upgrade-soundeo` | Upgrades playlist tracks already in the library to better Soundeo cuts, then exits: lossless AIFF over `[U]`/`[M]`/`[W]`, Extended over Original, either over a Radio Edit. Marked old copies are deleted; unmarked ones move to `outputs/fetch/replaced/`. Needs Soundeo credentials, never uses YouTube, skips missing tracks, stops at the daily quota, and writes `outputs/fetch/soundeo_upgrade.csv`. Honors `--dry-run` (report only) and `--threshold`. |
 | `--forget-cached QUERY ...` | Removes matching not-found cache entries, or clears all entries with `all`. |
 | `--threshold FLOAT` | Sets the local-library match score threshold below which a track counts as missing; the default is `0.62`. |
 | `--duration-tolerance SECONDS` | Accepts a YouTube result only when its duration is within this many seconds of the Spotify track; the default is `3`. |
@@ -341,6 +342,8 @@ Use `dj-grouper` directly when you want grouping/recommendations without the who
 | Run the full pipeline without Spotify gap filling. | `dj run "D:\Music" --no-fetch-missing` |
 | Preview Spotify gap filling without downloading. | `dj fetch-missing --dry-run` |
 | Remove superseded marked downloads after curated originals were added. | `dj fetch-missing --prune-only` |
+| Preview which library tracks Soundeo could upgrade (no downloads). | `dj fetch-missing --upgrade-soundeo --dry-run` |
+| Upgrade library tracks to better Soundeo cuts. | `dj fetch-missing --upgrade-soundeo` |
 | Generate cues and a quality report from a Rekordbox XML export. | `dj run "D:\Music" --rekordbox-xml "D:\Music\rekordbox.xml" --cues --cue-quality-report` |
 | Preview cue XML export without mutating cue rows or markers. | `dj run "D:\Music" --rekordbox-xml "D:\Music\rekordbox.xml" --cues --cue-export-xml "D:\Music\rekordbox_with_cues.xml" --cue-export-dry-run` |
 | Run only the tagger and write tags. | `dj-tagger "D:\Music" --write-tags` |

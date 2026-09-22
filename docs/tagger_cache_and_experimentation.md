@@ -23,7 +23,8 @@ That is the current design of the tagger cache system.
 
 ## Current Cache Model
 
-Shared cache files:
+Shared cache files (under `<library>/cache/` for a real library root, `./cache/`
+for the default `./files` root):
 
 ```text
 cache/raw_cache.pkl

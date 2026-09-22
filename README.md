@@ -54,9 +54,9 @@ Python `>=3.10`.
 ```text
 DJ/
   files/                    default library input
-  cache/
-    raw_cache.pkl           shared raw cache
-    derived_cache.pkl       shared derived cache
+  cache/                    shared caches for the default ./files root
+    raw_cache.pkl           (a real library root uses <library>/cache/ instead)
+    derived_cache.pkl
   outputs/
     registry/
       registry_overview.csv
@@ -333,7 +333,10 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
      default). Per track: search (free); if found and the daily quota (resets
      midnight CET) isn't spent, download the best available Soundeo format in
      AIFF > WAV > MP3 order, converting WAV/MP3 to final AIFF; if the quota is
-     spent, defer to tomorrow (status `quota_skip`, not YouTubed).
+     spent, defer to tomorrow (status `quota_skip`, not YouTubed). Within the
+     best format the cut is chosen by chain: an Extended version, else a
+     non-Radio cut in the 6:30-8:00 DJ range, else one within ±3s of the
+     Spotify duration, else the best by Extended > Original > plain > Radio Edit.
      `--no-soundeo` forces YouTube-only.
    - **YouTube** via `yt-dlp` is used when a track isn't on Soundeo (or Soundeo
      is off/login fails), **verifying duration**: only results within
@@ -354,6 +357,16 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
    equivalent appears in the library. A previously downloaded marked file is
    only duration-checked/re-downloaded during an explicit `--check-marked-upgrades`
    run.
+7. `--upgrade-soundeo` is the quality pass for tracks you already have: every
+   playlist track present in the library is checked against Soundeo's best cut
+   and re-downloaded only when it strictly improves — lossless AIFF over
+   `[U]`/`[M]`/`[W]`, Extended over Original/plain, either over a Radio Edit (a
+   Radio Edit is never a target, and a same-tier hit such as the same remix is
+   left alone). The superseded file is deleted if it was a marked download, or
+   moved to `<library>/outputs/fetch/replaced/` if it was unmarked so the swap
+   can be undone. It never uses YouTube, skips tracks not yet in the library
+   (use plain `fetch-missing` for those), stops at the first quota hit, and
+   writes `outputs/fetch/soundeo_upgrade.csv`; `--dry-run` reports only.
 
 Reports and a download log are written to `<library>/outputs/fetch/`
 (`matched_report.csv`, `missing_report.csv`, `download_log.csv` with a `source`
@@ -517,7 +530,8 @@ Current grouping pipeline:
 
 ## Cache Model
 
-There are two shared cache files under `./cache/`.
+There are two shared cache files, under `<library>/cache/` when running on a
+real library root and under `./cache/` for the default `./files` root.
 
 ### `cache/raw_cache.pkl`
 
