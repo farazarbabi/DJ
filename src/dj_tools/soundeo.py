@@ -67,13 +67,14 @@ _TIMEOUT = 60.0
 _DEFAULT_RATE = 1.0  # max requests/sec (be a polite scraper)
 
 # A trailing *generic* version descriptor on a Spotify title (e.g. "Diclofél -
-# Radio Edit", "Title (Original Mix)"). Stripped from the **search query** only:
-# Soundeo may list the very same song under a different generic cut (usually the
-# Original/Extended Mix), so searching the raw "… Radio Edit" would miss it. A
-# remixer name is NOT generic and is deliberately kept, so a requested remix
-# still narrows the search. `pick()` does the final version selection.
+# Radio Edit", "Title (Original Mix)", "Song - Mixed"). Stripped from the
+# **search query** only: Soundeo may list the very same song under a different
+# generic cut (usually the Original/Extended Mix), so searching the raw
+# "… Radio Edit" would miss it. A remixer name is NOT generic and is deliberately
+# kept, so a requested remix still narrows the search. `pick()` does the final
+# version selection.
 _SEARCH_VERSION_RE = re.compile(
-    r"\s*[-(\[]\s*(?:original|extended|radio)"
+    r"\s*[-(\[]\s*(?:original|extended|radio|mixed|remixed)"
     r"(?:\s+(?:mix|version|edit|re-?edit|cut))?\s*[)\]]?\s*$",
     re.IGNORECASE,
 )
