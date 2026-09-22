@@ -359,24 +359,46 @@ class SoundeoClient:
     def pick(
         self, track: PlaylistTrack, results: list[SoundeoResult],
     ) -> SoundeoResult | None:
-        """Best Soundeo result for ``track``, preferring the Extended Mix.
+        """Best Soundeo result for ``track``, using a priority fallback chain.
 
-        First matches by title/artist tokens (ignoring Original/Extended/Mix
-        descriptors which are stopwords). Among matches, picks by format
-        (AIFF > WAV > MP3), then version rank (Extended > Original > plain > Radio Edit),
-        then longest duration.
+        Fallback order (each checked only if previous found nothing):
+        1. Extended versions (exact title/artist, no duration check)
+        2. DJ range 6:30-8:00 min (exact title/artist, extended versions)
+        3. Strict ±3s tolerance (original cut duration match)
+        4. Best overall (Extended > Original > plain > Radio Edit)
 
-        For Soundeo, if title/artist matches exist but none match the Spotify duration
-        within ±3s, check if there's an extended version (6:30-8:00 min / 390-480s) of
-        the same track. This handles cases where the library has an extended mix not
-        in Spotify (e.g., Spotify lists 3:59 original, but Soundeo has 7:19 extended).
+        This prefers high-quality extended mixes from Soundeo over YouTube fallback,
+        upgrading the original Spotify cut when available.
         """
         matches = self._title_artist_matches(track, results)
         if not matches:
             return None
 
-        # Try to find a match within strict duration tolerance first
-        # (close to Spotify's duration)
+        _DJ_MIN_SEC = 390.0  # 6:30
+        _DJ_MAX_SEC = 480.0  # 8:00
+
+        # 1. Extended versions (exact title/artist match, no duration check)
+        extended_versions = [r for r in matches if _version_rank(r.title) == 0]  # rank 0 = Extended Mix
+        if extended_versions:
+            extended_versions.sort(key=lambda r: (
+                _format_rank(r, self.audio_format),
+                -(r.duration_sec or 0.0),
+            ))
+            return extended_versions[0]
+
+        # 2. DJ range 6:30-8:00 min (extended versions, same track)
+        dj_range_matches = [
+            r for r in matches
+            if r.duration_sec is not None and _DJ_MIN_SEC <= r.duration_sec <= _DJ_MAX_SEC
+        ]
+        if dj_range_matches:
+            dj_range_matches.sort(key=lambda r: (
+                _format_rank(r, self.audio_format), _version_rank(r.title),
+                -(r.duration_sec or 0.0),
+            ))
+            return dj_range_matches[0]
+
+        # 3. Strict ±3s tolerance (original cut or close match)
         expected_sec = track.duration_sec
         if expected_sec is not None:
             close_matches = [
@@ -390,22 +412,7 @@ class SoundeoClient:
                 ))
                 return close_matches[0]
 
-            # No close match by duration, but title/artist matched.
-            # Check if there's an extended version (6:30-8:00 min) of the same track
-            _DJ_MIN_SEC = 390.0  # 6:30
-            _DJ_MAX_SEC = 480.0  # 8:00
-            extended_matches = [
-                r for r in matches
-                if r.duration_sec is not None and _DJ_MIN_SEC <= r.duration_sec <= _DJ_MAX_SEC
-            ]
-            if extended_matches:
-                extended_matches.sort(key=lambda r: (
-                    _format_rank(r, self.audio_format), _version_rank(r.title),
-                    -(r.duration_sec or 0.0),
-                ))
-                return extended_matches[0]
-
-        # No duration constraint (Spotify duration unknown), or no extended version found
+        # 4. Best overall (format > version rank > duration)
         matches.sort(key=lambda r: (
             _format_rank(r, self.audio_format), _version_rank(r.title),
             -(r.duration_sec or 0.0),
