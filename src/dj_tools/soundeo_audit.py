@@ -65,10 +65,17 @@ def audit_soundeo(
                         # Determine upgrade opportunity
                         if lib_status == "missing":
                             upgrade_opportunity = f"download → {soundeo_version}"
-                        elif lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]") and soundeo_version in ("Extended", "Original"):
-                            upgrade_opportunity = f"{lib_version} → {soundeo_version}"
-                        elif lib_version == "Radio Edit" and soundeo_version in ("Original", "Extended"):
-                            upgrade_opportunity = f"{lib_version} → {soundeo_version}"
+                        elif lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]"):
+                            # Upgrade marked downloads to Soundeo versions
+                            if soundeo_version in ("Extended", "Original", "Remix", "Extended Remix"):
+                                upgrade_opportunity = f"{lib_version} → {soundeo_version}"
+                        elif lib_version == "Radio Edit":
+                            if soundeo_version in ("Original", "Extended", "Remix", "Extended Remix"):
+                                upgrade_opportunity = f"{lib_version} → {soundeo_version}"
+                        elif lib_version == "Remix" or lib_version == "Extended Remix":
+                            # Remixes are distinct but may have better Soundeo versions
+                            if soundeo_version in ("Remix", "Extended Remix"):
+                                upgrade_opportunity = f"{lib_version} (quality upgrade from Soundeo)"
                 except SoundeoError:
                     soundeo_available = "error"
 
@@ -138,8 +145,12 @@ def upgrade_soundeo(
         lib_path, lib_score = best_match(track, library_index)
         lib_version = _guess_version(Path(lib_path).stem) if lib_path else "missing"
 
-        # Check if this is an upgrade opportunity
-        should_upgrade = lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]", "Radio Edit") or lib_version == "missing"
+        # Check if this is an upgrade opportunity: any tool-marked file or lower-quality version
+        # (remixes are distinct tracks but may still benefit from upgraded source quality)
+        should_upgrade = (
+            lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]", "Radio Edit", "Remix")
+            or lib_version == "missing"
+        )
 
         if not should_upgrade or not soundeo:
             logger.info(
@@ -242,8 +253,17 @@ def upgrade_soundeo(
 
 
 def _guess_version(name: str) -> str:
-    """Guess track version from filename/title."""
+    """Guess track version from filename/title.
+
+    Check tool markers first so "Remix[U]" is classified as YouTube [U], not Remix.
+    """
     n = name.lower()
+    if "[u]" in n:
+        return "YouTube [U]"
+    if "[w]" in n:
+        return "YouTube [W]"
+    if "[m]" in n:
+        return "YouTube [M]"
     if "extended" in n and "remix" in n:
         return "Extended Remix"
     if "extended" in n:
@@ -254,10 +274,4 @@ def _guess_version(name: str) -> str:
         return "Radio Edit"
     if "original" in n:
         return "Original"
-    if "[u]" in n:
-        return "YouTube [U]"
-    if "[w]" in n:
-        return "YouTube [W]"
-    if "[m]" in n:
-        return "YouTube [M]"
     return "Original"
