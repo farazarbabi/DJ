@@ -107,6 +107,114 @@ def audit_soundeo(
     return output_path
 
 
+def upgrade_soundeo(
+    csv_paths: list[str],
+    library: str,
+    *,
+    soundeo: SoundeoClient | None = None,
+    audio_format: str = "aiff",
+    dry_run: bool = False,
+) -> str:
+    """Download and replace tracks from Soundeo where better versions exist.
+
+    Finds upgrade opportunities (Extended > Original > YouTube [U], etc.),
+    downloads better versions, and removes old marked files ([U]/[W]/[M]).
+    """
+    from .spotify_fetch import acquire_track, DownloadOutcome
+
+    csv_paths = collect_playlists(csv_paths)
+    library_index = scan_library(library)
+    output_path = os.path.join(library, "outputs", "fetch", "soundeo_upgrade.csv")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    downloaded = 0
+    replaced = 0
+    rows: list[dict[str, str]] = []
+
+    for csv_path in csv_paths:
+        playlist_tracks = parse_playlist_csv(csv_path)
+        for track in playlist_tracks:
+            lib_path, lib_score = best_match(track, library_index)
+            lib_version = _guess_version(Path(lib_path).stem) if lib_path else ""
+
+            # Check if this is an upgrade opportunity
+            should_upgrade = False
+            if lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]", "Radio Edit"):
+                should_upgrade = True
+            elif not lib_path:
+                should_upgrade = True
+
+            if not should_upgrade or not soundeo:
+                continue
+
+            # Try to download from Soundeo
+            try:
+                results = soundeo.search(track)
+                pick = soundeo.pick(track, results) if results else None
+
+                if not pick:
+                    rows.append({
+                        "track": track.name,
+                        "current": lib_version,
+                        "soundeo": "not_found",
+                        "action": "skipped",
+                    })
+                    continue
+
+                # Download the better version
+                outcome = acquire_track(
+                    track, library,
+                    soundeo=soundeo,
+                    audio_format=audio_format,
+                )
+
+                if outcome.status == "ok":
+                    downloaded += 1
+
+                    # Delete old version if it's marked [U]/[W]/[M]
+                    if lib_path and any(m in Path(lib_path).stem for m in ["[U]", "[W]", "[M]"]):
+                        if not dry_run:
+                            try:
+                                Path(lib_path).unlink()
+                                replaced += 1
+                            except OSError as e:
+                                logger.warning("soundeo-upgrade: could not delete %s: %s", lib_path, e)
+
+                    rows.append({
+                        "track": track.name,
+                        "current": lib_version,
+                        "soundeo": _guess_version(pick.title),
+                        "action": "downloaded & replaced" if lib_path else "downloaded",
+                    })
+                else:
+                    rows.append({
+                        "track": track.name,
+                        "current": lib_version,
+                        "soundeo": _guess_version(pick.title),
+                        "action": f"failed: {outcome.status}",
+                    })
+            except SoundeoError:
+                rows.append({
+                    "track": track.name,
+                    "current": lib_version,
+                    "soundeo": "error",
+                    "action": "error",
+                })
+
+    # Write results CSV
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["track", "current", "soundeo", "action"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    verb = "would download" if dry_run else "downloaded"
+    logger.info(
+        "soundeo-upgrade: %s %d track(s), replaced %d old version(s) → %s",
+        verb, downloaded, replaced, output_path,
+    )
+    return output_path
+
+
 def _guess_version(name: str) -> str:
     """Guess track version from filename/title."""
     n = name.lower()

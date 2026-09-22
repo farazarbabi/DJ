@@ -194,6 +194,11 @@ def _build_parser() -> argparse.ArgumentParser:
                               "available, compare with library versions, and report upgrade "
                               "opportunities (YouTube→Extended, Radio→Original, etc.). "
                               "Generates a CSV report; no downloads.")
+    p_fetch.add_argument("--upgrade-soundeo", dest="upgrade_soundeo", action="store_true",
+                         help="Upgrade library tracks: find better versions on Soundeo "
+                              "(Extended over Original, Original over YouTube [U], etc.), "
+                              "download them, and replace old versions. Respects --dry-run "
+                              "to preview without downloading. Generates audit CSV + download log.")
     p_fetch.add_argument("--dry-run", action="store_true",
                          help="Only report matched/missing; do not download")
 
@@ -1000,12 +1005,12 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             return 1
         return 0
 
-    if getattr(args, "audit_soundeo", False):
+    if getattr(args, "audit_soundeo", False) or getattr(args, "upgrade_soundeo", False):
         if not os.path.isdir(args.library):
             logger.error("fetch-missing: library dir not found: %s", args.library)
             return 1
         from .soundeo import SoundeoClient
-        from .soundeo_audit import audit_soundeo
+        from .soundeo_audit import audit_soundeo, upgrade_soundeo
 
         playlists = args.playlists
         if not playlists:
@@ -1024,8 +1029,16 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             soundeo = None
             if not getattr(args, "no_soundeo", False):
                 soundeo = SoundeoClient.from_env()
-            report_path = audit_soundeo(playlists, args.library, soundeo=soundeo)
-            logger.info("fetch-missing: audit complete → %s", report_path)
+
+            if getattr(args, "upgrade_soundeo", False):
+                report_path = upgrade_soundeo(
+                    playlists, args.library, soundeo=soundeo,
+                    audio_format=args.audio_format, dry_run=args.dry_run,
+                )
+                logger.info("fetch-missing: upgrade complete → %s", report_path)
+            else:
+                report_path = audit_soundeo(playlists, args.library, soundeo=soundeo)
+                logger.info("fetch-missing: audit complete → %s", report_path)
         except (FileNotFoundError, RuntimeError) as exc:
             logger.error("fetch-missing: %s", exc)
             return 1
