@@ -72,6 +72,10 @@ def audit_soundeo(
                         elif lib_version == "Radio Edit":
                             if soundeo_version in ("Original", "Extended", "Remix", "Extended Remix"):
                                 upgrade_opportunity = f"{lib_version} → {soundeo_version}"
+                        elif lib_version == "Original":
+                            # Upgrade Original to Extended if available
+                            if soundeo_version == "Extended" or soundeo_version == "Extended Remix":
+                                upgrade_opportunity = f"{lib_version} → {soundeo_version}"
                         elif lib_version == "Remix" or lib_version == "Extended Remix":
                             # Remixes are distinct but may have better Soundeo versions
                             if soundeo_version in ("Remix", "Extended Remix"):
@@ -148,7 +152,7 @@ def upgrade_soundeo(
         # Check if this is an upgrade opportunity: any tool-marked file or lower-quality version
         # (remixes are distinct tracks but may still benefit from upgraded source quality)
         should_upgrade = (
-            lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]", "Radio Edit", "Remix")
+            lib_version in ("YouTube [U]", "YouTube [W]", "YouTube [M]", "Radio Edit", "Original", "Remix")
             or lib_version == "missing"
         )
 
