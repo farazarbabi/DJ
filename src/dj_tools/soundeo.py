@@ -354,7 +354,9 @@ class SoundeoClient:
         except httpx.HTTPError as exc:
             logger.warning("soundeo: search failed for %r: %s", query, exc)
             return []
-        return _parse_results(env.get("content") or "")
+        results = _parse_results(env.get("content") or "")
+        logger.debug("soundeo: searched for %r → %d result(s)", query, len(results))
+        return results
 
     def pick(
         self, track: PlaylistTrack, results: list[SoundeoResult],
@@ -372,19 +374,33 @@ class SoundeoClient:
         """
         matches = self._title_artist_matches(track, results)
         if not matches:
+            logger.debug(
+                "soundeo: no title/artist match for %s among %d result(s)",
+                track.name, len(results)
+            )
             return None
+
+        logger.debug(
+            "soundeo: %d title/artist match(es) for %s", len(matches), track.name
+        )
 
         _DJ_MIN_SEC = 390.0  # 6:30
         _DJ_MAX_SEC = 480.0  # 8:00
 
         # 1. Extended versions (exact title/artist match, no duration check)
-        extended_versions = [r for r in matches if _version_rank(r.title) == 0]  # rank 0 = Extended Mix
+        extended_versions = [r for r in matches if _version_rank(r.title) == 0]
         if extended_versions:
             extended_versions.sort(key=lambda r: (
                 _format_rank(r, self.audio_format),
                 -(r.duration_sec or 0.0),
             ))
-            return extended_versions[0]
+            pick = extended_versions[0]
+            logger.debug(
+                "soundeo: priority 1 (Extended) → %s (%d:%02d, %s)",
+                pick.label, int(pick.duration_sec or 0) // 60,
+                int(pick.duration_sec or 0) % 60, pick.formats
+            )
+            return pick
 
         # 2. DJ range 6:30-8:00 min (extended versions, same track)
         dj_range_matches = [
@@ -396,7 +412,13 @@ class SoundeoClient:
                 _format_rank(r, self.audio_format), _version_rank(r.title),
                 -(r.duration_sec or 0.0),
             ))
-            return dj_range_matches[0]
+            pick = dj_range_matches[0]
+            logger.debug(
+                "soundeo: priority 2 (DJ range 6:30-8:00) → %s (%d:%02d, %s)",
+                pick.label, int(pick.duration_sec or 0) // 60,
+                int(pick.duration_sec or 0) % 60, pick.formats
+            )
+            return pick
 
         # 3. Strict ±3s tolerance (original cut or close match)
         expected_sec = track.duration_sec
@@ -410,14 +432,26 @@ class SoundeoClient:
                     _format_rank(r, self.audio_format), _version_rank(r.title),
                     -(r.duration_sec or 0.0),
                 ))
-                return close_matches[0]
+                pick = close_matches[0]
+                logger.debug(
+                    "soundeo: priority 3 (±3s strict) → %s (%d:%02d, %s)",
+                    pick.label, int(pick.duration_sec or 0) // 60,
+                    int(pick.duration_sec or 0) % 60, pick.formats
+                )
+                return pick
 
         # 4. Best overall (format > version rank > duration)
         matches.sort(key=lambda r: (
             _format_rank(r, self.audio_format), _version_rank(r.title),
             -(r.duration_sec or 0.0),
         ))
-        return matches[0]
+        pick = matches[0]
+        logger.debug(
+            "soundeo: priority 4 (best overall) → %s (%d:%02d, %s)",
+            pick.label, int(pick.duration_sec or 0) // 60,
+            int(pick.duration_sec or 0) % 60, pick.formats
+        )
+        return pick
 
     def pick_owned(
         self, track: PlaylistTrack, results: list[SoundeoResult],

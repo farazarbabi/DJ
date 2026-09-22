@@ -738,6 +738,9 @@ def acquire_track(
         try:
             results = soundeo.search(track)
             pick = soundeo.pick(track, results) if results else None
+            if results and not pick:
+                logger.debug("soundeo: found %d result(s) but no priority match for %s; trying YouTube",
+                           len(results), track.name)
         except SoundeoError as exc:
             logger.warning("soundeo: search error for %s — %s; trying YouTube",
                            track.name, exc)
@@ -1027,6 +1030,50 @@ _NOT_FOUND_CACHE_NAME = "not_found_cache.json"
 def _track_identity(track: PlaylistTrack) -> str:
     """Stable per-track key for the not-found cache (URI, else name+artist)."""
     return track.uri or f"{track.name}\x00{track.artist_display}".lower()
+
+
+def _track_text_identity(track: PlaylistTrack) -> str:
+    """Artist/title cache key used when Spotify URI changes between exports."""
+    return f"{track.name}\x00{track.artist_display}".lower()
+
+
+def _not_found_cache_keys(track: PlaylistTrack) -> set[str]:
+    keys = {_track_text_identity(track)}
+    if track.uri:
+        keys.add(track.uri)
+    return keys
+
+
+def _cache_entry_matches_track(entry: object, track: PlaylistTrack) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return (
+        f"{entry.get('name', '')}\x00{entry.get('artists', '')}".lower()
+        == _track_text_identity(track)
+    )
+
+
+def _is_cached_not_found(cache: dict, track: PlaylistTrack) -> bool:
+    keys = _not_found_cache_keys(track)
+    if any(key in cache for key in keys):
+        return True
+    return any(_cache_entry_matches_track(entry, track) for entry in cache.values())
+
+
+def _forget_cached_not_found(cache: dict, track: PlaylistTrack) -> None:
+    for key in _not_found_cache_keys(track):
+        cache.pop(key, None)
+    for key, entry in list(cache.items()):
+        if _cache_entry_matches_track(entry, track):
+            cache.pop(key, None)
+
+
+def _remember_cached_not_found(cache: dict, track: PlaylistTrack, detail: str) -> None:
+    cache[_track_identity(track)] = {
+        "artists": track.artist_display,
+        "name": track.name,
+        "detail": detail,
+    }
 
 
 def load_not_found_cache(report_dir: str) -> dict:
@@ -1340,9 +1387,9 @@ def fetch_missing(
     not_found = load_not_found_cache(report_dir)
     soundeo_log = load_soundeo_tags_log(report_dir)  # provenance of as-is Soundeo files
     for r in present:  # a now-present track is no longer "not found"
-        not_found.pop(_track_identity(r.track), None)
+        _forget_cached_not_found(not_found, r.track)
     to_download = [r for r in missing
-                   if force_lookup or _track_identity(r.track) not in not_found]
+                   if force_lookup or not _is_cached_not_found(not_found, r.track)]
     cached_skipped = len(missing) - len(to_download)
     if cached_skipped:
         logger.info(
@@ -1471,10 +1518,9 @@ def fetch_missing(
                 log.writerow([outcome.status, outcome.source, t.artist_display, t.name,
                               t.search_query(), outcome.outfile, outcome.detail])
                 lf.flush()
-                key = _track_identity(t)
                 if outcome.status == "skip":
                     summary["skipped"] += 1
-                    not_found.pop(key, None)
+                    _forget_cached_not_found(not_found, t)
                     reason = (
                         "existing marked download; checked Soundeo for upgrade, duration ok"
                         if soundeo is not None else
@@ -1492,8 +1538,8 @@ def fetch_missing(
                     # Soundeo listed it but the download failed (error/credit),
                     # leave it uncached so a later run retries Soundeo.
                     if not outcome.soundeo_listed:
-                        not_found[key] = {"artists": t.artist_display, "name": t.name,
-                                          "detail": outcome.detail}
+                        _remember_cached_not_found(not_found, t, outcome.detail)
+                        save_not_found_cache(report_dir, not_found)
                     logger.warning("%s NOT FOUND on Soundeo or YouTube: %s  (%s)",
                                    prefix, label, outcome.detail)
                 elif outcome.status == "fail":
@@ -1503,7 +1549,7 @@ def fetch_missing(
                 else:
                     summary["downloaded"] += 1
                     summary[outcome.source] = summary.get(outcome.source, 0) + 1
-                    not_found.pop(key, None)  # found now — clear any stale mark
+                    _forget_cached_not_found(not_found, t)  # found now - clear any stale mark
                     # A Soundeo file is stored as-is; log its native tags and
                     # provenance so the tag-repair pass never re-touches it.
                     if (outcome.source == "soundeo" and outcome.outfile
