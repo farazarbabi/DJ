@@ -108,6 +108,12 @@ def _version_rank(title: str) -> int:
     return 2
 
 
+# Typical full club-cut length; a match in this window is preferred over a
+# shorter cut when no explicitly Extended version is listed.
+_DJ_MIN_SEC = 390.0  # 6:30
+_DJ_MAX_SEC = 480.0  # 8:00
+
+
 def acceptable_source_formats(target_format: str) -> tuple[str, ...]:
     """Soundeo source formats to accept for a requested output format."""
     if target_format == "aiff":
@@ -362,97 +368,54 @@ class SoundeoClient:
     def pick(
         self, track: PlaylistTrack, results: list[SoundeoResult],
     ) -> SoundeoResult | None:
-        """Best Soundeo result for ``track``, using a priority fallback chain.
+        """Best Soundeo result for ``track``: lossless first, then the DJ cut.
 
-        Fallback order (each checked only if previous found nothing):
-        1. Extended versions (exact title/artist, no duration check)
-        2. DJ range 6:30-8:00 min (exact title/artist, extended versions)
-        3. Strict ±3s tolerance (original cut duration match)
-        4. Best overall (Extended > Original > plain > Radio Edit)
+        Only title/artist matches compete (a real remix is excluded unless the
+        Spotify title names it). Among them, candidates in the best available
+        source format win outright (AIFF > WAV > MP3), so an MP3 Extended Mix
+        never beats an AIFF Original. Within that format tier the cut is chosen
+        by priority, each step only if the previous found nothing:
 
-        This prefers high-quality extended mixes from Soundeo over YouTube fallback,
-        upgrading the original Spotify cut when available.
+        1. an Extended version (regardless of duration),
+        2. a non-Radio cut in the 6:30-8:00 DJ range,
+        3. a cut within ±3s of the Spotify duration,
+        4. the best remaining by Extended > Original > plain > Radio Edit.
+
+        Ties break toward the longest duration.
         """
         matches = self._title_artist_matches(track, results)
         if not matches:
-            logger.debug(
-                "soundeo: no title/artist match for %s among %d result(s)",
-                track.name, len(results)
-            )
+            logger.debug("soundeo: no title/artist match for %s among %d result(s)",
+                         track.name, len(results))
             return None
 
-        logger.debug(
-            "soundeo: %d title/artist match(es) for %s", len(matches), track.name
-        )
+        best_format = min(_format_rank(r, self.audio_format) for r in matches)
+        matches = [r for r in matches if _format_rank(r, self.audio_format) == best_format]
 
-        _DJ_MIN_SEC = 390.0  # 6:30
-        _DJ_MAX_SEC = 480.0  # 8:00
+        def by_cut(r: SoundeoResult) -> tuple[int, float]:
+            return _version_rank(r.title), -(r.duration_sec or 0.0)
 
-        # 1. Extended versions (exact title/artist match, no duration check)
-        extended_versions = [r for r in matches if _version_rank(r.title) == 0]
-        if extended_versions:
-            extended_versions.sort(key=lambda r: (
-                _format_rank(r, self.audio_format),
-                -(r.duration_sec or 0.0),
-            ))
-            pick = extended_versions[0]
-            logger.debug(
-                "soundeo: priority 1 (Extended) → %s (%d:%02d, %s)",
-                pick.label, int(pick.duration_sec or 0) // 60,
-                int(pick.duration_sec or 0) % 60, pick.formats
-            )
-            return pick
+        def within(r: SoundeoResult, lo: float, hi: float) -> bool:
+            return r.duration_sec is not None and lo <= r.duration_sec <= hi
 
-        # 2. DJ range 6:30-8:00 min (extended versions, same track)
-        dj_range_matches = [
-            r for r in matches
-            if r.duration_sec is not None and _DJ_MIN_SEC <= r.duration_sec <= _DJ_MAX_SEC
-        ]
-        if dj_range_matches:
-            dj_range_matches.sort(key=lambda r: (
-                _format_rank(r, self.audio_format), _version_rank(r.title),
-                -(r.duration_sec or 0.0),
-            ))
-            pick = dj_range_matches[0]
-            logger.debug(
-                "soundeo: priority 2 (DJ range 6:30-8:00) → %s (%d:%02d, %s)",
-                pick.label, int(pick.duration_sec or 0) // 60,
-                int(pick.duration_sec or 0) % 60, pick.formats
-            )
-            return pick
+        def chosen(reason: str, r: SoundeoResult) -> SoundeoResult:
+            logger.debug("soundeo: pick by %s -> %s (%ss, %s)", reason, r.label,
+                         int(r.duration_sec or 0), "/".join(r.formats))
+            return r
 
-        # 3. Strict ±3s tolerance (original cut or close match)
-        expected_sec = track.duration_sec
-        if expected_sec is not None:
-            close_matches = [
-                r for r in matches
-                if r.duration_sec is not None and abs(r.duration_sec - expected_sec) <= 3.0
-            ]
-            if close_matches:
-                close_matches.sort(key=lambda r: (
-                    _format_rank(r, self.audio_format), _version_rank(r.title),
-                    -(r.duration_sec or 0.0),
-                ))
-                pick = close_matches[0]
-                logger.debug(
-                    "soundeo: priority 3 (±3s strict) → %s (%d:%02d, %s)",
-                    pick.label, int(pick.duration_sec or 0) // 60,
-                    int(pick.duration_sec or 0) % 60, pick.formats
-                )
-                return pick
-
-        # 4. Best overall (format > version rank > duration)
-        matches.sort(key=lambda r: (
-            _format_rank(r, self.audio_format), _version_rank(r.title),
-            -(r.duration_sec or 0.0),
-        ))
-        pick = matches[0]
-        logger.debug(
-            "soundeo: priority 4 (best overall) → %s (%d:%02d, %s)",
-            pick.label, int(pick.duration_sec or 0) // 60,
-            int(pick.duration_sec or 0) % 60, pick.formats
-        )
-        return pick
+        extended = [r for r in matches if _version_rank(r.title) == 0]
+        if extended:
+            return chosen("extended", min(extended, key=by_cut))
+        dj_range = [r for r in matches
+                    if _version_rank(r.title) != 3 and within(r, _DJ_MIN_SEC, _DJ_MAX_SEC)]
+        if dj_range:
+            return chosen("dj range 6:30-8:00", min(dj_range, key=by_cut))
+        expected = track.duration_sec
+        if expected is not None:
+            close = [r for r in matches if within(r, expected - 3.0, expected + 3.0)]
+            if close:
+                return chosen("within 3s", min(close, key=by_cut))
+        return chosen("best overall", min(matches, key=by_cut))
 
     def pick_owned(
         self, track: PlaylistTrack, results: list[SoundeoResult],

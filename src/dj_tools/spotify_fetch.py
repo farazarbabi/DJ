@@ -709,6 +709,65 @@ class _QuotaState:
         self.exhausted = False
 
 
+def soundeo_target_stem(pick, audio_format: str) -> tuple[str, str]:
+    """Filename stem a Soundeo ``pick`` lands under, plus the source format used.
+
+    Keeps Soundeo's own "Artist - Title" naming — it carries the real cut, e.g.
+    "(Original Mix)", where the Spotify title may name another ("- Radio Edit");
+    the stopword-tolerant matcher still sees the same track. A WAV/MP3 source is
+    marked ``[W]``/``[M]`` so the file can be upgraded once the real AIFF appears.
+    """
+    from .soundeo import preferred_download_format
+
+    source_format = preferred_download_format(pick, audio_format) or audio_format
+    return sanitize_filename(pick.label) + marker_for_soundeo_format(source_format), source_format
+
+
+def download_from_soundeo(
+    soundeo,
+    pick,
+    dest_dir: str,
+    *,
+    quota: _QuotaState | None = None,
+    audio_format: str = "aiff",
+) -> DownloadOutcome:
+    """Download one picked Soundeo result into ``dest_dir`` (YouTube is never involved).
+
+    An AIFF source lands unmarked, like a curated original; WAV/MP3 sources are
+    converted to ``audio_format`` and marked. Returns ``quota_skip`` when the
+    daily quota is spent (also flagging ``quota`` so callers stop trying) and
+    ``fail`` on any other Soundeo error.
+    """
+    from .soundeo import SoundeoError, SoundeoQuotaExceeded
+
+    if quota is not None and quota.exhausted:
+        return DownloadOutcome("quota_skip", "", "on Soundeo; daily quota exhausted",
+                               "soundeo", soundeo_listed=True)
+    stem, source_format = soundeo_target_stem(pick, audio_format)
+    dest = os.path.join(dest_dir, stem + "." + audio_format)
+    source_path = dest if source_format == audio_format else os.path.join(
+        dest_dir, stem + ".__soundeo__." + source_format
+    )
+    try:
+        soundeo.download(pick, source_path, audio_format=source_format)
+        if source_path != dest:
+            if audio_format == "aiff":
+                if not _audio_to_aiff(source_path, dest):
+                    raise SoundeoError(f"could not convert Soundeo {source_format} to AIFF")
+                _remove_quiet(source_path)
+            else:
+                os.replace(source_path, dest)
+        return DownloadOutcome("ok", dest, f"soundeo:{pick.id}:{source_format}", "soundeo",
+                               soundeo_listed=True)
+    except SoundeoQuotaExceeded as exc:
+        if quota is not None:
+            quota.exhausted = True
+        return DownloadOutcome("quota_skip", "", str(exc), "soundeo", soundeo_listed=True)
+    except SoundeoError as exc:
+        _remove_quiet(source_path)
+        return DownloadOutcome("fail", "", str(exc), "soundeo", soundeo_listed=True)
+
+
 def acquire_track(
     track: PlaylistTrack,
     dest_dir: str,
@@ -725,26 +784,22 @@ def acquire_track(
 
     Per-track routing (search never costs quota, only a download does):
 
-    * on Soundeo + quota available -> download unmarked, preferring AIFF > WAV > MP3;
+    * on Soundeo + quota available -> :func:`download_from_soundeo`;
     * on Soundeo + quota exhausted  -> ``quota_skip`` (retry after midnight CET),
       *not* downloaded from YouTube;
     * not on Soundeo (or Soundeo errored/disabled) -> fall back to
       :func:`download_track` (YouTube, ``[U]``-marked).
-
-    A successful Soundeo AIFF lands at the unmarked ``Artist - Title`` path;
-    Soundeo WAV/MP3 land as converted ``[W]``/``[M]`` AIFFs so they can be
-    upgraded later when the real AIFF appears.
     """
     soundeo_listed = False
     if soundeo is not None:
-        from .soundeo import SoundeoError, SoundeoQuotaExceeded, preferred_download_format
+        from .soundeo import SoundeoError
 
         try:
             results = soundeo.search(track)
             pick = soundeo.pick(track, results) if results else None
             if results and not pick:
                 logger.debug("soundeo: found %d result(s) but no priority match for %s; trying YouTube",
-                           len(results), track.name)
+                             len(results), track.name)
         except SoundeoError as exc:
             logger.warning("soundeo: search error for %s — %s; trying YouTube",
                            track.name, exc)
@@ -752,46 +807,12 @@ def acquire_track(
 
         if pick is not None:
             soundeo_listed = True  # on Soundeo — never cache as "not found"
-            if quota is not None and quota.exhausted:
-                return DownloadOutcome(
-                    "quota_skip", "", "on Soundeo; daily quota exhausted", "soundeo",
-                    soundeo_listed=True)
-            # Unmarked path: treat a Soundeo original like a curated original,
-            # and keep Soundeo's own "Artist - Title" naming (which carries the
-            # real cut, e.g. "(Original Mix)") rather than the Spotify title,
-            # which may name a different cut ("- Radio Edit"). Only YouTube
-            # fallbacks use the Spotify name (with the [U] marker). The
-            # stopword-tolerant matcher still sees this as the same track.
-            source_format = preferred_download_format(pick, audio_format) or audio_format
-            stem = sanitize_filename(pick.label) + marker_for_soundeo_format(source_format)
-            dest = os.path.join(dest_dir, stem + "." + audio_format)
-            source_path = dest if source_format == audio_format else os.path.join(
-                dest_dir, stem + ".__soundeo__." + source_format
-            )
-            try:
-                try:
-                    soundeo.download(pick, source_path, audio_format=source_format)
-                except TypeError:
-                    soundeo.download(pick, source_path)
-                if source_path != dest:
-                    if audio_format == "aiff":
-                        if not _audio_to_aiff(source_path, dest):
-                            raise SoundeoError(f"could not convert Soundeo {source_format} to AIFF")
-                        _remove_quiet(source_path)
-                    else:
-                        os.replace(source_path, dest)
-                return DownloadOutcome("ok", dest, f"soundeo:{pick.id}:{source_format}", "soundeo",
-                                       soundeo_listed=True)
-            except SoundeoQuotaExceeded as exc:
-                if quota is not None:
-                    quota.exhausted = True
-                return DownloadOutcome("quota_skip", "", str(exc), "soundeo",
-                                       soundeo_listed=True)
-            except SoundeoError as exc:
-                logger.warning("soundeo: download error for %s - %s; trying YouTube",
-                               track.name, exc)
-                _remove_quiet(source_path)
-                # fall through to YouTube
+            outcome = download_from_soundeo(soundeo, pick, dest_dir, quota=quota,
+                                            audio_format=audio_format)
+            if outcome.status != "fail":
+                return outcome
+            logger.warning("soundeo: download error for %s - %s; trying YouTube",
+                           track.name, outcome.detail)
 
     outcome = download_track(
         track, dest_dir, audio_format=audio_format, tolerance=tolerance,

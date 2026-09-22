@@ -877,7 +877,7 @@ def test_fetch_missing_stops_on_quota_without_youtube(tmp_path, monkeypatch):
         def pick(self, track, results):
             return results[0]
 
-        def download(self, result, dest):
+        def download(self, result, dest, audio_format="aiff"):
             raise so.SoundeoQuotaExceeded("daily limit reached")
 
     monkeypatch.setattr(so.SoundeoClient, "from_env",
@@ -902,7 +902,7 @@ def test_acquire_soundeo_download_error_falls_back_to_youtube(tmp_path, monkeypa
         def pick(self, t, results):
             return results[0]
 
-        def download(self, result, dest):
+        def download(self, result, dest, audio_format="aiff"):
             raise so.SoundeoError("not available on Soundeo (HTTP 404)")
 
     out = sf.acquire_track(track, str(tmp_path), soundeo=ErrClient(), quota=sf._QuotaState())
@@ -949,7 +949,7 @@ def test_fetch_missing_logs_work_queue_composition(tmp_path, monkeypatch, caplog
     assert "fetch queue: 0 to fetch, 1 existing marked download(s) not checked" in log_text
     assert "use --check-marked-upgrades" in log_text
     assert "1 cached not-found skipped, 1 already present as originals/curated" in log_text
-    assert "CHECK marked download" not in log_text
+    assert "Hold My Hand |" not in log_text  # no per-track line for an unchecked marked file
 
 
 def test_fetch_missing_check_marked_upgrades_reverifies_marked_files(tmp_path, monkeypatch, caplog):
@@ -973,8 +973,24 @@ def test_fetch_missing_check_marked_upgrades_reverifies_marked_files(tmp_path, m
     assert summary["reverify"] == 1
     log_text = caplog.text
     assert "fetch queue: 0 to fetch, 1 existing marked download(s) queued" in log_text
-    assert "CHECK marked download for Soundeo upgrade/duration: UNKLE - Hold My Hand" in log_text
-    assert "YOUTUBE OK (existing marked download; duration ok): UNKLE - Hold My Hand" in log_text
+    assert "[1/1] UNKLE - Hold My Hand | present (duration ok)" in log_text
+
+
+def test_download_from_soundeo_reports_fail_without_touching_youtube(tmp_path, monkeypatch):
+    class Client:
+        audio_format = "aiff"
+
+        def download(self, result, dest, audio_format="aiff"):
+            raise so.SoundeoError("cdn 500")
+
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("download_from_soundeo must not fall back to YouTube")))
+    pick = so.SoundeoResult("1", "Artist", "Song", 200, formats=["aiff"])
+
+    out = sf.download_from_soundeo(Client(), pick, str(tmp_path))
+
+    assert (out.status, out.source, out.soundeo_listed) == ("fail", "soundeo", True)
+    assert "cdn 500" in out.detail
 
 
 def test_fetch_missing_caches_not_found_and_skips_next_run(tmp_path, monkeypatch):
@@ -995,6 +1011,76 @@ def test_fetch_missing_caches_not_found_and_skips_next_run(tmp_path, monkeypatch
     s2 = fetch_missing([csv_path], str(library), audio_format="aiff")
     assert s2["cached_skipped"] == 1
     assert s2["unmatched"] == 0
+
+
+def test_fetch_missing_persists_not_found_before_later_failure(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    monkeypatch.setattr(sf, "tools_available", lambda: (True, True))
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Ghost", "Nobody", 200000),
+        _row("b", "Boom", "Failure", 200000),
+    ])
+
+    def fake_download(track, dest_dir, **kw):
+        if track.name == "Ghost":
+            return sf.DownloadOutcome("no_match", "", "no result", "youtube")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sf, "download_track", fake_download)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        fetch_missing([csv_path], str(library), audio_format="aiff")
+
+    cache = sf.load_not_found_cache(str(library / "outputs" / "fetch"))
+    assert "spotify:track:a" in cache
+    assert "spotify:track:b" not in cache
+
+
+def test_fetch_missing_cached_not_found_matches_artist_title_when_uri_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: None))
+    library = tmp_path / "lib"
+    library.mkdir()
+    _seed_cache(str(library / "outputs" / "fetch"), {
+        "spotify:track:old": {"artists": "Nobody", "name": "Ghost", "detail": "no result"},
+    })
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("new", "Ghost", "Nobody", 200000)])
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("should not search a cached not-found track with a new URI")))
+
+    s = fetch_missing([csv_path], str(library), audio_format="aiff")
+
+    assert s["cached_skipped"] == 1
+    assert s["unmatched"] == 0
+
+
+def test_fetch_missing_quota_skip_does_not_cache_not_found(tmp_path, monkeypatch):
+    library = tmp_path / "lib"
+    library.mkdir()
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Aerial", "Azzecca", 200000)])
+
+    class QuotaClient:
+        def login(self): pass
+        def close(self): pass
+        def search(self, track):
+            return [so.SoundeoResult("1", "Azzecca", "Aerial", 200, formats=["aiff"])]
+        def pick(self, track, results):
+            return results[0]
+        def download(self, result, dest, audio_format="aiff"):
+            raise so.SoundeoQuotaExceeded("daily download limit reached")
+
+    monkeypatch.setattr(so.SoundeoClient, "from_env", classmethod(lambda cls, **kw: QuotaClient()))
+    monkeypatch.setattr(sf, "download_track", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("quota skips must not fall back to YouTube")))
+
+    s = fetch_missing([csv_path], str(library), audio_format="aiff")
+
+    assert s["quota_skipped"] == 1
+    assert s["cached_skipped"] == 0
+    assert sf.load_not_found_cache(str(library / "outputs" / "fetch")) == {}
 
 
 def test_fetch_missing_force_lookup_retries_cached(tmp_path, monkeypatch):
@@ -1044,7 +1130,7 @@ def test_fetch_missing_does_not_cache_when_soundeo_had_match(tmp_path, monkeypat
             return [so.SoundeoResult("1", "Azzecca", "Aerial", 200, formats=["aiff"])]
         def pick(self, track, results):
             return results[0]
-        def download(self, result, dest):
+        def download(self, result, dest, audio_format="aiff"):
             raise so.SoundeoError("not available on Soundeo (HTTP 404)")
 
     monkeypatch.setattr(so.SoundeoClient, "from_env",

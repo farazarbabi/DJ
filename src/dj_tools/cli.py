@@ -189,16 +189,13 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Reject YouTube results longer than this many seconds (default: 900)")
     p_fetch.add_argument("--min-duration", type=int, default=30,
                          help="Reject YouTube results shorter than this many seconds (default: 30)")
-    p_fetch.add_argument("--audit-soundeo", dest="audit_soundeo", action="store_true",
-                         help="Audit all Spotify playlist tracks against Soundeo: check what's "
-                              "available, compare with library versions, and report upgrade "
-                              "opportunities (YouTube→Extended, Radio→Original, etc.). "
-                              "Generates a CSV report; no downloads.")
     p_fetch.add_argument("--upgrade-soundeo", dest="upgrade_soundeo", action="store_true",
-                         help="Upgrade library tracks: find better versions on Soundeo "
-                              "(Extended over Original, Original over YouTube [U], etc.), "
-                              "download them, and replace old versions. Respects --dry-run "
-                              "to preview without downloading. Generates audit CSV + download log.")
+                         help="Upgrade playlist tracks already in the library to better Soundeo "
+                              "cuts, then exit: lossless AIFF over [U]/[M]/[W] downloads, Extended "
+                              "over Original, either over a Radio Edit. Marked old copies are "
+                              "deleted; unmarked ones move to outputs/fetch/replaced/. Needs "
+                              "Soundeo credentials, never uses YouTube, skips missing tracks. "
+                              "--dry-run only reports. Writes outputs/fetch/soundeo_upgrade.csv.")
     p_fetch.add_argument("--dry-run", action="store_true",
                          help="Only report matched/missing; do not download")
 
@@ -978,6 +975,27 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fetch_playlists(args: argparse.Namespace) -> list[str] | None:
+    """Playlist inputs for fetch-missing, defaulting to ``<library>/spotify-playlists``.
+
+    Returns None (after logging the error) when nothing was given and the
+    default directory does not exist.
+    """
+    if args.playlists:
+        return args.playlists
+    from .spotify_fetch import default_playlists_dir
+
+    default_dir = default_playlists_dir(args.library)
+    if not os.path.isdir(default_dir):
+        logger.error(
+            "fetch-missing: no playlists given and default %s not found; "
+            "pass CSV(s)/dir or use --prune-only", default_dir,
+        )
+        return None
+    logger.info("fetch-missing: no playlists given, using default %s", default_dir)
+    return [default_dir]
+
+
 def _run_fetch_missing(args: argparse.Namespace) -> int:
     """Match Spotify playlist CSVs against the library and download what's missing."""
     from .spotify_fetch import fetch_missing, prune_superseded_downloads
@@ -1005,43 +1023,30 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             return 1
         return 0
 
-    if getattr(args, "audit_soundeo", False) or getattr(args, "upgrade_soundeo", False):
-        if not os.path.isdir(args.library):
-            logger.error("fetch-missing: library dir not found: %s", args.library)
+    if getattr(args, "upgrade_soundeo", False):
+        from .soundeo import SoundeoClient, SoundeoError
+        from .soundeo_upgrade import upgrade_soundeo
+
+        if getattr(args, "no_soundeo", False):
+            logger.error("fetch-missing: --upgrade-soundeo cannot be combined with --no-soundeo")
             return 1
-        from .soundeo import SoundeoClient
-        from .soundeo_audit import audit_soundeo, upgrade_soundeo
-
-        playlists = args.playlists
-        if not playlists:
-            from .spotify_fetch import default_playlists_dir
-            default_dir = default_playlists_dir(args.library)
-            if not os.path.isdir(default_dir):
-                logger.error(
-                    "fetch-missing: no playlists given and default %s not found",
-                    default_dir,
-                )
-                return 1
-            logger.info("fetch-missing: no playlists given, using default %s", default_dir)
-            playlists = [default_dir]
-
+        playlists = _fetch_playlists(args)
+        if playlists is None:
+            return 1
+        soundeo = SoundeoClient.from_env(audio_format=args.audio_format)
+        if soundeo is None:
+            logger.error("fetch-missing: --upgrade-soundeo needs SOUNDEO_USER/SOUNDEO_PASS in .env")
+            return 1
         try:
-            soundeo = None
-            if not getattr(args, "no_soundeo", False):
-                soundeo = SoundeoClient.from_env()
-
-            if getattr(args, "upgrade_soundeo", False):
-                report_path = upgrade_soundeo(
-                    playlists, args.library, soundeo=soundeo,
-                    audio_format=args.audio_format, dry_run=args.dry_run,
-                )
-                logger.info("fetch-missing: upgrade complete → %s", report_path)
-            else:
-                report_path = audit_soundeo(playlists, args.library, soundeo=soundeo)
-                logger.info("fetch-missing: audit complete → %s", report_path)
-        except (FileNotFoundError, RuntimeError) as exc:
+            upgrade_soundeo(
+                playlists, args.library, soundeo=soundeo, audio_format=args.audio_format,
+                threshold=args.threshold, dry_run=args.dry_run,
+            )
+        except (FileNotFoundError, RuntimeError, SoundeoError) as exc:
             logger.error("fetch-missing: %s", exc)
             return 1
+        finally:
+            soundeo.close()
         return 0
 
     if args.prune_only:
@@ -1055,18 +1060,9 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             logger.info("  %s %s", verb, os.path.basename(p))
         return 0
 
-    playlists = args.playlists
-    if not playlists:
-        from .spotify_fetch import default_playlists_dir
-        default_dir = default_playlists_dir(args.library)
-        if not os.path.isdir(default_dir):
-            logger.error(
-                "fetch-missing: no playlists given and default %s not found; "
-                "pass CSV(s)/dir or use --prune-only", default_dir,
-            )
-            return 1
-        logger.info("fetch-missing: no playlists given, using default %s", default_dir)
-        playlists = [default_dir]
+    playlists = _fetch_playlists(args)
+    if playlists is None:
+        return 1
 
     try:
         fetch_missing(
