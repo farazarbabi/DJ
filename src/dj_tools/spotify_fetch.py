@@ -40,8 +40,8 @@ AUDIO_EXTS = {".aiff", ".aif", ".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"}
 # Words that carry no identity signal when comparing a title to a filename.
 STOPWORDS = {
     "the", "a", "an", "of", "and", "feat", "featuring", "ft", "with",
-    "original", "mix", "extended", "version", "radio", "edit", "remix",
-    "remixes", "rework", "dub", "vip", "instrumental", "club",
+    "original", "mix", "mixed", "extended", "version", "radio", "edit", "remix",
+    "remixes", "remixed", "rework", "dub", "vip", "instrumental", "club",
 }
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
