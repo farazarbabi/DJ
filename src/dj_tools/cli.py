@@ -189,6 +189,11 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Reject YouTube results longer than this many seconds (default: 900)")
     p_fetch.add_argument("--min-duration", type=int, default=30,
                          help="Reject YouTube results shorter than this many seconds (default: 30)")
+    p_fetch.add_argument("--audit-soundeo", dest="audit_soundeo", action="store_true",
+                         help="Audit all Spotify playlist tracks against Soundeo: check what's "
+                              "available, compare with library versions, and report upgrade "
+                              "opportunities (YouTube→Extended, Radio→Original, etc.). "
+                              "Generates a CSV report; no downloads.")
     p_fetch.add_argument("--dry-run", action="store_true",
                          help="Only report matched/missing; do not download")
 
@@ -766,7 +771,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 
     run_id = uuid.uuid4().hex[:8]
     store = CsvStore(config.output_dir)
-    obs_cache = ObsCache()
+    obs_cache = ObsCache(config.raw_cache_path)
     store.snapshot(run_id)
 
     # Clear stale observations — rebuilt from cache each run
@@ -860,7 +865,13 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # Phase 6: Write tags
     t0 = time.perf_counter()
     if not args.no_tags and args.no_grouping:
-        sync_tags(store, dry_run=False, write_key_tag=getattr(args, "write_key_tag", False), show_progress=show_progress)
+        sync_tags(
+            store,
+            dry_run=False,
+            write_key_tag=getattr(args, "write_key_tag", False),
+            show_progress=show_progress,
+            cache_path=config.raw_cache_path,
+        )
         logger.info("Pipeline: tags written in %s", _fmt_elapsed(time.perf_counter() - t0))
     elif not args.no_tags:
         logger.info("Tags: delayed until after grouping so group IDs can be included")
@@ -926,6 +937,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                     write_key_tag=getattr(args, "write_key_tag", False),
                     group_ids_by_file=group_ids,
                     show_progress=show_progress,
+                    cache_path=config.raw_cache_path,
                 )
                 logger.info("Pipeline: final tags written in %s", _fmt_elapsed(time.perf_counter() - tag_t0))
         except Exception:
@@ -983,6 +995,37 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
         try:
             refix_soundeo_tags(args.library, dry_run=args.dry_run,
                                audio_format=args.audio_format)
+        except (FileNotFoundError, RuntimeError) as exc:
+            logger.error("fetch-missing: %s", exc)
+            return 1
+        return 0
+
+    if getattr(args, "audit_soundeo", False):
+        if not os.path.isdir(args.library):
+            logger.error("fetch-missing: library dir not found: %s", args.library)
+            return 1
+        from .soundeo import SoundeoClient
+        from .soundeo_audit import audit_soundeo
+
+        playlists = args.playlists
+        if not playlists:
+            from .spotify_fetch import default_playlists_dir
+            default_dir = default_playlists_dir(args.library)
+            if not os.path.isdir(default_dir):
+                logger.error(
+                    "fetch-missing: no playlists given and default %s not found",
+                    default_dir,
+                )
+                return 1
+            logger.info("fetch-missing: no playlists given, using default %s", default_dir)
+            playlists = [default_dir]
+
+        try:
+            soundeo = None
+            if not getattr(args, "no_soundeo", False):
+                soundeo = SoundeoClient.from_env()
+            report_path = audit_soundeo(playlists, args.library, soundeo=soundeo)
+            logger.info("fetch-missing: audit complete → %s", report_path)
         except (FileNotFoundError, RuntimeError) as exc:
             logger.error("fetch-missing: %s", exc)
             return 1
