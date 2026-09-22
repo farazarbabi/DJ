@@ -193,10 +193,11 @@ def upgrade_soundeo(
 
             if outcome.status == "ok":
                 action = "downloaded & replaced" if lib_path else "downloaded"
+                src = "Soundeo" if outcome.source == "soundeo" else "YouTube"
                 logger.info(
-                    "[%d/%d] %s - %s | %s → %s ✓",
-                    idx, total, track.artist_display, track.name,
-                    lib_version, soundeo_version
+                    "%s %s - %s | downloaded from %s (%s)",
+                    prefix, track.artist_display, track.name,
+                    src, os.path.basename(outcome.outfile)
                 )
                 downloaded += 1
 
