@@ -31,6 +31,19 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _scan_sha256(path: str, existing: FileRecord | None) -> str:
+    """Return a scan hash without re-reading known large audio files.
+
+    Existing paths already have stable file/track identity in the registry. Full
+    hashing every time their mtime changes, usually because tags were written,
+    dominates scan time for large AIFF libraries. New files still get hashed so
+    duplicate detection keeps working for first-time links.
+    """
+    if existing and existing.sha256:
+        return existing.sha256
+    return _sha256(path)
+
+
 def _audio_info(path: str) -> dict:
     """Extract audio technical metadata via soundfile."""
     try:
@@ -156,8 +169,9 @@ def scan_files(
             progress.update(index, path.name, new=len(new_files), updated=updated, skipped=skipped)
             continue
 
-        # Compute file metadata
-        file_hash = _sha256(path_abs)
+        # Compute file metadata. Reuse the prior SHA for known paths; reading
+        # every byte of large AIFFs is much slower than refreshing header/tags.
+        file_hash = _scan_sha256(path_abs, existing)
         audio = _audio_info(path_abs)
         br = _bitrate(path_abs)
 

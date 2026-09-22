@@ -54,6 +54,27 @@ class RegistryConfig:
 
     # Paths
     output_dir: str = "./outputs/registry"
+    cache_dir: str = ""
+
+    @property
+    def cache_root(self) -> str:
+        """Directory for shared raw/derived caches.
+
+        User-facing runs operate on a library root, so their cache should live
+        beside that library rather than depend on the process working directory.
+        The historical default ``./files`` keeps using ``./cache`` for tests and
+        direct module callers that do not configure a real library root.
+        """
+        if self.cache_dir:
+            return self.cache_dir
+        root = self.library_roots[0] if self.library_roots else ""
+        if root and os.path.normpath(root) not in {os.path.normpath("./files"), "files"}:
+            return os.path.join(root, "cache")
+        return os.path.join("cache")
+
+    @property
+    def raw_cache_path(self) -> str:
+        return os.path.join(self.cache_root, "raw_cache.pkl")
 
     @property
     def raw_dir(self) -> str:

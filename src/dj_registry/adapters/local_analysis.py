@@ -1,6 +1,6 @@
 """Local audio analysis adapter — runs the full tagger pipeline.
 
-Uses raw cache (cache/raw_cache.pkl) and derived cache (cache/derived_cache.pkl)
+Uses the configured shared raw/derived cache for tagger/grouper data
 so files analyzed by any module are never re-analyzed.
 
 Runs the full tagger analysis (energy, mood/vibe, vocal, structure, key) and stores
@@ -437,7 +437,7 @@ def run_analysis(
     # Load shared caches
     from dj_tagger.universal_cache import get_cache as get_ucache
     from dj_tagger.tagger_cache import tagger_metadata_matches
-    ucache = get_ucache(os.path.join("cache", "raw_cache.pkl"))
+    ucache = get_ucache(config.raw_cache_path)
 
     # Split into cache hits and misses.
     # Uses universal cache directly (version-checked, no mtime check) so that

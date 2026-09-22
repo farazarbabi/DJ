@@ -118,3 +118,43 @@ def test_scan_files_prunes_records_for_files_removed_from_disk(tmp_path, monkeyp
     payload_file_ids = {p.file_id for p in store.load_payload_index()}
     assert "F-gone" not in payload_file_ids
     assert "F-present" in payload_file_ids
+
+
+def test_scan_files_reuses_existing_sha_for_known_changed_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    reset_cache()
+
+    track = tmp_path / "Track.mp3"
+    track.write_bytes(b"fake")
+    path_abs = str(track.resolve())
+
+    config = RegistryConfig(
+        library_roots=[str(tmp_path)],
+        supported_extensions=[".mp3"],
+        output_dir=str(tmp_path / "registry"),
+    )
+    store = CsvStore(config.output_dir)
+    store.save_files([
+        FileRecord(
+            file_id="F1",
+            path_abs=path_abs,
+            file_name="Track.mp3",
+            mtime_utc="2000-01-01T00:00:00+00:00",
+            sha256="old-sha",
+            audio_duration_sec=180.0,
+        )
+    ])
+
+    monkeypatch.setattr(file_scanner, "_sha256", lambda path: (_ for _ in ()).throw(
+        AssertionError("known files should not be fully hashed during metadata refresh")
+    ))
+    monkeypatch.setattr(file_scanner, "_audio_info", lambda path: {"duration": 180.0, "sample_rate": 44100, "channels": 2})
+    monkeypatch.setattr(file_scanner, "_bitrate", lambda path: 320000)
+    monkeypatch.setattr(file_scanner, "extract_tags", lambda path: {
+        "title": "Title", "artist": "Artist", "album": "", "genre": "", "bpm": "",
+        "key_raw": "", "key_standard": "", "key_camelot": "", "comment": "", "isrc": "",
+    })
+
+    files = file_scanner.scan_files(config, store)
+
+    assert files[0].sha256 == "old-sha"

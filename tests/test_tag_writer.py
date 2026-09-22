@@ -205,3 +205,45 @@ def test_sync_tags_skips_files_removed_from_disk(tmp_path, monkeypatch):
     assert errors == 0
     assert written == 0
     assert skipped == 1
+
+
+def test_sync_tags_skips_when_comment_is_already_current(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    reset_cache()
+
+    expected = "9A|E4|HYPN|INST|DRK.TECH.HOUS.DRV"
+    track_path = tmp_path / "Track.mp3"
+    track_path.write_bytes(b"fake")
+
+    store = CsvStore(str(tmp_path / "registry"))
+    store.save_tracks([
+        LogicalTrack(
+            track_id="T1",
+            canonical_key_camelot="9A",
+            canonical_bpm="126",
+            tagger_energy="E4",
+            tagger_vibe="HYPN",
+            tagger_vocal="INST",
+            dj_taxonomy_internal_label="Dark Tech-House Driver",
+            primary_file_id="F1",
+        )
+    ])
+    store.save_files([
+        FileRecord(
+            file_id="F1",
+            track_id="T1",
+            path_abs=str(track_path),
+            file_name="Track.mp3",
+            audio_duration_sec=180.0,
+            embedded_comment=expected,
+        )
+    ])
+
+    monkeypatch.setattr(tag_writer, "_write_full_tag", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("unchanged COMMENT should not be rewritten")
+    ))
+
+    written, skipped, errors = sync_tags(store, dry_run=False)
+
+    assert (written, skipped, errors) == (0, 1, 0)
+    assert store.load_files()[0].embedded_comment == expected

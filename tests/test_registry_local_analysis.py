@@ -95,6 +95,58 @@ class TestRunAnalysis:
         assert librosa_obs[0].key_standard == "A minor"
         assert librosa_obs[0].key_confidence == pytest.approx(0.92)
 
+    def test_library_root_cache_is_used_independent_of_cwd(self, tmp_path, monkeypatch):
+        """dj run should read <library>/cache, not ./cache from the launch cwd."""
+        library = tmp_path / "library"
+        library.mkdir()
+        wav_path = str(library / "track.wav")
+        _make_wav(wav_path)
+        duration = 2.0
+
+        cwd = tmp_path / "service-cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        reset_cache()
+
+        cache_dur = quick_duration(wav_path) or duration
+        ucache = get_cache(str(library / "cache" / "raw_cache.pkl"))
+        ucache.put_track("track.wav", cache_dur, "tagger", hydrate_tagger_result({
+            "camelot": "8A",
+            "key": "A minor",
+            "key_confidence": 0.92,
+            "energy": 3,
+            "vibe": "DRK",
+            "vocal": "INST",
+            "structure": "32H",
+            "bpm": 128.0,
+        }))
+        ucache.save()
+        reset_cache()
+
+        def fail_analysis(*args, **kwargs):
+            raise AssertionError("audio analysis should not run when library cache has the track")
+
+        monkeypatch.setattr("dj_registry.adapters.local_analysis._analyze_full", fail_analysis)
+
+        self.config.library_roots = [str(library)]
+        self.config.output_dir = str(library / "outputs" / "registry")
+        store = CsvStore(self.config.output_dir)
+        store.save_tracks([LogicalTrack(track_id="T-001", primary_file_id="F-001")])
+        store.save_files([
+            FileRecord(
+                file_id="F-001", track_id="T-001", path_abs=wav_path,
+                file_name="track.wav", is_primary_file=True,
+                audio_duration_sec=duration,
+            ),
+        ])
+        store.save_observations([])
+
+        stats = run_analysis(self.config, store, no_essentia=True)
+
+        assert stats["cached"] == 1
+        assert stats["analyzed"] == 0
+
+
     def test_cache_miss_runs_analysis(self, tmp_path, monkeypatch):
         """A file not in tagger cache should be analyzed and create observations."""
         wav_path = str(tmp_path / "track.wav")

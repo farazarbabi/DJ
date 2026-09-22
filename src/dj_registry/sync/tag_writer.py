@@ -164,6 +164,7 @@ def sync_tags(
     write_key_tag: bool = False,
     group_ids_by_file: dict[str, str] | None = None,
     show_progress: bool = False,
+    cache_path: str | None = None,
 ) -> tuple[int, int, int]:
     """Write tagger features to file tags.
 
@@ -217,24 +218,36 @@ def sync_tags(
             progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
             continue
 
+        should_write_key = bool(
+            write_key_tag
+            and track.canonical_key_camelot
+            and frec.embedded_key_camelot != track.canonical_key_camelot
+        )
+        should_write_comment = (not only_changed) or frec.embedded_comment != candidate_tag
+        if not should_write_key and not should_write_comment:
+            skipped += 1
+            progress.update(index, frec.file_name, written=written, skipped=skipped, errors=errors)
+            continue
+
         try:
-            if write_key_tag and track.canonical_key_camelot:
+            if should_write_key:
                 _write_tkey(frec.path_abs, track.canonical_key_camelot)
                 frec.embedded_key_camelot = track.canonical_key_camelot
                 std = camelot_to_standard(track.canonical_key_camelot)
                 if std:
                     frec.embedded_key_standard = std
 
-            _write_full_tag(frec.path_abs, track, candidate_tag)
+            if should_write_comment:
+                _write_full_tag(frec.path_abs, track, candidate_tag)
+                frec.embedded_comment = candidate_tag
 
-            frec.embedded_comment = candidate_tag
             frec.tag_write_status = "ok"
             frec.tag_write_error = ""
             frec.last_tag_written_at = now_iso()
             if obs_cache is None:
                 from ..store.obs_cache import ObsCache
 
-                obs_cache = ObsCache()
+                obs_cache = ObsCache(cache_path) if cache_path else ObsCache()
             obs_cache.put_by_file(
                 frec.path_abs,
                 frec.audio_duration_sec,

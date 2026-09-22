@@ -93,7 +93,7 @@ def run_full_pipeline(
     """
     run_id = uuid.uuid4().hex[:8]
     store = CsvStore(config.output_dir)
-    obs_cache = ObsCache()
+    obs_cache = ObsCache(config.raw_cache_path)
     store.snapshot(run_id)
     summary: dict = {"run_id": run_id}
 
@@ -152,11 +152,11 @@ def run_full_pipeline(
     summary["dj_taxonomy_classified"] = _classify_dj_taxonomy_for_tags(store, show_progress=show_progress)
 
     if write_tags and not dry_run:
-        written, _, errors = sync_tags(store, dry_run=False, show_progress=show_progress)
+        written, _, errors = sync_tags(store, dry_run=False, show_progress=show_progress, cache_path=config.raw_cache_path)
         summary["tags_written"] = written
         summary["tags_errors"] = errors
     else:
-        sync_tags(store, dry_run=True, show_progress=show_progress)
+        sync_tags(store, dry_run=True, show_progress=show_progress, cache_path=config.raw_cache_path)
         summary["tags_written"] = 0
         summary["tags_errors"] = 0
 
