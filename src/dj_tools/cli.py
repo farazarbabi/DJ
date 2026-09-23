@@ -53,13 +53,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_va = sub.add_parser("vibe-audit", help="Audit vibe score distributions from cache")
     p_va.add_argument("path", nargs="?", default=DEFAULT_LIBRARY_DIR, metavar="PATH",
-                      help="Library root (default: D:\Music)")
+                      help="Library root (default: D:\\Music)")
     p_va.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
 
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument(
         "paths", nargs="*", default=[DEFAULT_LIBRARY_DIR], metavar="PATH",
-        help="Audio files or directories to process (default: D:\Music)",
+        help="Audio files or directories to process (default: D:\\Music)",
     )
     p_run.add_argument("--rekordbox-xml", dest="rekordbox_xml", default=None,
                        help="Rekordbox XML path (default: auto-detect latest .xml in library dir)")
@@ -169,7 +169,9 @@ def _build_parser() -> argparse.ArgumentParser:
                               "SOUNDEO_USER/SOUNDEO_PASS are configured")
     p_fetch.add_argument("--force-lookup", dest="force_lookup", action="store_true",
                          help="Re-search tracks previously cached as not found on "
-                              "Soundeo or YouTube (default: skip them)")
+                              "Soundeo or YouTube (default: skip them); with "
+                              "--upgrade-soundeo, re-check tracks already verdicted in "
+                              "soundeo_upgrade_checked.json")
     p_fetch.add_argument("--check-marked-upgrades", dest="check_marked_upgrades",
                          action="store_true",
                          help="Also check existing [U]/[W]/[M] downloads for Soundeo "
@@ -208,7 +210,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_rbx.add_argument(
         "paths", nargs="*", default=[DEFAULT_LIBRARY_DIR], metavar="PATH",
-        help="Library root(s) (default: D:\Music) — used to locate outputs/registry "
+        help="Library root(s) (default: D:\\Music) — used to locate outputs/registry "
              "and outputs/playlists",
     )
     p_rbx.add_argument("--output", default=None,
@@ -903,6 +905,7 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
             upgrade_soundeo(
                 playlists, args.library, soundeo=soundeo, audio_format=args.audio_format,
                 threshold=args.threshold, dry_run=args.dry_run,
+                force_lookup=getattr(args, "force_lookup", False),
             )
         except (FileNotFoundError, RuntimeError, SoundeoError) as exc:
             logger.error("fetch-missing: %s", exc)

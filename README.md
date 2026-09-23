@@ -367,9 +367,15 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
    Radio Edit is never a target, and a same-tier hit such as the same remix is
    left alone). The superseded file is deleted if it was a marked download, or
    moved to `<library>/outputs/fetch/replaced/` if it was unmarked so the swap
-   can be undone. It never uses YouTube, skips tracks not yet in the library
-   (use plain `fetch-missing` for those), stops at the first quota hit, and
-   writes `outputs/fetch/soundeo_upgrade.csv`; `--dry-run` reports only.
+   can be undone. The Soundeo pick must be a version of the very file on disk
+   (same title tokens), so a fuzzy playlist match can never swap a curated
+   file for a different remix. It never uses YouTube, skips tracks not yet in
+   the library (use plain `fetch-missing` for those), stops at the first quota
+   hit, and writes `outputs/fetch/soundeo_upgrade.csv` as it goes; `--dry-run`
+   reports only. The pass is resumable: one failing track is logged and
+   skipped, and every "nothing better on Soundeo" verdict is remembered in
+   `outputs/fetch/soundeo_upgrade_checked.json` so a re-run skips it while the
+   library file is unchanged (`--force-lookup` re-checks everything).
 
 Reports and a download log are written to `<library>/outputs/fetch/`
 (`matched_report.csv`, `missing_report.csv`, `download_log.csv` with a `source`

@@ -243,3 +243,83 @@ def test_retire_superseded_keeps_a_file_overwritten_in_place(tmp_path):
     f.write_bytes(b"\x00")
     assert retire_superseded(str(f), str(tmp_path), str(f)) == "overwritten in place"
     assert f.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Resilience and resume
+# --------------------------------------------------------------------------- #
+def test_duplicate_rows_for_one_file_do_not_abort_the_pass(tmp_path, monkeypatch):
+    _no_youtube(monkeypatch)
+    lib = _library(tmp_path, "Artist - Song[U].aiff")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Song", "Artist"), _row("b", "Song - Original Mix", "Artist"),
+    ])
+    pick = _result("o", "Artist", "Song (Original Mix)")
+    client = FakeSoundeo({"Song": [pick], "Song - Original Mix": [pick]})
+
+    s = upgrade_soundeo([csv_path], str(lib), soundeo=client)
+
+    assert s["upgraded"] == 1 and s["failed"] == 0 and client.downloaded == ["o"]
+    rows = _report(lib)
+    assert rows[1]["action"] == "skip: file already replaced"
+
+
+def test_pick_of_a_different_cut_never_replaces_the_file(tmp_path, monkeypatch):
+    _no_youtube(monkeypatch)
+    lib = _library(tmp_path, "Artist - Far Away Place.aiff")
+    csv_path = _write_csv(tmp_path / "p.csv", [
+        _row("a", "Far Away Place - Rampa Remix", "Artist, Rampa"),
+    ])
+    client = FakeSoundeo({"Far Away Place - Rampa Remix": [
+        _result("r", "Artist", "Far Away Place (Rampa Extended Remix)")]})
+
+    s = upgrade_soundeo([csv_path], str(lib), soundeo=client, threshold=0.5)
+
+    assert s["checked"] == 1 and client.downloaded == []
+    assert (lib / "Artist - Far Away Place.aiff").exists()
+    (row,) = _report(lib)
+    assert row["action"] == "skip: different cut"
+
+
+def test_one_failing_track_does_not_abort_the_pass(tmp_path, monkeypatch):
+    import dj_tools.soundeo_upgrade as su
+
+    _no_youtube(monkeypatch)
+    lib = _library(tmp_path, "Artist - One[U].aiff", "Artist - Two[U].aiff")
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "One", "Artist"), _row("b", "Two", "Artist")])
+    client = FakeSoundeo({"One": [_result("1", "Artist", "One")], "Two": [_result("2", "Artist", "Two")]})
+    real_retire = su.retire_superseded
+
+    def flaky(current, library, new_path):
+        if "One" in current:
+            raise OSError("disk hiccup")
+        return real_retire(current, library, new_path)
+
+    monkeypatch.setattr(su, "retire_superseded", flaky)
+
+    s = upgrade_soundeo([csv_path], str(lib), soundeo=client)
+
+    assert s["failed"] == 1 and s["upgraded"] == 1 and client.downloaded == ["1", "2"]
+    rows = _report(lib)
+    assert rows[0]["action"] == "error: disk hiccup" and rows[1]["action"].startswith("upgraded")
+
+
+def test_checked_tracks_are_skipped_on_rerun_unless_forced_or_file_changed(tmp_path, monkeypatch):
+    _no_youtube(monkeypatch)
+    lib = _library(tmp_path, "Artist - Song (Original Mix).aiff")
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Song", "Artist")])
+    client = FakeSoundeo({"Song": [_result("o", "Artist", "Song (Original Mix)")]})
+
+    upgrade_soundeo([csv_path], str(lib), soundeo=client)
+    assert client.searched == ["Song"]
+
+    s2 = upgrade_soundeo([csv_path], str(lib), soundeo=client)
+    assert client.searched == ["Song"] and s2["previously_checked"] == 1
+    assert (lib / "outputs" / "fetch" / "soundeo_upgrade_checked.json").exists()
+
+    upgrade_soundeo([csv_path], str(lib), soundeo=client, force_lookup=True)
+    assert client.searched == ["Song", "Song"]
+
+    (lib / "Artist - Song (Original Mix).aiff").rename(lib / "Artist - Song (Radio Edit).aiff")
+    s4 = upgrade_soundeo([csv_path], str(lib), soundeo=client)
+    assert client.searched == ["Song", "Song", "Song"] and s4["upgraded"] == 1
