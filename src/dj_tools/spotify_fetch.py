@@ -334,27 +334,47 @@ def scan_library(music_dir: str | os.PathLike) -> list[FileEntry]:
     return index
 
 
+def remixer_tokens(name: str) -> set[str]:
+    """Tokens naming the remixer in a Spotify title: ``Title - X Remix`` / ``Title (X Remix)``."""
+    out: set[str] = set()
+    for segment in re.split(r"\s-\s|[()\[\]]", name):
+        toks = tokens(segment)
+        if "remix" in toks:
+            out |= toks - {"remix"}
+    return out
+
+
 def best_match(track: PlaylistTrack, index: list[FileEntry]) -> tuple[str | None, float]:
     """Return (best_path, score in [0,1]) for a track against the library.
 
-    A match needs the playlist title present in the file AND either an artist
-    match or a distinctive (>=3-token) title — this rejects same-title
-    different-artist collisions while still allowing artist-less filenames.
-    Missing remixer tokens lower coverage, so an alternate remix of a track you
-    only own the original of scores below threshold.
+    Coverage is measured on the title's *core* tokens — the title minus the
+    remixer's and credited artists' names and the word "remix" — so a remixer's
+    other tracks (``Sunrise (Adam Ten Remix)`` vs ``Seven Eleven (Adam Ten
+    Remix)``) or a ``feat.`` credit cannot count as title agreement. A match
+    then needs either an artist match or a distinctive (>=3-token) title, which
+    rejects same-title different-artist collisions while still allowing
+    artist-less filenames.
+
+    A remix is a distinct track: the remixer named in the Spotify title must
+    appear in the file title, and a remix file never satisfies a non-remix
+    title (nor the reverse), so owning ``Song (X Remix)`` does not make ``Song``
+    present and owning ``Song`` does not make ``Song - X Remix`` present.
     """
     t_title = tokens(track.name)
+    remixer = remixer_tokens(track.name)
     artist_tok: set[str] = set()
     for a in track.artists:
         artist_tok |= tokens(a)
+    core = (t_title - remixer - artist_tok - {"remix"}) or t_title
+    wants_remix = "remix" in t_title
 
     best_path: str | None = None
     best_score = 0.0
     for fe in index:
         if not t_title:
             break
-        title_cov = len(t_title & fe.title_tokens) / len(t_title)
-        title_cov_any = len(t_title & fe.all_tokens) / len(t_title)
+        title_cov = len(core & fe.title_tokens) / len(core)
+        title_cov_any = len(core & fe.all_tokens) / len(core)
         title_score = max(title_cov, 0.85 * title_cov_any)
         has_artist = bool(artist_tok) and bool(artist_tok & fe.all_tokens)
         distinctive = len(t_title) >= 3
@@ -372,6 +392,11 @@ def best_match(track: PlaylistTrack, index: list[FileEntry]) -> tuple[str | None
                 score += 0.2
             else:
                 score *= 0.5
+
+        if remixer and not (remixer & fe.title_tokens):
+            score = min(score, 0.45)  # requested remix, file is another cut
+        elif "remix" in fe.title_tokens and not wants_remix:
+            score = min(score, 0.45)  # file is a remix, original requested
 
         if score > best_score:
             best_path, best_score = fe.path, score

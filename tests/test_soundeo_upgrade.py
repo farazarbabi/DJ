@@ -265,18 +265,17 @@ def test_duplicate_rows_for_one_file_do_not_abort_the_pass(tmp_path, monkeypatch
 
 
 def test_pick_of_a_different_cut_never_replaces_the_file(tmp_path, monkeypatch):
+    """Even if Soundeo hands back a remix for an original, the file stays."""
     _no_youtube(monkeypatch)
-    lib = _library(tmp_path, "Artist - Far Away Place.aiff")
-    csv_path = _write_csv(tmp_path / "p.csv", [
-        _row("a", "Far Away Place - Rampa Remix", "Artist, Rampa"),
-    ])
-    client = FakeSoundeo({"Far Away Place - Rampa Remix": [
+    lib = _library(tmp_path, "Artist - Far Away Place (Original Mix).aiff")
+    csv_path = _write_csv(tmp_path / "p.csv", [_row("a", "Far Away Place", "Artist")])
+    client = FakeSoundeo({"Far Away Place": [
         _result("r", "Artist", "Far Away Place (Rampa Extended Remix)")]})
 
-    s = upgrade_soundeo([csv_path], str(lib), soundeo=client, threshold=0.5)
+    s = upgrade_soundeo([csv_path], str(lib), soundeo=client)
 
     assert s["checked"] == 1 and client.downloaded == []
-    assert (lib / "Artist - Far Away Place.aiff").exists()
+    assert (lib / "Artist - Far Away Place (Original Mix).aiff").exists()
     (row,) = _report(lib)
     assert row["action"] == "skip: different cut"
 

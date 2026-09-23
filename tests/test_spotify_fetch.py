@@ -184,6 +184,61 @@ def test_best_match_artistless_filename_distinctive_title(tmp_path):
     assert score >= 0.62
 
 
+def test_best_match_remixer_name_alone_is_not_a_match(tmp_path):
+    """Sunrise (Adam Ten Remix) must not match Seven Eleven (Adam Ten Remix)."""
+    index = _make_library(tmp_path, ["Dor Danino, Yamagucci - Seven Eleven (Adam Ten Remix).aiff"])
+    _path, score = best_match(
+        PlaylistTrack(name="Sunrise - Adam Ten Remix", artists=["Shouse", "Adam Ten"]), index
+    )
+    assert score < 0.62
+
+
+def test_best_match_requested_remix_rejects_plain_original(tmp_path):
+    index = _make_library(tmp_path, ["Xinobi, Vaarwell - Far Away Place.aiff"])
+    _path, score = best_match(
+        PlaylistTrack(name="Far Away Place - Rampa Remix", artists=["Xinobi", "Vaarwell", "Rampa"]),
+        index,
+    )
+    assert score < 0.62
+
+
+def test_best_match_original_request_rejects_remix_file(tmp_path):
+    """Owning only the Adam Ten remix does not make the original present."""
+    index = _make_library(tmp_path, ["Dor Danino, Yamagucci - Seven Eleven (Adam Ten Remix).aiff"])
+    _path, score = best_match(
+        PlaylistTrack(name="Seven Eleven", artists=["Dor Danino", "Yamagucci"]), index
+    )
+    assert score < 0.62
+
+
+def test_best_match_feat_credit_and_remixer_both_present(tmp_path):
+    index = _make_library(tmp_path, ["Niko Schwind, Fran - Good Morning (David August Remix).aiff"])
+    _path, score = best_match(
+        PlaylistTrack(name="Good Morning (feat. Fran) - David August Remix",
+                      artists=["Niko Schwind", "Fran"]),
+        index,
+    )
+    assert score >= 0.9
+
+
+def test_best_match_credited_remixer_extended_mix_counts_as_the_remix(tmp_path):
+    index = _make_library(tmp_path, ["Eli & Fur - Night Blooming Jasmine (Rodriguez Jr. Extended Mix).aiff"])
+    _path, score = best_match(
+        PlaylistTrack(name="Night Blooming Jasmine - Rodriguez Jr. Remix",
+                      artists=["Eli & Fur", "Rodriguez Jr."]),
+        index,
+    )
+    assert score >= 0.62
+
+
+def test_best_match_version_word_partial_still_present(tmp_path):
+    index = _make_library(tmp_path, ["Depart - Man Dies Alone (Extended).aiff"])
+    _path, score = best_match(
+        PlaylistTrack(name="Man Dies Alone - Short Version", artists=["Depart"]), index
+    )
+    assert score >= 0.62
+
+
 def test_classify_tracks_splits_present_and_missing(tmp_path):
     index = _make_library(tmp_path, ["Adele - Skyfall (Original Mix).aiff"])
     tracks = [

@@ -328,8 +328,12 @@ It also provides `dj fetch-missing`, which fills gaps from Spotify playlists:
 
 1. parses one or more Exportify-style Spotify playlist CSVs (deduped by track URI)
 2. fuzzy-matches each track against the audio files already in `--library`,
-   requiring artist agreement so unrelated same-title tracks and alternate
-   remixes of a track you only own the original of count as missing
+   requiring artist agreement so unrelated same-title tracks count as missing.
+   Remixes are distinct tracks: the remixer named in the Spotify title must
+   appear in the filename, a remix you own never stands in for the original
+   (nor the reverse), and remixer/feat. names don't count as title agreement —
+   so `Sunrise (Adam Ten Remix)` is missing even if you own another Adam Ten
+   remix
 3. downloads the missing tracks from **Soundeo first, YouTube as fallback**:
    - **Soundeo** (your music-pool subscription) is used when
      `SOUNDEO_USER`/`SOUNDEO_PASS` are set in `.env` and `--format aiff` (the
