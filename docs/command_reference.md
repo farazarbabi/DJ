@@ -38,9 +38,11 @@ This file summarizes the current repo command surface and the options that matte
 
 | Command | What It Does |
 | --- | --- |
-| `dj run [PATH ...]` | Runs the full pipeline on one or more audio files/directories, defaulting to `./files` when no path is supplied. |
+| `dj run [PATH ...]` | Runs the full pipeline on one or more audio files/directories, defaulting to `D:\Music` when no path is supplied. |
 | `dj fetch-missing [CSV ...]` | Standalone Spotify playlist gap-fill command that downloads missing playlist tracks into the chosen library. |
-| `dj vibe-audit [PATH]` | Audits cached vibe score distributions for a library, defaulting to `./files`. |
+| `dj vibe-audit [PATH]` | Audits cached vibe score distributions for a library, defaulting to `D:\Music`. |
+| `dj export-rekordbox [PATH ...]` | Regenerates the Rekordbox XML collection from an existing registry without a full run. |
+| `dj merge-cache DIR [--into DIR]` | Folds another cache directory's `raw_cache.pkl`/`derived_cache.pkl` into the library cache (default `D:\Music\cache`): missing keys are added, duplicates resolved toward the newer file (current tagger version for derived entries), destination files backed up as `*.bak`, source untouched. |
 | `dj --version` | Prints the installed `dj-tools` version. |
 | `dj -v` / `dj --verbose` | Enables debug-style logging with more detail. |
 | `dj -q` / `dj --quiet` | Suppresses normal output and leaves errors only. |
@@ -50,7 +52,7 @@ This file summarizes the current repo command surface and the options that matte
 
 | Option | What It Does |
 | --- | --- |
-| `PATH ...` | Audio files or library directories to process; if omitted, the command processes `./files`. |
+| `PATH ...` | Audio files or library directories to process; if omitted, the command processes `D:\Music`. |
 | `--rekordbox-xml PATH` | Uses a specific Rekordbox XML export instead of auto-detecting the latest XML in the library directory. |
 | `--no-songstats` | Skips Songstats metadata enrichment. |
 | `--no-tags` | Prevents writing COMMENT tags back to audio files. |
@@ -109,7 +111,7 @@ This file summarizes the current repo command surface and the options that matte
 
 | Option | What It Does |
 | --- | --- |
-| `PATH` | Library root to audit, defaulting to `./files`. |
+| `PATH` | Library root to audit, defaulting to `D:\Music`. |
 | `--output PATH` | Sets the registry output directory, defaulting to `<library>/outputs/registry`. |
 
 ## `dj-registry`
@@ -150,7 +152,7 @@ Use `dj-registry` when you want to run registry phases directly instead of the u
 
 | Command/Option | What It Does |
 | --- | --- |
-| `scan [paths ...]` | Scans the supplied paths, defaulting to `./files`. |
+| `scan [paths ...]` | Scans the supplied paths, defaulting to `D:\Music`. |
 | `scan --dry-run` | Previews scan behavior without writing registry updates. |
 | `ingest-rekordbox --xml PATH` | Supplies the Rekordbox XML export to ingest. |
 | `enrich-isrcs --limit N` | Limits Spotify ISRC lookup to `N` tracks. |
@@ -253,7 +255,7 @@ Use `dj-tagger` for direct per-track analysis or tag writing without running the
 
 | Option | What It Does |
 | --- | --- |
-| `PATH ...` | Audio files or directories to process, defaulting to `./files`. |
+| `PATH ...` | Audio files or directories to process, defaulting to `D:\Music`. |
 | `-r` / `--recursive` | Recurses into subdirectories when discovering audio files. |
 | `-n` / `--dry-run` | Analyzes without writing tags; this is the default behavior. |
 | `--write-tags` | Actually writes generated COMMENT tags to files. |
@@ -291,7 +293,7 @@ Use `dj-grouper` directly when you want grouping/recommendations without the who
 
 | Option | What It Does |
 | --- | --- |
-| `PATH ...` | Library files or directories to group, defaulting to `./files`. |
+| `PATH ...` | Library files or directories to group, defaulting to `D:\Music`. |
 | `-r` / `--recursive` | Recurses into subdirectories when discovering audio files. |
 | `-w N` / `--workers N` | Sets parallel feature extraction workers; the default is `1`. |
 | `--write-tags` | Writes grouping-aware tags to file metadata. |

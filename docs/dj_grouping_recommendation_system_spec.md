@@ -24,7 +24,7 @@ dj-grouper run
 
 The grouper reads from:
 
-- the music library (`./files` by default)
+- the music library (`D:\Music` by default)
 - the shared cache in `./cache/`
 - optional registry data in `./outputs/registry/registry_overview.csv`
 - optional feedback in `./outputs/feedback.csv`

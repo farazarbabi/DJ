@@ -53,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- run (all-in-one) ---
     p_run = sub.add_parser("run", help="Run full pipeline: extract -> cluster -> recommend -> output")
-    p_run.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help="Library paths (default: ./files)")
+    p_run.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help=f"Library paths (default: {_DEFAULTS.input_dir})")
     p_run.add_argument("-r", "--recursive", action="store_true")
     p_run.add_argument("-w", "--workers", type=int, default=1, help="Parallel workers for extraction (default: 1)")
     p_run.add_argument("--write-tags", action="store_true", help="Write tags to file metadata")
@@ -79,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- extract ---
     p_extract = sub.add_parser("extract", help="Extract features for all tracks")
-    p_extract.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help="Library paths (default: ./files)")
+    p_extract.add_argument("paths", nargs="*", default=[_DEFAULTS.input_dir], metavar="PATH", help=f"Library paths (default: {_DEFAULTS.input_dir})")
     p_extract.add_argument("-r", "--recursive", action="store_true")
     p_extract.add_argument("-w", "--workers", type=int, default=1, help="Parallel workers (default: 1)")
     p_extract.add_argument("--cache-dir", default=_DEFAULTS.cache_dir)

@@ -58,19 +58,12 @@ class RegistryConfig:
 
     @property
     def cache_root(self) -> str:
-        """Directory for shared raw/derived caches.
-
-        User-facing runs operate on a library root, so their cache should live
-        beside that library rather than depend on the process working directory.
-        The historical default ``./files`` keeps using ``./cache`` for tests and
-        direct module callers that do not configure a real library root.
-        """
+        """Directory for the shared raw/derived caches (see ``cache_dir_for``)."""
         if self.cache_dir:
             return self.cache_dir
-        root = self.library_roots[0] if self.library_roots else ""
-        if root and os.path.normpath(root) not in {os.path.normpath("./files"), "files"}:
-            return os.path.join(root, "cache")
-        return os.path.join("cache")
+        from dj_tagger.universal_cache import cache_dir_for
+
+        return cache_dir_for(self.library_roots[0] if self.library_roots else "files")
 
     @property
     def raw_cache_path(self) -> str:

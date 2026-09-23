@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import pickle
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -286,26 +287,11 @@ class UniversalCache:
 
     def _load_file(self, path: str) -> bool:
         """Load entries from a single pickle file. Returns True on success."""
-        try:
-            with open(path, "rb") as f:
-                raw = pickle.load(f)
-            if not isinstance(raw, dict) or raw.get("_version") != CACHE_VERSION:
-                return False
-            entries = raw.get("entries", {})
-            for k, v in entries.items():
-                if isinstance(v, CacheEntry):
-                    self._entries[k] = v
-                elif isinstance(v, dict) and "data" in v:
-                    self._entries[k] = CacheEntry(
-                        version=v.get("version", "1"),
-                        mtime=v.get("mtime", 0.0),
-                        data=v["data"],
-                    )
+        entries = _read_entries(path)
+        self._entries.update(entries)
+        if entries:
             logger.info("Loaded %d entries from %s", len(entries), path)
-            return bool(entries)
-        except Exception as e:
-            logger.warning("Could not load %s: %s", path, e)
-            return False
+        return bool(entries)
 
     def save(self) -> None:
         """Save cache to disk atomically. Writes two files: raw + derived."""
@@ -322,20 +308,7 @@ class UniversalCache:
             self._dirty_derived = False
 
     def _save_file(self, path: str, entries: dict) -> None:
-        """Atomically write entries to a single pickle file."""
-        cache_dir = os.path.dirname(path) or "."
-        os.makedirs(cache_dir, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=cache_dir, suffix=".pkl.tmp")
-        os.close(tmp_fd)
-        try:
-            with open(tmp_path, "wb") as f:
-                pickle.dump({"_version": CACHE_VERSION, "entries": entries}, f)
-            os.replace(tmp_path, path)
-            logger.info("Cache saved: %d entries to %s", len(entries), path)
-        except Exception:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            raise
+        _write_entries(path, entries)
 
     def force_save(self) -> None:
         """Save even if not dirty."""
@@ -383,3 +356,98 @@ def reset_cache() -> None:
     """Reset the singleton (for tests)."""
     global _instance
     _instance = None
+
+
+# ── Cache location and merging ───────────────────────────────────────────────
+
+def cache_dir_for(library_root: str) -> str:
+    """Shared cache directory for a library root.
+
+    ``<root>/cache`` so the cache travels with the library instead of depending
+    on the working directory; the historical default ``./files`` root keeps
+    ``./cache`` for tests and direct module callers.
+    """
+    if os.path.normpath(library_root) in {"files", os.path.normpath("./files")}:
+        return "cache"
+    return os.path.join(library_root, "cache")
+
+
+def _read_entries(path: str) -> dict[str, CacheEntry]:
+    """Entries of one cache pickle; {} when missing, unreadable or another version."""
+    try:
+        with open(path, "rb") as f:
+            raw = pickle.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning("Could not load %s: %s", path, e)
+        return {}
+    if not isinstance(raw, dict) or raw.get("_version") != CACHE_VERSION:
+        return {}
+    entries: dict[str, CacheEntry] = {}
+    for k, v in raw.get("entries", {}).items():
+        if isinstance(v, CacheEntry):
+            entries[k] = v
+        elif isinstance(v, dict) and "data" in v:
+            entries[k] = CacheEntry(version=v.get("version", "1"),
+                                    mtime=v.get("mtime", 0.0), data=v["data"])
+    return entries
+
+
+def _write_entries(path: str, entries: dict[str, CacheEntry]) -> None:
+    """Atomically write entries to a single pickle file."""
+    cache_dir = os.path.dirname(path) or "."
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=cache_dir, suffix=".pkl.tmp")
+    os.close(tmp_fd)
+    try:
+        with open(tmp_path, "wb") as f:
+            pickle.dump({"_version": CACHE_VERSION, "entries": entries}, f)
+        os.replace(tmp_path, path)
+        logger.info("Cache saved: %d entries to %s", len(entries), path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def _prefer_src(src: CacheEntry, dst: CacheEntry, current_tagger: str | None) -> bool:
+    """Whether a merged ``src`` entry should replace the ``dst`` one for the same key.
+
+    A derived entry stamped with the current tagger version beats a stale one;
+    otherwise the entry analysed from the newer file (greater mtime) wins, and a
+    tie keeps ``dst``.
+    """
+    if src.version != dst.version and current_tagger in (src.version, dst.version):
+        return src.version == current_tagger
+    return src.mtime > dst.mtime
+
+
+def merge_cache_dirs(src_dir: str, dst_dir: str) -> dict[str, dict[str, int]]:
+    """Merge the raw/derived caches of ``src_dir`` into ``dst_dir``; ``src`` is untouched.
+
+    Keys missing from ``dst`` are copied; keys in both are resolved by
+    :func:`_prefer_src`. A ``dst`` file about to be rewritten is first copied to
+    ``<name>.bak``. Returns ``{file: {"added", "replaced", "total"}}``.
+    """
+    current_tagger = DERIVED_VERSIONS.get("tagger")
+    stats: dict[str, dict[str, int]] = {}
+    for name in ("raw_cache.pkl", "derived_cache.pkl"):
+        src_path, dst_path = os.path.join(src_dir, name), os.path.join(dst_dir, name)
+        dst_entries = _read_entries(dst_path)
+        added = replaced = 0
+        for key, entry in _read_entries(src_path).items():
+            current = dst_entries.get(key)
+            if current is None:
+                added += 1
+            elif _prefer_src(entry, current, current_tagger):
+                replaced += 1
+            else:
+                continue
+            dst_entries[key] = entry
+        if added or replaced:
+            if os.path.exists(dst_path):
+                shutil.copy2(dst_path, dst_path + ".bak")
+            _write_entries(dst_path, dst_entries)
+        stats[name] = {"added": added, "replaced": replaced, "total": len(dst_entries)}
+    return stats

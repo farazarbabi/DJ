@@ -11,11 +11,12 @@ import os
 import sys
 import uuid
 
+from dj_tagger import DEFAULT_LIBRARY_DIR
+from dj_tagger.universal_cache import cache_dir_for
+
 from . import __version__
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_FETCH_LIBRARY = r"D:\Music"
 
 
 def _setup_logging(verbose: bool, quiet: bool) -> None:
@@ -51,14 +52,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     p_va = sub.add_parser("vibe-audit", help="Audit vibe score distributions from cache")
-    p_va.add_argument("path", nargs="?", default="./files", metavar="PATH",
-                      help="Library root (default: ./files)")
+    p_va.add_argument("path", nargs="?", default=DEFAULT_LIBRARY_DIR, metavar="PATH",
+                      help="Library root (default: D:\Music)")
     p_va.add_argument("--output", default=None, help="Registry output dir (default: <library>/outputs/registry)")
 
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument(
-        "paths", nargs="*", default=["./files"], metavar="PATH",
-        help="Audio files or directories to process (default: ./files)",
+        "paths", nargs="*", default=[DEFAULT_LIBRARY_DIR], metavar="PATH",
+        help="Audio files or directories to process (default: D:\Music)",
     )
     p_run.add_argument("--rekordbox-xml", dest="rekordbox_xml", default=None,
                        help="Rekordbox XML path (default: auto-detect latest .xml in library dir)")
@@ -145,8 +146,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "(not required with --prune-only)",
     )
     p_fetch.add_argument(
-        "--library", default=DEFAULT_FETCH_LIBRARY, metavar="DIR",
-        help=f"Library dir to check for existing tracks and download into (default: {DEFAULT_FETCH_LIBRARY})",
+        "--library", default=DEFAULT_LIBRARY_DIR, metavar="DIR",
+        help=f"Library dir to check for existing tracks and download into (default: {DEFAULT_LIBRARY_DIR})",
     )
     p_fetch.add_argument(
         "--prune-only", action="store_true",
@@ -206,14 +207,25 @@ def _build_parser() -> argparse.ArgumentParser:
              "rekordbox-xml import bridge",
     )
     p_rbx.add_argument(
-        "paths", nargs="*", default=["./files"], metavar="PATH",
-        help="Library root(s) (default: ./files) — used to locate outputs/registry "
+        "paths", nargs="*", default=[DEFAULT_LIBRARY_DIR], metavar="PATH",
+        help="Library root(s) (default: D:\Music) — used to locate outputs/registry "
              "and outputs/playlists",
     )
     p_rbx.add_argument("--output", default=None,
                        help="Registry output dir (default: <library>/outputs/registry)")
     p_rbx.add_argument("--out", dest="rekordbox_collection_out", default=None, metavar="XML",
                        help="Output XML path (default: <playlists>/collection.xml)")
+
+    p_merge = sub.add_parser(
+        "merge-cache",
+        help="Fold another cache directory's raw/derived caches into the library cache",
+    )
+    p_merge.add_argument("source", metavar="DIR",
+                         help="Cache directory to merge from (e.g. an old ./cache); left unchanged")
+    p_merge.add_argument("--into", default=cache_dir_for(DEFAULT_LIBRARY_DIR), metavar="DIR",
+                         help="Destination cache directory (default: %(default)s). For duplicate "
+                              "keys the entry from the newer file wins (current tagger version "
+                              "wins for derived entries); destination files are backed up as *.bak")
 
     return parser
 
@@ -243,7 +255,9 @@ def _run_songstats(config, store, obs_cache, *, show_progress: bool = False) -> 
 
     try:
         from dj_registry.adapters.spotify_isrc import enrich_isrcs
-        summary["isrcs_enriched"] = enrich_isrcs(store, show_progress=show_progress)
+        summary["isrcs_enriched"] = enrich_isrcs(
+            store, show_progress=show_progress, cache_path=config.raw_cache_path,
+        )
     except Exception:
         logger.warning("Songstats: ISRC enrichment failed, continuing", exc_info=True)
 
@@ -302,7 +316,7 @@ def _grouper_groups_csv_path(paths: list[str]) -> str:
     """Return the groups.csv path that dj-grouper will write for these paths."""
     from pathlib import Path
 
-    input_path = Path(paths[0] if paths else "./files").resolve()
+    input_path = Path(paths[0] if paths else DEFAULT_LIBRARY_DIR).resolve()
     project_dir = Path.cwd().resolve()
     try:
         input_path.relative_to(project_dir)
@@ -315,7 +329,7 @@ def _playlists_dir(paths: list[str]) -> str:
     """Return the playlists/ directory that mirrors dj-grouper's --playlists default."""
     from pathlib import Path
 
-    input_path = Path(paths[0] if paths else "./files").resolve()
+    input_path = Path(paths[0] if paths else DEFAULT_LIBRARY_DIR).resolve()
     project_dir = Path.cwd().resolve()
     try:
         input_path.relative_to(project_dir)
@@ -449,159 +463,7 @@ def _run_cue_work(config, store, args: argparse.Namespace, *, show_progress: boo
     return summary
 
 
-def _run_vibe_audit(output_dir: str = "./files/outputs/registry") -> int:
-    """Audit canonical vibe output for the current registry and compare it to fresh derivation."""
-    return _run_vibe_audit_canonical(output_dir)
-
-    # Collect all DSP entries
-    dsp_entries: list[tuple[str, str, dict]] = []  # (key_prefix, name, dsp_data)
-    for key, entry in ucache._entries.items():
-        if not key.endswith("|dsp"):
-            continue
-        if not isinstance(entry.data, dict):
-            continue
-        # key format: "filename|duration|dsp"
-        parts = key.rsplit("|", 1)  # ["filename|duration", "dsp"]
-        prefix = parts[0]  # "filename|duration"
-        name_parts = prefix.split("|")
-        name = name_parts[0] if name_parts else prefix
-        dsp_entries.append((prefix, name, entry.data))
-
-    from dj_tagger.moods import MOOD_LABELS, normalize_mood_code
-
-    # Check tagger cache state for each DSP entry
-    n_tagger_hit = 0
-    n_tagger_stale = 0
-    n_tagger_miss = 0
-    cached_vibes: list[str] = []
-    for prefix, name, dsp in dsp_entries:
-        tagger_key = f"{prefix}|tagger"
-        tagger_entry = ucache._entries.get(tagger_key)
-        if tagger_entry is None:
-            n_tagger_miss += 1
-        elif tagger_entry.version != current_ver:
-            n_tagger_stale += 1
-        else:
-            n_tagger_hit += 1
-            if isinstance(tagger_entry.data, dict):
-                cached_vibes.append(normalize_mood_code(tagger_entry.data.get("mood") or tagger_entry.data.get("vibe", "?")))
-
-    print(f"Tagger cache: {n_tagger_hit} current, {n_tagger_stale} stale, {n_tagger_miss} missing")
-    if cached_vibes:
-        from collections import Counter as C
-        print(f"Cached tagger moods/vibes: {dict(C(cached_vibes).most_common())}")
-
-    # Load Songstats features from raw cache (same path as pipeline)
-    # Build filename → ISRC mapping from registry, then look up songstats by ISRC
-    ss_by_name: dict[str, dict[str, float]] = {}
-    try:
-        from dj_registry.store.csv_store import CsvStore
-        store = CsvStore(output_dir)
-        tracks_list = store.load_tracks()
-        files_list = store.load_files()
-        file_by_id = {f.file_id: f for f in files_list}
-        for t in tracks_list:
-            if not t.isrc_canonical or not t.primary_file_id:
-                continue
-            frec = file_by_id.get(t.primary_file_id)
-            if not frec:
-                continue
-            data = ucache.get(f"isrc:{t.isrc_canonical}|songstats")
-            if not data or not isinstance(data, dict):
-                continue
-            af: dict[str, float] = {}
-            for feat_key in ("valence", "instrumentalness", "energy", "liveness", "acousticness"):
-                val = data.get(feat_key, "")
-                if val != "" and val is not None:
-                    try:
-                        af[feat_key] = float(val)
-                    except (ValueError, TypeError):
-                        pass
-            if af:
-                ss_by_name[frec.file_name] = af
-    except Exception as e:
-        print(f"  (Songstats lookup failed: {e})")
-
-    # Run derive_vibe on each track (fresh, from DSP)
-    labels: list[str] = []
-    all_scores: dict[str, list[float]] = {v: [] for v in MOOD_LABELS}
-    near_misses: dict[str, int] = {v: 0 for v in all_scores}
-    ss_count = 0
-    mismatches: list[tuple[str, str, str]] = []  # (name, cached_vibe, derived_vibe)
-
-    for prefix, name, dsp in dsp_entries:
-        af = ss_by_name.get(name)
-        if af:
-            ss_count += 1
-        result = derive_vibe(dsp, audio_features=af)
-        derived_label = result["vibe"]
-        labels.append(derived_label)
-        for v, score in result["vibe_scores"].items():
-            all_scores[v].append(score)
-
-        # Check if cached tagger mood/vibe matches
-        tagger_key = f"{prefix}|tagger"
-        tagger_entry = ucache._entries.get(tagger_key)
-        if tagger_entry and isinstance(tagger_entry.data, dict):
-            cached_label = normalize_mood_code(tagger_entry.data.get("mood") or tagger_entry.data.get("vibe", ""))
-            if cached_label and cached_label != derived_label:
-                mismatches.append((name, cached_label, derived_label))
-
-        if result["vibe"] == "MEL":
-            mel_score = result["vibe_scores"]["MEL"]
-            for v, score in result["vibe_scores"].items():
-                if v != "MEL" and mel_score - score < 0.10:
-                    near_misses[v] += 1
-
-    if not dsp_entries:
-        print("No cached DSP entries found. Run 'dj run' first.")
-        return 1
-
-    n = len(dsp_entries)
-    print(f"\nMood/Vibe Audit: {n} tracks ({ss_count} with Songstats data)\n")
-
-    # Label distribution (from fresh derive_vibe)
-    print("Label Distribution (fresh derive_vibe):")
-    from collections import Counter
-    counts = Counter(labels)
-    for v in MOOD_LABELS:
-        c = counts.get(v, 0)
-        pct = 100.0 * c / n
-        bar = "#" * int(pct / 2)
-        print(f"  {v:5s}  {c:4d}  ({pct:5.1f}%)  {bar}")
-
-    # Mismatches between cached tagger and fresh derive
-    if mismatches:
-        print(f"\nMismatches (cached tagger vs fresh derive): {len(mismatches)}")
-        for name, cached, derived in mismatches[:10]:
-            print(f"  {name}: cached={cached}, derive={derived}")
-        if len(mismatches) > 10:
-            print(f"  ... and {len(mismatches) - 10} more")
-
-    # Score stats
-    print("\nScore Statistics (mean / p25 / p50 / p75 / max):")
-    for v in MOOD_LABELS:
-        arr = np.array(all_scores[v])
-        if len(arr) == 0:
-            continue
-        print(f"  {v:5s}  {np.mean(arr):.3f} / {np.percentile(arr, 25):.3f} / "
-              f"{np.percentile(arr, 50):.3f} / {np.percentile(arr, 75):.3f} / {np.max(arr):.3f}")
-
-    # Near-miss analysis
-    mel_count = counts.get("MEL", 0)
-    if mel_count > 0:
-        print(f"\nNear-Misses (non-MEL vibes that lost to MEL by <0.10):")
-        for v in MOOD_LABELS:
-            if v == "MEL":
-                continue
-            c = near_misses[v]
-            if c > 0:
-                print(f"  {v:5s}  {c:4d}  ({100.0 * c / mel_count:.1f}% of MEL tracks)")
-
-    return 0
-
-
-def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> int:
+def _run_vibe_audit(output_dir: str, cache_path: str) -> int:
     """Audit the same registry-backed vibe truth that `dj run` writes."""
     from collections import Counter
 
@@ -613,7 +475,7 @@ def _run_vibe_audit_canonical(output_dir: str = "./files/outputs/registry") -> i
     from dj_tagger.moods import MOOD_LABELS, normalize_mood_code
     from dj_tagger.universal_cache import DERIVED_VERSIONS, get_cache, quick_duration
 
-    ucache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+    ucache = get_cache(cache_path)
     store = CsvStore(output_dir)
     tracks = store.load_tracks()
     files = store.load_files()
@@ -786,7 +648,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         from .spotify_fetch import default_playlists_dir, fetch_missing, resolve_library_dir
 
         t0 = time.perf_counter()
-        library_dir = resolve_library_dir(args.paths[0] if args.paths else "./files")
+        library_dir = resolve_library_dir(args.paths[0] if args.paths else DEFAULT_LIBRARY_DIR)
         explicit_playlists = getattr(args, "fetch_missing", None)
         default_playlists = default_playlists_dir(library_dir)
         playlists = explicit_playlists or [default_playlists]
@@ -1085,12 +947,28 @@ def _run_fetch_missing(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_merge_cache(args: argparse.Namespace) -> int:
+    """Fold another cache directory into the library cache."""
+    from dj_tagger.universal_cache import merge_cache_dirs
+
+    if not os.path.isdir(args.source):
+        logger.error("merge-cache: source dir not found: %s", args.source)
+        return 1
+    stats = merge_cache_dirs(args.source, args.into)
+    for name, s in stats.items():
+        logger.info("merge-cache: %s — added %d, replaced %d, now %d entries",
+                    name, s["added"], s["replaced"], s["total"])
+    logger.info("merge-cache: %s merged into %s (previous files kept as *.bak)",
+                args.source, args.into)
+    return 0
+
+
 def _run_export_rekordbox(args: argparse.Namespace) -> int:
     """Generate a Rekordbox XML collection from an existing registry."""
     from dj_registry.store.csv_store import CsvStore
     from dj_registry.sync.rekordbox_export import generate_rekordbox_collection
 
-    paths = getattr(args, "paths", None) or ["./files"]
+    paths = getattr(args, "paths", None) or [DEFAULT_LIBRARY_DIR]
     output_dir = args.output or os.path.join(paths[0], "outputs", "registry")
     store = CsvStore(output_dir)
     playlists_root = _playlists_dir(paths)
@@ -1120,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(raw)
         return 0
     # Default to "run" when no subcommand is given
-    known_commands = {"run", "vibe-audit", "fetch-missing", "export-rekordbox"}
+    known_commands = {"run", "vibe-audit", "fetch-missing", "export-rekordbox", "merge-cache"}
     if not raw or raw[0] not in known_commands:
         raw = ["run"] + list(raw)
 
@@ -1132,14 +1010,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "vibe-audit":
         try:
-            library = getattr(args, "path", "./files")
+            library = getattr(args, "path", DEFAULT_LIBRARY_DIR)
             output = getattr(args, "output", None) or os.path.join(library, "outputs", "registry")
-            return _run_vibe_audit(output)
+            return _run_vibe_audit(output, os.path.join(cache_dir_for(library), "raw_cache.pkl"))
         except KeyboardInterrupt:
             return 130
         except Exception:
             logger.error("Fatal error", exc_info=True)
             return 1
+
+    if args.command == "merge-cache":
+        return _run_merge_cache(args)
 
     if args.command == "run":
         try:

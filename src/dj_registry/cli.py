@@ -8,6 +8,8 @@ import logging
 import sys
 from pathlib import Path
 
+from dj_tagger import DEFAULT_LIBRARY_DIR
+
 from . import __version__
 from .config import RegistryConfig
 from .store.csv_store import CsvStore
@@ -660,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # scan
     p_scan = sub.add_parser("scan", help="Scan library files")
-    p_scan.add_argument("paths", nargs="*", default=["./files"])
+    p_scan.add_argument("paths", nargs="*", default=[DEFAULT_LIBRARY_DIR])
     p_scan.add_argument("--dry-run", action="store_true")
     p_scan.add_argument("--output", default="./outputs/registry")
     add_no_progress(p_scan)
@@ -884,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # run (full pipeline)
     p_run = sub.add_parser("run", help="Run full pipeline")
-    p_run.add_argument("paths", nargs="*", default=["./files"])
+    p_run.add_argument("paths", nargs="*", default=[DEFAULT_LIBRARY_DIR])
     p_run.add_argument("--rekordbox-xml", dest="rekordbox_xml")
     p_run.add_argument("--songstats", action="store_true")
     p_run.add_argument("--songstats-limit", type=int)
@@ -893,7 +895,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--no-essentia", action="store_true")
     p_run.add_argument("-w", "--workers", type=int, default=0,
                        help="Analysis workers (0 = auto; 1 = serial)")
-    p_run.add_argument("--output", default="./outputs/registry")
+    p_run.add_argument("--output", default=None,
+                       help="Registry output dir (default: <library>/outputs/registry)")
     add_no_progress(p_run)
 
     args = parser.parse_args(argv)
@@ -902,7 +905,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.command:
         # Default to run
         args.command = "run"
-        args.paths = ["./files"]
+        args.paths = [DEFAULT_LIBRARY_DIR]
         args.rekordbox_xml = None
         args.songstats = False
         args.songstats_limit = None
@@ -910,7 +913,7 @@ def main(argv: list[str] | None = None) -> int:
         args.write_tags = False
         args.no_essentia = False
         args.workers = 1
-        args.output = "./outputs/registry"
+        args.output = None  # derived from the library path by _build_config
 
     commands = {
         "scan": cmd_scan,

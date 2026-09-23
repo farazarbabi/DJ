@@ -39,6 +39,10 @@ dj run "D:\\Music" --rekordbox-collection "D:\\Music\\rb.xml"  # override path
 dj run "D:\\Music" --no-rekordbox-collection                   # skip it
 dj export-rekordbox "D:\\Music"                                # regenerate from an existing registry
 
+# Fold another cache dir (e.g. an old repo-root ./cache) into the library cache
+dj merge-cache .\\cache                      # into D:\\Music\\cache (default)
+dj merge-cache .\\cache --into "E:\\Music\\cache"
+
 # Fetch tracks from Spotify playlist CSVs that aren't in the library yet
 dj fetch-missing playlist.csv --library "D:\\Music"
 dj fetch-missing ./playlists --library "D:\\Music" --dry-run
@@ -107,12 +111,19 @@ in the registry (`canonical_bpm` / `tagger_bpm`) regardless.
 
 ## Cache Architecture
 
-Shared cache lives in `<library>/cache/` when `dj run` / `dj-registry` /
-`dj-grouper` operate on a real library root (`RegistryConfig.cache_root`,
-`RegistryConfig.raw_cache_path`); the historical `./cache/` is used for the
-default `./files` root or when `cache_dir` is set explicitly. Known gap:
-Songstats/Spotify-ISRC enrichment, cue analysis and `dj vibe-audit` still open
-the cwd-relative `./cache/raw_cache.pkl` directly.
+Shared cache lives in `<library>/cache/` — `dj_tagger.universal_cache.cache_dir_for(root)`,
+surfaced as `RegistryConfig.cache_root` / `raw_cache_path` — so it travels with
+the library instead of depending on the working directory. Every CLI (`dj`,
+`dj-registry`, `dj-grouper`, `dj-tagger`) defaults to the `D:\Music` library
+(`dj_tagger.DEFAULT_LIBRARY_DIR`), hence `D:\Music\cache\` in practice; the
+historical `./cache/` is used only for the `./files` root (tests, module
+callers) or an explicit `cache_dir`. Every reader/writer must take the path from
+config (`get_cache(config.raw_cache_path)`): `get_cache()` is a singleton that is
+*replaced* when a different path is requested, so one hardcoded
+`get_cache("cache/raw_cache.pkl")` silently splits the cache across two files.
+`dj merge-cache SRC_DIR [--into DIR]` folds another cache directory into the
+library cache (newer file mtime wins, current tagger version wins for derived
+entries, destination backed up as `*.bak`).
 
 Files:
 
@@ -286,7 +297,7 @@ Do not add instructions that tell contributors to bump a manual cache version.
 
 ## Testing Notes
 
-- current suite size: `618` tests collected by `pytest --collect-only -q`
+- current suite size: `623` tests collected by `pytest --collect-only -q`
 - tests use synthetic audio fixtures
 - registry, tagger, grouper, and cache behaviors all have direct coverage
 

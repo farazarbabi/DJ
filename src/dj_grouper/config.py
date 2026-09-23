@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from dj_tagger import DEFAULT_LIBRARY_DIR
+
 
 @dataclass
 class GrouperConfig:
@@ -63,7 +65,7 @@ class GrouperConfig:
     bad_pair_factor: float = 0.5
 
     # --- Default paths ---
-    input_dir: str = "./files"
+    input_dir: str = DEFAULT_LIBRARY_DIR
     output_dir: str = "./outputs"
     cache_dir: str = "./cache"
     feedback_file: str = "./outputs/feedback.csv"

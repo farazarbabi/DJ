@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from . import __version__
+from . import DEFAULT_LIBRARY_DIR, __version__
 from .constants import SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
@@ -48,9 +48,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "paths",
         nargs="*",
-        default=["files"],
+        default=[DEFAULT_LIBRARY_DIR],
         metavar="PATH",
-        help="Audio files or directories to process (default: ./files)",
+        help=f"Audio files or directories to process (default: {DEFAULT_LIBRARY_DIR})",
     )
     parser.add_argument(
         "-r", "--recursive",
@@ -163,8 +163,13 @@ def _quick_duration(path: str) -> float | None:
     return None
 
 
-def _resolve_cache_path() -> str:
-    return os.path.join("cache", "tagger_cache.pkl")
+def _resolve_cache_path(paths: list[str]) -> str:
+    """Tagger cache view beside the library the first path belongs to."""
+    from .universal_cache import cache_dir_for
+
+    first = Path(paths[0]) if paths else Path(DEFAULT_LIBRARY_DIR)
+    library = first if first.is_dir() else first.parent
+    return os.path.join(cache_dir_for(str(library)), "tagger_cache.pkl")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -266,7 +271,7 @@ def _resolve_via_registry(
     config.library_roots = roots
 
     store = CsvStore(config.output_dir)
-    obs_cache = ObsCache()
+    obs_cache = ObsCache(config.raw_cache_path)
 
     # Scan + link (ensures files and tracks exist in registry)
     scan_files(config, store, obs_cache=obs_cache)
@@ -378,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Cache setup ---
     use_cache = not args.no_cache
-    cache_path = _resolve_cache_path()
+    cache_path = _resolve_cache_path(args.paths)
 
     if args.clear_cache:
         if os.path.exists(cache_path):

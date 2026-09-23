@@ -10,7 +10,7 @@ import time
 import httpx
 
 from dj_tagger.cache import load_cache, save_cache, cache_key
-from dj_tagger.universal_cache import get_cache
+from dj_tagger.universal_cache import DEFAULT_RAW_PATH, get_cache
 
 from ..progress import ProgressBar
 from ..store.csv_store import CsvStore
@@ -246,15 +246,18 @@ class SpotifyClient:
             raise SpotifyTransientError(f"find_id_by_isrc({isrc}) failed: {e}") from e
 
 
-TAGGER_CACHE_PATH = os.path.join("cache", "tagger_cache.pkl")
-
-
-def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bool = False) -> int:
+def enrich_isrcs(
+    store: CsvStore,
+    limit: int | None = None,
+    *,
+    show_progress: bool = False,
+    cache_path: str = DEFAULT_RAW_PATH,
+) -> int:
     """Look up ISRCs from Spotify for tracks missing them.
 
     Reads SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET from environment.
-    Writes ISRCs to both the registry CSV and the shared tagger cache.
-    Returns number of tracks enriched.
+    Writes ISRCs to both the registry CSV and the shared cache at ``cache_path``
+    (``RegistryConfig.raw_cache_path``). Returns number of tracks enriched.
     """
     client_id = os.environ.get("SPOTIFY_CLIENT_ID", "")
     client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
@@ -273,9 +276,10 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
         if f.is_primary_file and f.track_id:
             file_by_track[f.track_id] = f
 
-    # Load shared tagger cache
-    tagger_cache = load_cache(TAGGER_CACHE_PATH)
-    raw_cache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+    # The tagger cache is a view over the same directory's raw/derived files.
+    tagger_cache_path = os.path.join(os.path.dirname(cache_path), "tagger_cache.pkl")
+    tagger_cache = load_cache(tagger_cache_path)
+    raw_cache = get_cache(cache_path)
 
     # Check cache first — skip tracks whose file already has an ISRC cached
     candidates = []
@@ -367,7 +371,7 @@ def enrich_isrcs(store: CsvStore, limit: int | None = None, *, show_progress: bo
     progress.finish()
     store.save_tracks(tracks)
     if cache_dirty:
-        save_cache(tagger_cache, TAGGER_CACHE_PATH)
+        save_cache(tagger_cache, tagger_cache_path)
     raw_cache.save()
 
     total = cache_hits + enriched

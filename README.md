@@ -53,7 +53,7 @@ Python `>=3.10`.
 
 ```text
 DJ/
-  files/                    default library input
+  files/                    sample library (every CLI defaults to D:\Music)
   cache/                    shared caches for the default ./files root
     raw_cache.pkl           (a real library root uses <library>/cache/ instead)
     derived_cache.pkl
@@ -121,6 +121,9 @@ dj run "D:\\Music"                                            # writes collectio
 dj run "D:\\Music" --rekordbox-collection "D:\\Music\\rb.xml"  # override output path
 dj run "D:\\Music" --no-rekordbox-collection                  # skip it
 dj export-rekordbox "D:\\Music"                               # regenerate from an existing registry (no full run)
+
+# Fold an old cache directory into the library cache (D:\Music\cache by default)
+dj merge-cache .\\cache
 ```
 
 The fully standalone route (writing a CDJ USB database with no Rekordbox at all)

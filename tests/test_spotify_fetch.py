@@ -1229,7 +1229,7 @@ def test_forget_not_found_dry_run_keeps_entries(tmp_path):
 
 
 def test_cli_fetch_missing_default_library():
-    from dj_tools.cli import DEFAULT_FETCH_LIBRARY, _build_parser
+    from dj_tools.cli import DEFAULT_LIBRARY_DIR as DEFAULT_FETCH_LIBRARY, _build_parser
     args = _build_parser().parse_args(["fetch-missing", "playlist.csv"])
     assert args.library == DEFAULT_FETCH_LIBRARY == r"D:\Music"
 

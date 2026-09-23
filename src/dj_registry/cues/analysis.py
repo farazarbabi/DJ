@@ -96,7 +96,7 @@ def analyze_rekordbox_cues(
     )
 
     progress = ProgressBar(len(matches), label="Cue analysis", enabled=show_progress)
-    ucache = cache_mod.get_cache(os.path.join("cache", "raw_cache.pkl"))
+    ucache = cache_mod.get_cache(config.raw_cache_path)
     since_cache_checkpoint = 0
     for index, match in enumerate(matches, start=1):
         frec = match.file_record

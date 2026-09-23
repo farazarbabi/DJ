@@ -132,7 +132,7 @@ def ingest_songstats(
     new_obs: list[SourceObservation] = []
     new_payloads: list[PayloadIndexEntry] = []
     success_count = 0
-    lookup_cache = get_cache(os.path.join("cache", "raw_cache.pkl"))
+    lookup_cache = get_cache(config.raw_cache_path)
 
     cache_hits = 0
     cached_not_found = 0
